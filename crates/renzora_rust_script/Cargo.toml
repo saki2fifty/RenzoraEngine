@@ -43,6 +43,20 @@ renzora_plugin_build = { path = "../renzora_plugin_build" }
 # execution model.
 renzora_scripting = { path = "../renzora_scripting", default-features = false }
 libloading = "0.8"
+# Canonical plugin/script identity. Used by Phase 1 commits 1.2-1.4
+# (recursive walk, watcher reconciliation, alias-aware dispatch).
+# `discovery` enabled so the watcher uses `DiscoveredPath` for both the
+# recursive collector and the filesystem-watch reconcile.
+renzora_identity = { path = "../renzora_identity", features = ["discovery"] }
+# OS-backed filesystem notifications. The script watcher (Phase 1 commit 1.2)
+# replaces the previous flat 0.5 s poll with recursive watches driven by
+# `notify_debouncer_full`, matching the C-ABI plugin hot-reload path's
+# mechanism. `0.7` matches the version used by `renzora_plugin::host::dev`.
+notify-debouncer-full = "0.7"
+
+[dev-dependencies]
+# Tests in `src/discovery.rs` build synthetic project trees under a tempdir.
+tempfile = "3"
 
 [lints]
 workspace = true

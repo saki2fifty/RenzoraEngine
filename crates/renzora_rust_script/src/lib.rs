@@ -59,6 +59,7 @@
 //! edits.
 
 pub mod backend;
+pub mod discovery;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -230,7 +231,10 @@ fn load_static_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool>)
     for (name, f) in &table {
         loaded.entries.insert((*name).to_string(), *f);
     }
-    info!("[rust-script] {} script(s) compiled into this build", table.len());
+    info!(
+        "[rust-script] {} script(s) compiled into this build",
+        table.len()
+    );
 }
 
 /// Every script image loaded this session, and each one's entry point.
@@ -265,12 +269,15 @@ impl LoadedScripts {
 /// On entering the editor rather than at startup, because a project — and
 /// therefore a `scripts/` directory — does not exist before then.
 fn compile_and_load(world: &mut World) {
-    let Some(project) = world.get_resource::<CurrentProject>().map(|p| p.path.clone()) else {
+    let Some(project) = world
+        .get_resource::<CurrentProject>()
+        .map(|p| p.path.clone())
+    else {
         return;
     };
-    // The whole project, not `scripts/` alone — see `collect_project_scripts`
+    // The whole project, not `scripts/` alone — see `discovery::collect_rust_scripts`
     // for why, and for what keeps a non-script `.rs` out of the set.
-    let sources: Vec<PathBuf> = collect_project_scripts(&project);
+    let sources: Vec<PathBuf> = crate::discovery::collect_rust_scripts(&project);
     if sources.is_empty() {
         return;
     }
@@ -288,7 +295,11 @@ fn compile_and_load(world: &mut World) {
     };
 
     for src in sources {
-        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
         // Claim this source's mtime for the watcher BEFORE building it. The
         // watcher decides what to rebuild by comparing against `seen`, and it
         // has never seen anything yet — so without this it noticed every script
@@ -299,12 +310,17 @@ fn compile_and_load(world: &mut World) {
         // Recorded even when the build below fails, matching the watcher's own
         // rule: a script that does not compile stays quiet until it is edited
         // again rather than re-reporting the same error every poll.
-        if let Ok(mtime) = std::fs::metadata(&src).and_then(|m| m.modified()) {
-            world.resource_mut::<watch::ScriptWatcher>().mark_seen(name.clone(), mtime);
+        if let Some(rel) = src.strip_prefix(&project).ok() {
+            let relpath = rel.to_string_lossy().into_owned().replace('\\', "/");
+            world
+                .resource_mut::<watch::ScriptWatcher>()
+                .mark_seen(relpath);
         }
         match build_to_path(&sdk, &project, &src).and_then(|p| load_library(&p)) {
             Ok((f, lib)) => {
-                world.resource_mut::<LoadedScripts>().insert(name.clone(), f, lib);
+                world
+                    .resource_mut::<LoadedScripts>()
+                    .insert(name.clone(), f, lib);
                 info!("[rust-script] loaded {name}");
                 console_success("Script", format!("compiled {name}"));
             }
@@ -356,8 +372,14 @@ pub fn build_to_path(sdk: &Sdk, project: &Path, src: &Path) -> Result<PathBuf, S
         // Point at the file the author edits, not the staged copy they have never
         // seen — a diagnostic naming `.renzora/scripts/spin/src/lib.rs` sends
         // them to a derived file that is overwritten on every build.
-        e.to_string()
-            .replace(&build.join("src").join("lib.rs").to_string_lossy().to_string(), &src.to_string_lossy())
+        e.to_string().replace(
+            &build
+                .join("src")
+                .join("lib.rs")
+                .to_string_lossy()
+                .to_string(),
+            &src.to_string_lossy(),
+        )
     })?;
     Ok(out)
 }
@@ -391,43 +413,18 @@ pub fn build_to_path(sdk: &Sdk, project: &Path, src: &Path) -> Result<PathBuf, S
 /// one. Requiring the declaration keeps both failures off files their author
 /// never called a script.
 ///
-/// Build output is skipped: `.renzora/` holds this compiler's own staged copies,
-/// so scanning it would compile everything a second time under another path.
+/// Re-exported for tests and the exporter, which used the old name. The new
+/// canonical implementation lives in [`crate::discovery`].
+#[deprecated(note = "use `crate::discovery::collect_rust_scripts` instead")]
 pub fn collect_project_scripts(project: &Path) -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        const SKIP: &[&str] =
-            &["target", ".git", ".renzora", "node_modules", "dist", ".svn", ".hg"];
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if path.is_dir() {
-                if !SKIP.contains(&name) && !name.starts_with('.') {
-                    walk(&path, out);
-                }
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
-                && declares_script(&path)
-            {
-                out.push(path);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(project, &mut out);
-    // Sorted so callers that index by position (the lean exporter's generated
-    // module names) are stable across runs.
-    out.sort();
-    out
+    crate::discovery::collect_rust_scripts(project)
 }
 
-/// Does this file call `renzora::script!`?
-///
-/// A substring test, not a parse. It can be fooled by the macro's name appearing
-/// in a comment, which costs one confusing compile error in a file that was
-/// nearly a script anyway — against parsing every `.rs` in a project on every
-/// open. Both spellings are accepted because either compiles.
+/// `declares_script` kept here as a free function so [`crate::discovery`]
+/// can call it from a child `walk` (it would not be reachable from a
+/// `super::declares_script` path at module scope otherwise). The substring
+/// test is what Phase 1 commit 1.4 will replace; until that commit lands
+/// the behaviour is unchanged.
 fn declares_script(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
@@ -470,7 +467,9 @@ fn load_prebuilt_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool
     }
     *done = true;
 
-    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
     else {
         return;
     };
@@ -485,7 +484,9 @@ fn load_prebuilt_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool
     let mut opened: HashMap<String, ScriptFn> = HashMap::new();
     let mut count = 0usize;
     for line in index.lines() {
-        let Some((key, file)) = line.split_once('\t') else { continue };
+        let Some((key, file)) = line.split_once('\t') else {
+            continue;
+        };
         let (key, file) = (key.trim(), file.trim());
         if key.is_empty() || file.is_empty() {
             continue;
