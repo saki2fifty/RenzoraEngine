@@ -7713,6 +7713,7 @@ dependencies = [
  "rcgen",
  "renzora",
  "renzora_ember",
+ "renzora_identity",
  "renzora_import",
  "renzora_native_plugin",
  "renzora_net",
@@ -7831,6 +7832,13 @@ dependencies = [
  "renzora_editor_framework",
  "renzora_ember",
  "renzora_undo",
+]
+
+[[package]]
+name = "renzora_identity"
+version = "0.1.0"
+dependencies = [
+ "rustc_lexer",
 ]
 
 [[package]]
@@ -8258,6 +8266,7 @@ dependencies = [
 name = "renzora_plugin_build"
 version = "0.1.0"
 dependencies = [
+ "renzora_identity",
  "renzora_native_build",
  "serde",
  "serde_json",
@@ -8418,10 +8427,13 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "libloading 0.8.9",
+ "notify-debouncer-full",
  "renzora",
+ "renzora_identity",
  "renzora_plugin_build",
  "renzora_scripting",
  "renzora_static_scripts",
+ "tempfile",
 ]
 
 [[package]]
@@ -9065,6 +9077,15 @@ name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
+
+[[package]]
+name = "rustc_lexer"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c86aae0c77166108c01305ee1a36a1e77289d7dc6ca0a3cd91ff4992de2d16a5"
+dependencies = [
+ "unicode-xid",
+]
 
 [[package]]
 name = "rustc_version"

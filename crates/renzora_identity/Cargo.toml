@@ -1,0 +1,28 @@
+[package]
+name = "renzora_identity"
+version = "0.1.0"
+edition = "2021"
+description = "Canonical plugin/script identity for Renzora host tooling. No Bevy. Not on the C ABI."
+
+[features]
+default = []
+# Link the Rust standard library. OFF by default: the pure identity layer
+# is `alloc`-only. ON only for callers that need the filesystem-containment
+# modules or downstream code that links `std`.
+std = []
+# Gates `DiscoveredPath`, the symlink-escape detection, and the `std::path`
+# imports. Pulls in `std`. Workspace host crates enable it.
+discovery = ["std"]
+# The script declaration recogniser used by Phase 1 commit 1.4. Pulls in the
+# lexer dependency below; using `dep:rustc_lexer` keeps the conditional dep
+# syntactically attached to this feature flag (Cargo's preferred idiom).
+rustc_lexer = ["dep:rustc_lexer"]
+
+[dependencies]
+# Pinned exact release per Phase 0 review. `rustc_lexer` 0.1.0 is the canonical
+# release on crates.io and ships one transitive dep (`unicode-xid ^0.2.0`),
+# used internally for `RawIdent` parsing.
+rustc_lexer = { version = "=0.1.0", optional = true }
+
+[lints]
+workspace = true
