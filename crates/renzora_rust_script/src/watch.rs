@@ -557,20 +557,6 @@ fn canonical_for(project_root: &Path, path: &Path) -> Option<CanonicalId> {
     discovery::project_relpath_for(project_root, path)
 }
 
-fn classify_event_kind(
-    kind: EventKind,
-    id: &CanonicalId,
-    dirty: &mut Vec<CanonicalId>,
-    removed: &mut Vec<CanonicalId>,
-) {
-    match kind {
-        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) => {
-            push_unique(removed, id);
-        }
-        _ => push_unique(dirty, id),
-    }
-}
-
 fn push_unique(vec: &mut Vec<CanonicalId>, value: &CanonicalId) {
     if !vec.iter().any(|v| v == value) {
         vec.push(value.clone());
@@ -671,58 +657,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_remove_puts_in_removed_bucket() {
-        let id =
-            renzora_identity::CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs")
-                .unwrap();
-        let mut dirty = Vec::new();
-        let mut removed = Vec::new();
-        classify_event_kind(
-            EventKind::Remove(notify_debouncer_full::notify::event::RemoveKind::File),
-            &id,
-            &mut dirty,
-            &mut removed,
-        );
-        assert!(removed.contains(&id));
-        assert!(dirty.is_empty());
-    }
-
-    #[test]
-    fn classify_modify_puts_in_dirty_bucket() {
-        let id =
-            renzora_identity::CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs")
-                .unwrap();
-        let mut dirty = Vec::new();
-        let mut removed = Vec::new();
-        classify_event_kind(
-            EventKind::Modify(notify_debouncer_full::notify::event::ModifyKind::Any),
-            &id,
-            &mut dirty,
-            &mut removed,
-        );
-        assert!(dirty.contains(&id));
-        assert!(removed.is_empty());
-    }
-
-    #[test]
-    fn classify_rename_modify_puts_in_removed_bucket() {
-        let id =
-            renzora_identity::CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs")
-                .unwrap();
-        let mut dirty = Vec::new();
-        let mut removed = Vec::new();
-        classify_event_kind(
-            EventKind::Modify(notify_debouncer_full::notify::event::ModifyKind::Name(
-                notify_debouncer_full::notify::event::RenameMode::To,
-            )),
-            &id,
-            &mut dirty,
-            &mut removed,
-        );
-        assert!(removed.contains(&id));
-    }
-
-    #[test]
     fn push_unique_does_not_double_insert() {
         let id =
             renzora_identity::CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs")
@@ -782,12 +716,8 @@ mod tests {
 
         let id = discovery::project_relpath_for(root, &root.join("a.rs")).unwrap();
         let mut drained = Drained::default();
-        classify_event_kind(
-            EventKind::Create(notify_debouncer_full::notify::event::CreateKind::File),
-            &id,
-            &mut drained.dirty,
-            &mut drained.removed,
-        );
+        // Create event → dirty (mirrors the drain_pending rule).
+        push_unique(&mut drained.dirty, &id);
         assert_eq!(drained.dirty.len(), 1);
         assert!(drained.removed.is_empty());
     }
