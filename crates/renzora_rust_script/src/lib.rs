@@ -293,6 +293,10 @@ impl LoadedScripts {
     /// stays alive — function pointers the engine still calls may
     /// reference symbols inside it. The next dispatch will see the id
     /// resolve to nothing and skip the call.
+    ///
+    /// Updates the bare-alias index too: a previously-ambiguous leaf
+    /// name becomes unique again once one of its canonical ids is
+    /// removed.
     pub fn remove(&mut self, id: &CanonicalId) {
         self.entries.remove(id);
         self.alias_index.remove(id);

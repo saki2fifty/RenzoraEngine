@@ -45,6 +45,7 @@ use renzora::CurrentProject;
 use renzora_identity::CanonicalId;
 
 use crate::build_to_path_with_id;
+use crate::declaration_recognised;
 use crate::discovery;
 use crate::load_library;
 use crate::LoadedScripts;
@@ -167,7 +168,18 @@ pub fn watch(mut watcher: ResMut<ScriptWatcher>, project: Option<Res<CurrentProj
 /// Drain any pending debounced events and translate per-path events
 /// directly into dirty/removed canonical-id buckets. Returns None when
 /// no events arrived and no recovery is pending — the caller will
-/// return without doing any work in that case.
+/// return without doing any work in that case. Returns Some(drained)
+/// when work (dirty or removed entries) was produced.
+///
+/// Per-event translation rules:
+/// - `Remove` / `Modify(Name)` events retire the id (the watcher's own
+///   `seen_paths` cleanup follows so the next rescan agrees).
+/// - `Create` / `Modify(Any)` events on a file that still declares
+///   itself a script mark the id dirty.
+/// - `Create` / `Modify(Any)` events on a file that lost its marker
+///   retire the id (marker removal — only if the id was previously
+///   loaded; new non-script files are silently skipped).
+/// - Non-script `.rs` files never produce a dirty entry.
 pub(crate) fn drain_pending(watcher: &mut ScriptWatcher, project_root: &Path) -> Option<Drained> {
     let mut inflight: Vec<DebouncedEvent> = Vec::new();
     {
@@ -202,12 +214,26 @@ pub(crate) fn drain_pending(watcher: &mut ScriptWatcher, project_root: &Path) ->
             let Some(id) = canonical_for(project_root, path) else {
                 continue;
             };
-            classify_event_kind(
-                event.event.kind,
-                &id,
-                &mut drained.dirty,
-                &mut drained.removed,
-            );
+            match event.event.kind {
+                EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) => {
+                    push_unique(&mut drained.removed, &id);
+                }
+                _ => {
+                    // Create / Modify: only dirty if the file currently
+                    // declares itself a script. Otherwise retire the
+                    // id (marker was removed). Only retire ids we have
+                    // actually loaded before.
+                    let on_disk = project_root.join(id.path());
+                    let is_script = std::fs::read_to_string(&on_disk)
+                        .map(|src| declaration_recognised(&src))
+                        .unwrap_or(false);
+                    if is_script {
+                        push_unique(&mut drained.dirty, &id);
+                    } else if watcher.seen_paths.contains(&id) {
+                        push_unique(&mut drained.removed, &id);
+                    }
+                }
+            }
         }
     }
 
