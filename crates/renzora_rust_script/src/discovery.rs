@@ -147,6 +147,17 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
+        // Symlink safety (correction 12): use symlink_metadata so the
+        // file_type is reported for the link itself, not its target. A
+        // symlink to a directory is reported as `is_symlink() == true`,
+        // so we skip it (Phase 1 does not canonicalise project-relative
+        // symlinks). The same policy applies to initial discovery, the
+        // watcher reconcile, and the exporter; see SKIP_SYMLINK_NOTE.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
         if path.is_dir() {
             if !should_skip_dir(name) {
                 walk(&path, out);
