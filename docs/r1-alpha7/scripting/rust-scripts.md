@@ -67,6 +67,8 @@ A script that fails to compile is not retried until you edit it again, so one er
 
 Every reload leaks its old image, roughly 200 KB. It has to: components the script inserted carry `Drop` impls and vtables living in that image, so unmapping it would turn a later despawn into a jump through freed memory. A restart reclaims all of it.
 
+The watcher keeps an explicit per-id build state machine: a Rust compilation can take many editor frames to finish, edits during compilation set a dirty flag rather than starting a second build, and a stale result is never allowed to overwrite a newer generation. Deletions retire the script immediately, even when no SDK is installed — retiring is independent of building.
+
 ## Requirements
 
 A Rust script is a [native plugin](../extending/native-plugins.md) with a per-entity convention on top — same compiler driver, same SDK, same loading. So the requirements are the plugin requirements:
