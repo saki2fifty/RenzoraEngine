@@ -220,8 +220,9 @@ fn register_backend(
 /// they are valid. That is the whole difference from `compile_and_load`: the
 /// same map, filled from an array instead of from `dlopen`.
 ///
-/// Keyed by file name to match what `dispatch` resolves against, which is also
-/// what the exporter keyed the table on.
+/// Keyed by canonical id (`project://<rel>`) so duplicate-leaf scripts
+/// retain their distinct identities; bare-name aliasing is handled by
+/// `LoadedScripts::insert`'s idempotent alias update.
 #[cfg(feature = "static_scripts")]
 fn load_static_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool>) {
     if *done {
@@ -232,8 +233,11 @@ fn load_static_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool>)
     if table.is_empty() {
         return;
     }
-    for (name, f) in &table {
-        loaded.entries.insert((*name).to_string(), *f);
+    for (id, f) in &table {
+        // Lean-exports have no Library at runtime (the script is compiled
+        // in), so we use `insert_borrowed`. The alias index is still
+        // populated so dispatch's BareAliasIndex lookup works.
+        loaded.insert_borrowed(id.clone(), *f);
     }
     info!(
         "[rust-script] {} script(s) compiled into this build",

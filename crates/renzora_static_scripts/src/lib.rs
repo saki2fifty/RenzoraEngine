@@ -23,31 +23,34 @@
 //!
 //! The dispatcher does not change. `renzora_rust_script` fills `LoadedScripts`
 //! from [`scripts()`] instead of from loaded libraries, and everything after
-//! that — one `fn(&mut World, Entity)` per entity per frame, keyed by file name,
-//! wrapped in a panic guard — is the same code. A script must behave the same in
-//! the editor and in an export, or the export cannot be tested by playing it.
+//! that — one `fn(&mut World, Entity)` per entity per frame, keyed by canonical
+//! identity, wrapped in a panic guard — is the same code. A script must behave
+//! the same in the editor and in an export, or the export cannot be tested by
+//! playing it.
 //!
 //! Every script in `scripts/` is compiled in, not only those some scene
 //! references: a scene can be loaded at runtime and a `ScriptComponent` added at
 //! runtime, so any "which are actually used" analysis would eventually be wrong
 //! in the direction that breaks a game silently. An unused script costs bytes in
-//! `.text`, never cycles — the dispatcher only ever looks up names that a live
-//! entity asked for.
+//! `.text`, never cycles — the dispatcher only ever looks up identities that a
+//! live entity asked for.
 
 use bevy::ecs::entity::Entity;
 use bevy::ecs::world::World;
 
+use renzora_identity::CanonicalId;
+
 /// A script's entry point: the same signature the dylib path calls through.
 pub type ScriptFn = fn(&mut World, Entity);
 
-/// Every script compiled into this binary, as `(file name, entry point)`.
+/// Every script compiled into this binary, as `(canonical id, entry point)`.
 ///
-/// Keyed by file NAME rather than path because that is what the dispatcher
-/// resolves against: a `ScriptComponent` entry may hold a project-relative or a
-/// scripts-relative path depending on how it was added, and the leaf is the same
-/// either way. Scripts live in one flat directory, so leaves are unique.
+/// Keyed by canonical id rather than file name. Phase 1 commit 1.3
+/// introduced canonical ids everywhere; the static table follows. Two
+/// scripts that share a leaf name at different paths have distinct
+/// canonical ids and both are registered.
 ///
 /// Empty in the dev tree.
-pub fn scripts() -> Vec<(&'static str, ScriptFn)> {
+pub fn scripts() -> Vec<(CanonicalId, ScriptFn)> {
     Vec::new()
 }

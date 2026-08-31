@@ -1462,17 +1462,25 @@ fn stage_static_scripts(
         write_if_changed(&crate_dir.join("src").join(&staged_name), &text)?;
 
         mods.push_str(&format!("#[path = \"{staged_name}\"]\nmod script_{i};\n"));
-        // Registered under the relative path always…
+        // Registered under the canonical project://<rel> id always so dispatch
+        // can resolve a `ScriptComponent` whose `script_path` is a project-
+        // relative path. The bare-leaf alias is added too when unique so
+        // legacy references that still use leaf names continue to work.
+        let canonical = renzora_identity::CanonicalId::from_rooted(
+            renzora_identity::RootKind::Project,
+            &rel,
+        )
+        .map_err(|e| format!("bad script relpath {rel:?}: {e}"))?;
         entries.push_str(&format!(
-            "        (\"{rel}\", script_{i}::renzora_script_update as ScriptFn),\n"
+            "        (renzora_identity::CanonicalId::from_rooted(\
+             renzora_identity::RootKind::Project, \"{rel}\").unwrap(), \
+             script_{i}::renzora_script_update as ScriptFn),\n"
         ));
-        // …and under the bare leaf too when that is unambiguous, because the
-        // dispatcher resolves by leaf: a `ScriptComponent` entry may hold either
-        // spelling depending on how it was added. Registering both keys means
-        // neither lookup has to change.
         if leaf_counts.get(leaf).copied().unwrap_or(0) == 1 {
             entries.push_str(&format!(
-                "        (\"{leaf}\", script_{i}::renzora_script_update as ScriptFn),\n"
+                "        (renzora_identity::CanonicalId::from_rooted(\
+                 renzora_identity::RootKind::Project, \"{leaf}\").unwrap(), \
+                 script_{i}::renzora_script_update as ScriptFn),\n"
             ));
         } else if !ambiguous.contains(&leaf.to_string()) {
             ambiguous.push(leaf.to_string());
@@ -1522,12 +1530,13 @@ fn stage_static_scripts(
          \n\
          use bevy::ecs::entity::Entity;\n\
          use bevy::ecs::world::World;\n\
+         use renzora_identity::{{CanonicalId, RootKind}};\n\
          \n\
          pub type ScriptFn = fn(&mut World, Entity);\n\
          \n\
          {mods}\n\
-         /// Every script compiled in, as `(file name, entry point)`.\n\
-         pub fn scripts() -> Vec<(&'static str, ScriptFn)> {{\n\
+         /// Every script compiled in, as `(canonical id, entry point)`.\n         /// Phase 1 commit 1.3 widened the key from a file name to a canonical id.\n\
+         pub fn scripts() -> Vec<(CanonicalId, ScriptFn)> {{\n\
          \x20   vec![\n{entries}    ]\n\
          }}\n"
     );

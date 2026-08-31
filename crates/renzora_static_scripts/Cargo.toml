@@ -31,6 +31,11 @@ edition = "2021"
 # `renzora_static_plugins` next door is written the same way for the same reason.
 renzora = { path = "../renzora" }
 bevy = { workspace = true }
+renzora_identity = { path = "../renzora_identity" }
+
+[dev-dependencies]
+# Test under tests/ builds a synthetic generator output and parses it.
+tempfile = "3"
 
 [lints]
 workspace = true
