@@ -36,9 +36,6 @@ renzora_identity = { path = "../renzora_identity" }
 [dev-dependencies]
 # Test under tests/ builds a synthetic generator output and parses it.
 tempfile = "3"
-# Tests call the production `stage_static_scripts` to verify the
-# generated manifest/lib.rs format end-to-end.
-renzora_export = { path = "../renzora_export" }
 
 [lints]
 workspace = true

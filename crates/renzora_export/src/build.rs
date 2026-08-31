@@ -207,6 +207,40 @@ pub fn find_engine_source(start: &Path) -> Option<PathBuf> {
 /// against a static binary because a C-ABI plugin links no Bevy and so has
 /// nothing to share with the host.
 ///
+/// Lean-export workspace assembly: synchronise the engine source into
+/// an isolated copy, apply the cross/feature/profile patches, stage
+/// the user's static plugins and the project's static scripts. The
+/// caller receives the assembled workspace path and the
+/// `has_scripts` flag it needs to enable the `static_scripts` cargo
+/// feature when invoking the actual build.
+///
+/// This function is the production assembly boundary used by both
+/// `build_lean` and the `renzora_static_scripts` integration test
+/// that asserts the generated crate compiles. There is no
+/// `_for_test` shim; the same code runs in both paths.
+pub fn assemble_lean_export_workspace(
+    workspace_dir: &Path,
+    project_dir: &Path,
+    platform: Platform,
+    disabled_bevy_features: &[String],
+    disabled_runtime_features: &[String],
+    profile: LeanProfile,
+    static_plugins: &[StaticPluginSrc],
+    progress: &mut dyn FnMut(String),
+) -> Result<(PathBuf, bool), String> {
+    let cross = Platform::current() != Some(platform);
+    let ws = sync_export_workspace(workspace_dir, progress)?;
+    if cross {
+        patch_cross_cargo_config(&ws, platform, progress)?;
+    }
+    strip_bevy_features(&ws, disabled_bevy_features, progress)?;
+    strip_runtime_features(&ws, disabled_runtime_features, progress)?;
+    patch_lean_profile(&ws, profile, progress)?;
+    stage_static_plugins(workspace_dir, &ws, static_plugins, progress)?;
+    let has_scripts = stage_static_scripts(project_dir, &ws, progress)?;
+    Ok((ws, has_scripts))
+}
+
 /// Native cargo can only target the **host** triple; cross-OS builds are a hard
 /// Same-OS targets compile natively with `toolchain`; a different OS compiles in
 /// that platform's toolchain container, because cargo can only target the host.
@@ -277,15 +311,22 @@ pub fn build_lean(
     // patched freely with no restore (it's disposable). It has its own `target/`,
     // so the dev cache and locks are untouched and exports stay incremental
     // across runs.
-    let ws = sync_export_workspace(workspace_dir, progress)?;
-    if cross {
-        patch_cross_cargo_config(&ws, platform, progress)?;
-    }
-    strip_bevy_features(&ws, disabled_bevy_features, progress)?;
-    strip_runtime_features(&ws, disabled_runtime_features, progress)?;
-    patch_lean_profile(&ws, profile, progress)?;
-    stage_static_plugins(workspace_dir, &ws, static_plugins, progress)?;
-    let has_scripts = stage_static_scripts(project_dir, &ws, progress)?;
+    //
+    // The full assembly (sync + patches + static plugins + static
+    // scripts) lives in `assemble_lean_export_workspace` so the test
+    // crate can exercise the same code path the production export
+    // takes.
+    let (ws, has_scripts) = assemble_lean_export_workspace(
+        workspace_dir,
+        project_dir,
+        platform,
+        disabled_bevy_features,
+        disabled_runtime_features,
+        profile,
+        static_plugins,
+        progress,
+    )?;
+
     let mut features = String::from("runtime");
     if !static_plugins.is_empty() {
         features.push_str(",static_plugins");
@@ -1320,7 +1361,7 @@ fn collect_scripts(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 ///
 /// This is the production entry point for lean-script generation.
 /// `build_lean` calls it; the lean-compilation test calls it.
-pub fn stage_static_scripts(
+fn stage_static_scripts(
     project_dir: &Path,
     copy_root: &Path,
     progress: &mut dyn FnMut(String),

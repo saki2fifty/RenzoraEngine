@@ -484,10 +484,7 @@ pub fn build_to_path_with_id(
 /// - the marker file is unreadable for any other reason.
 ///
 /// `build_to_path_with_id` calls this before any other mutation.
-/// Callers that perform staging on their own (the exporter, for
-/// example) can use this as a pre-flight to refuse a colliding
-/// directory without taking the SDK dependency.
-pub fn validate_build_dir_marker(
+pub(crate) fn validate_build_dir_marker(
     project: &Path,
     id: &renzora_identity::CanonicalId,
 ) -> Result<(), String> {
