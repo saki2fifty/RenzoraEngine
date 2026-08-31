@@ -452,7 +452,14 @@ pub fn reconcile_one_frame(watcher: &mut ScriptWatcher, project_root: &Path) -> 
         // builds/removes. For the idle-scan test we just care about
         // whether discovery was invoked.
     } else if needs_initial_rescan(watcher) {
-        let _ = full_rescan(watcher, project_root);
+        // The initial rescan only walks the filesystem when the
+        // snapshot is empty. If `compile_and_load` already populated
+        // seen_paths (the normal open flow), the snapshot is fresh and
+        // a rescan would only re-walk the project for no new
+        // information. Clear the flag without a rescan in that case.
+        if watcher.seen_paths.is_empty() {
+            let _ = full_rescan(watcher, project_root);
+        }
         watcher.needs_initial_rescan = false;
     }
 
@@ -470,6 +477,13 @@ pub fn needs_initial_rescan(watcher: &ScriptWatcher) -> bool {
 #[doc(hidden)]
 pub fn is_attached(watcher: &ScriptWatcher) -> bool {
     watcher.debouncer.is_some()
+}
+
+/// Test-only accessor for `seen_paths`. Used by integration tests to
+/// verify the watcher's indexed snapshot after the initial rescan.
+#[doc(hidden)]
+pub fn seen_paths_for_test(watcher: &ScriptWatcher) -> &[CanonicalId] {
+    &watcher.seen_paths
 }
 
 /// Drive `attach_debouncer` from tests. Same as the internal helper;
@@ -525,8 +539,18 @@ fn push_unique(vec: &mut Vec<CanonicalId>, value: &CanonicalId) {
 pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path) {
     *watcher.rx.lock().unwrap() = None;
     watcher.debouncer = None;
-    watcher.seen_paths.clear();
     watcher.needs_initial_rescan = false;
+
+    // Preserve any pre-existing seen_paths populated by compile_and_load's
+    // mark_seen calls. Only seed via a discovery walk when the watcher
+    // attaches BEFORE compile_and_load (e.g. fresh project, or
+    // static_scripts feature without a compile step). This avoids the
+    // duplicate-build trap where the next reconcile would otherwise
+    // treat every script as new.
+    let was_empty = watcher.seen_paths.is_empty();
+    if was_empty {
+        watcher.seen_paths.clear();
+    }
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = match new_debouncer(DEBOUNCE, None, tx) {
@@ -549,11 +573,16 @@ pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path)
     // Set watched_root ONLY on success. Failed attaches leave the field
     // at its previous value so the next frame retries.
     watcher.watched_root = Some(project_root.to_path_buf());
-    // Seed the snapshot with every discovered canonical id so the next
-    // frame's initial-rescan finds zero dirty entries — the watcher is
-    // now consistent with the project.
-    let ids = discovery::collect_canonical_scripts(project_root);
-    watcher.seed_seen(ids);
+
+    if was_empty {
+        // First attach: walk the project to seed the snapshot. Subsequent
+        // attaches preserve compile_and_load's pre-populated snapshot.
+        let ids = discovery::collect_canonical_scripts(project_root);
+        watcher.seed_seen(ids);
+    }
+    // Always set the flag; the next reconcile runs full_rescan once.
+    // When compile_and_load already populated seen_paths, the diff is
+    // empty and the loop does nothing.
     watcher.needs_initial_rescan = true;
 }
 
