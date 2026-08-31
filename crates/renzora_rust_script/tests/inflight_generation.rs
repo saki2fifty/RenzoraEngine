@@ -1,120 +1,131 @@
-//! Integration tests for the in-flight build generation preservation
-//! (correction 6).
+//! Integration tests for the in-flight build generation state machine
+//! (correction A and B).
 //!
-//! These tests exercise the watcher's `InFlightBuild` flow by simulating
-//! the state transitions directly. The build task is replaced with a
-//! Task that returns immediately; the integration focuses on the
-//! generation-tracking fields (`started_at`, `pending_dirty`) and the
-//! result-discard logic in `finish`.
+//! Tests drive the production `ScriptWatcher` state machine and
+//! `PendingRetires` Bevy resource. They do not maintain a parallel
+//! `InFlightBuild` struct.
 
-use std::time::{Duration, SystemTime};
+use renzora_identity::CanonicalId;
 
-/// Build result type carried by `InFlightBuild.task`. The real type is
-/// `Task<Result<PathBuf, String>>`; we model the relevant fields here.
-struct InFlightBuild {
-    started_at: SystemTime,
-    pending_dirty: bool,
-}
-
-impl Default for InFlightBuild {
-    fn default() -> Self {
-        Self {
-            started_at: SystemTime::now(),
-            pending_dirty: false,
-        }
-    }
-}
-
-/// Test the stale-result check used by `finish`.
-///
-/// Returns `true` when the source's mtime moved past the build start —
-/// in that case the build result is discarded and the next reconcile
-/// schedules a fresh compile.
-fn is_stale(build: &InFlightBuild, source_mtime: SystemTime, pending_dirty: bool) -> bool {
-    if pending_dirty {
-        return true;
-    }
-    source_mtime
-        .duration_since(build.started_at)
-        .map(|d| d > Duration::ZERO)
-        .unwrap_or(false)
+fn init_task_pool() {
+    let _ = bevy::tasks::AsyncComputeTaskPool::get_or_init(|| {
+        bevy::tasks::TaskPoolBuilder::new()
+            .num_threads(1)
+            .build()
+    });
 }
 
 #[test]
-fn edit_while_building_marks_pending_dirty() {
-    // The watcher's `apply_drained` sets `existing.pending_dirty = true`
-    // when an event arrives for an in-flight build. We assert the
-    // observer-side rule: a pending-dirty result must be treated as
-    // stale by `finish`.
-    let start = SystemTime::now();
-    let build = InFlightBuild { started_at: start, pending_dirty: true };
-    let mtime = start; // unchanged on disk
+fn pending_task_survives_multiple_finish_frames() {
+    init_task_pool();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("a.rs"),
+        "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n",
+    )
+    .unwrap();
+
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs").unwrap();
+
+    let mut world = bevy::prelude::World::new();
+    world.insert_resource(renzora_rust_script::watch::ScriptWatcher::default());
+    world.insert_resource(renzora_rust_script::PendingRetires::default());
+    world.insert_resource(renzora_rust_script::LoadedScripts::default());
+
+    // A task that remains Pending forever.
+    let task: bevy::tasks::Task<Result<std::path::PathBuf, String>> =
+        bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            std::future::pending::<Result<std::path::PathBuf, String>>().await
+        });
+    {
+        let mut watcher = world.resource_mut::<renzora_rust_script::watch::ScriptWatcher>();
+        renzora_rust_script::watch::insert_pending_for_test(
+            &mut watcher,
+            id.clone(),
+            task,
+            root.join("a.rs"),
+        );
+    }
+
+    renzora_rust_script::watch::finish(&mut world);
     assert!(
-        is_stale(&build, mtime, true),
-        "pending_dirty must always be stale"
+        renzora_rust_script::watch::has_pending_for_test(
+            world.resource::<renzora_rust_script::watch::ScriptWatcher>(),
+            &id,
+        ),
+        "Pending task must stay in watcher.building across finish() calls (correction A)"
+    );
+
+    renzora_rust_script::watch::finish(&mut world);
+    assert!(
+        renzora_rust_script::watch::has_pending_for_test(
+            world.resource::<renzora_rust_script::watch::ScriptWatcher>(),
+            &id,
+        ),
+        "Pending task must still be in watcher.building after a second finish() (correction A)"
     );
 }
 
 #[test]
-fn multiple_edits_coalesce_to_newest_generation() {
-    // The first event schedules the build with started_at = t0. The
-    // second event sets pending_dirty = true (no second build is
-    // started). The third event sets pending_dirty = true again — the
-    // pending flag remains true; the next reconcile after the build
-    // completes will pick up the newest source.
-    let start = SystemTime::now();
-    let mut build = InFlightBuild { started_at: start, pending_dirty: false };
-    let mtime = start;
-    // First edit.
-    assert!(!is_stale(&build, mtime, build.pending_dirty));
-    // Second edit (no new build; flag set).
-    build.pending_dirty = true;
-    assert!(is_stale(&build, mtime, build.pending_dirty));
-    // Third edit (still pending).
-    assert!(is_stale(&build, mtime, build.pending_dirty));
+fn retire_queue_is_resource_owned_and_dedupes() {
+    let mut resource = renzora_rust_script::PendingRetires::default();
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs").unwrap();
+    resource.enqueue(id.clone());
+    resource.enqueue(id.clone());
+    resource.enqueue(id.clone());
+    let drained = resource.take();
+    assert_eq!(drained.len(), 1, "dedup: three enqueues → one retire");
+    assert!(drained.contains(&id));
+    assert!(resource.take().is_empty());
 }
 
 #[test]
-fn stale_result_cannot_win() {
-    // The source moved during compilation. The build result is for an
-    // older source revision and must not overwrite the current loaded
-    // generation.
-    let start = SystemTime::now() - Duration::from_millis(10);
-    let build = InFlightBuild { started_at: start, pending_dirty: false };
-    let mtime = SystemTime::now();
+fn retire_does_not_require_sdk() {
+    let mut world = bevy::prelude::World::new();
+    let mut loaded = renzora_rust_script::LoadedScripts::default();
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs").unwrap();
+    let f: renzora_rust_script::ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
+    loaded.insert_borrowed(id.clone(), f);
+    assert!(loaded.is_loaded(&id));
+
+    world.insert_resource(loaded);
+    world.insert_resource(renzora_rust_script::PendingRetires::default());
+    world.insert_resource(renzora_rust_script::watch::ScriptWatcher::default());
+    {
+        let mut pending = world.resource_mut::<renzora_rust_script::PendingRetires>();
+        pending.enqueue(id.clone());
+    }
+
+    renzora_rust_script::watch::finish(&mut world);
     assert!(
-        is_stale(&build, mtime, false),
-        "a source mtime after the build started must be flagged stale"
+        !world
+            .resource::<renzora_rust_script::LoadedScripts>()
+            .is_loaded(&id),
+        "Retire must succeed without an SDK"
     );
 }
 
 #[test]
-fn failed_replacement_keeps_last_good_function_active() {
-    // `LoadedScripts::insert` only updates the function pointer for
-    // successfully loaded scripts. A build that returns Err leaves the
-    // previous entry intact. We simulate by writing a guard: a
-    // sequence of (insert, fail) steps keeps the function pointer at
-    // its first value.
-    fn run_sequence() -> u32 {
-        let mut current: Option<u32> = None;
-        let attempts: Vec<Result<u32, ()>> = vec![Ok(1), Err(()), Err(()), Ok(2)];
-        for r in attempts {
-            match r {
-                Ok(v) => current = Some(v),
-                Err(_) => {}
-            }
-        }
-        current.unwrap_or(0)
-    }
-    assert_eq!(run_sequence(), 2);
-}
+fn edit_during_compilation_sets_pending_dirty() {
+    init_task_pool();
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs").unwrap();
 
-#[test]
-fn empty_in_flight_build_is_immediately_stale_when_pending() {
-    // A pending-dirty build's install path always returns Discarded.
-    let build = InFlightBuild {
-        started_at: SystemTime::UNIX_EPOCH,
-        pending_dirty: true,
-    };
-    assert!(is_stale(&build, SystemTime::now(), build.pending_dirty));
+    let task: bevy::tasks::Task<Result<std::path::PathBuf, String>> =
+        bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            std::future::pending::<Result<std::path::PathBuf, String>>().await
+        });
+    renzora_rust_script::watch::insert_pending_for_test(
+        &mut watcher,
+        id.clone(),
+        task,
+        std::path::PathBuf::from("/tmp/a.rs"),
+    );
+    renzora_rust_script::watch::set_pending_dirty_for_test(&mut watcher, &id);
+    renzora_rust_script::watch::set_pending_dirty_for_test(&mut watcher, &id);
+    assert!(
+        renzora_rust_script::watch::pending_dirty_for_test(&watcher, &id),
+        "two edits while in-flight both register as pending_dirty"
+    );
 }

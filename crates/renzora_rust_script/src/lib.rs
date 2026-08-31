@@ -85,7 +85,7 @@ pub const SCRIPT_SYMBOL: &[u8] = b"renzora_script_update\0";
 /// A plain Rust `fn` taking `&mut World`, sound only because the script and the
 /// engine link one shared `bevy_dylib` — the precondition everything here rests
 /// on.
-type ScriptFn = fn(&mut World, Entity);
+pub type ScriptFn = fn(&mut World, Entity);
 
 renzora::add!(RustScriptPlugin, Runtime);
 
@@ -332,6 +332,12 @@ impl LoadedScripts {
         let mut v: Vec<CanonicalId> = self.entries.keys().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Test-only accessor: bare-leaf alias entries.
+    #[doc(hidden)]
+    pub fn alias_entries_for_test(&self, leaf: &str) -> Vec<CanonicalId> {
+        self.alias_index.entries(leaf).to_vec()
     }
 }
 

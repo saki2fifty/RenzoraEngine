@@ -82,6 +82,12 @@ pub struct ScriptWatcher {
     watched_root: Option<PathBuf>,
     needs_initial_rescan: bool,
     last_failed_attach: Option<std::time::Instant>,
+    /// Test-only injection queue. The production reconcile_batch drains
+    /// this queue before reading from the real rx channel. Marked
+    /// `Vec` rather than `cfg(test)` because the same machinery backs
+    /// the `inject_event_for_test` helper and is cheap in production
+    /// (the field stays empty in real runs).
+    injected_batches: Vec<Vec<DebouncedEvent>>,
 }
 
 /// Result of one build task: a `Result<PathBuf, String>` from the
@@ -112,6 +118,7 @@ impl Default for ScriptWatcher {
             watched_root: None,
             needs_initial_rescan: false,
             last_failed_attach: None,
+            injected_batches: Vec::new(),
         }
     }
 }
@@ -212,24 +219,26 @@ pub fn reconcile_batch(watcher: &mut ScriptWatcher, project_root: &Path) -> Opti
             let mut requires_full_rescan = false;
             let unique = dedup_event_paths(std::mem::take(events));
             for (path, present, declared) in unique {
+                // Directory topology changes at the project root
+                // require a full rescan to enumerate the new children.
+                // File-level edits at the project root do NOT. Detect
+                // the directory case BEFORE the .rs extension filter,
+                // because a created directory itself does not carry
+                // the .rs extension.
+                if path.parent() == Some(project_root)
+                    && std::fs::symlink_metadata(&path)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
+                {
+                    requires_full_rescan = true;
+                    continue;
+                }
                 if !is_source_path(project_root, &path) {
                     continue;
                 }
                 let Some(id) = lexical_event_identity(project_root, &path) else {
                     continue;
                 };
-                if path.parent() == Some(project_root)
-                    && std::fs::symlink_metadata(&path)
-                        .map(|m| m.is_dir())
-                        .unwrap_or(false)
-                {
-                    // Directory creation/rename at the project root
-                    // requires a full rescan to enumerate the new
-                    // children. File-level edits at the project root do
-                    // NOT.
-                    requires_full_rescan = true;
-                    continue;
-                }
                 if present && declared {
                     plan.dirty.push(id);
                 } else if !present || !declared {
@@ -278,7 +287,7 @@ pub fn reconcile_batch(watcher: &mut ScriptWatcher, project_root: &Path) -> Opti
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 #[doc(hidden)]
 pub struct Plan {
     pub dirty: Vec<CanonicalId>,
@@ -296,6 +305,16 @@ enum BatchOutcome {
 ///   errors;
 /// - `Some(Events)` with the collected, deduplicated event list.
 fn drain_pending(watcher: &mut ScriptWatcher) -> Option<BatchOutcome> {
+    // Drain the test-injection queue first. In production this stays
+    // empty; in tests it lets us feed synthetic events without holding
+    // a sender end of the production channel.
+    if !watcher.injected_batches.is_empty() {
+        let mut inflight: Vec<DebouncedEvent> = Vec::new();
+        for batch in watcher.injected_batches.drain(..) {
+            inflight.extend(batch);
+        }
+        return Some(BatchOutcome::Events(inflight));
+    }
     let mut inflight: Vec<DebouncedEvent> = Vec::new();
     {
         let mut rx_guard = watcher.rx.lock().ok()?;
@@ -591,6 +610,73 @@ pub fn reconcile_one_frame(watcher: &mut ScriptWatcher, project_root: &Path) -> 
     plan
 }
 
+/// Test-only accessor for the production `reconcile_batch` helper.
+#[doc(hidden)]
+pub fn reconcile_batch_for_test(watcher: &mut ScriptWatcher, project_root: &Path) -> Option<Plan> {
+    reconcile_batch(watcher, project_root)
+}
+
+/// Test-only constructor for `InFlightBuild`.
+#[doc(hidden)]
+pub fn in_flight_build_for_test(
+    task: bevy::tasks::Task<Result<PathBuf, String>>,
+    started_at: std::time::SystemTime,
+    started_path: PathBuf,
+    pending_dirty: bool,
+) -> InFlightBuild {
+    InFlightBuild {
+        task,
+        started_at,
+        started_path,
+        pending_dirty,
+    }
+}
+
+/// Test-only helper to insert a Pending task into the watcher's
+/// `building` map.
+#[doc(hidden)]
+pub fn insert_pending_for_test(
+    watcher: &mut ScriptWatcher,
+    id: CanonicalId,
+    task: bevy::tasks::Task<Result<PathBuf, String>>,
+    started_path: PathBuf,
+) {
+    let started_at = std::fs::metadata(&started_path)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|_| std::time::SystemTime::now());
+    let build = InFlightBuild {
+        task,
+        started_at,
+        started_path,
+        pending_dirty: false,
+    };
+    watcher.building.insert(id, build);
+}
+
+/// Test-only helper: returns true if `id` is still in `building`.
+#[doc(hidden)]
+pub fn has_pending_for_test(watcher: &ScriptWatcher, id: &CanonicalId) -> bool {
+    watcher.building.contains_key(id)
+}
+
+/// Test-only helper: set pending_dirty on the in-flight build for `id`.
+#[doc(hidden)]
+pub fn set_pending_dirty_for_test(watcher: &mut ScriptWatcher, id: &CanonicalId) {
+    if let Some(build) = watcher.building.get_mut(id) {
+        build.pending_dirty = true;
+    }
+}
+
+/// Test-only helper: read pending_dirty for `id`.
+#[doc(hidden)]
+pub fn pending_dirty_for_test(watcher: &ScriptWatcher, id: &CanonicalId) -> bool {
+    watcher
+        .building
+        .get(id)
+        .map(|b| b.pending_dirty)
+        .unwrap_or(false)
+}
+
 /// Whether the watcher has the `needs_initial_rescan` flag set.
 #[doc(hidden)]
 pub fn needs_initial_rescan(watcher: &ScriptWatcher) -> bool {
@@ -607,6 +693,21 @@ pub fn is_attached(watcher: &ScriptWatcher) -> bool {
 #[doc(hidden)]
 pub fn seen_paths_for_test(watcher: &ScriptWatcher) -> &[CanonicalId] {
     &watcher.seen_paths
+}
+
+/// Test-only mutable accessor for `seen_paths`.
+#[doc(hidden)]
+pub fn seen_paths_for_test_mut(watcher: &mut ScriptWatcher) -> &mut Vec<CanonicalId> {
+    &mut watcher.seen_paths
+}
+
+/// Test-only accessor for the production `full_rescan` helper.
+#[doc(hidden)]
+pub fn full_rescan_for_test(
+    watcher: &mut ScriptWatcher,
+    project_root: &Path,
+) -> Plan {
+    full_rescan(watcher, project_root)
 }
 
 /// Test-only accessor for `watched_root`.
@@ -640,6 +741,18 @@ pub fn attach_debouncer_for_test(watcher: &mut ScriptWatcher, project_root: &Pat
 #[doc(hidden)]
 pub fn take_pending_retires_for_test(pending: &mut PendingRetires) -> Vec<CanonicalId> {
     pending.take()
+}
+
+/// Inject a synthetic event into the watcher's receiver channel so the
+/// next `reconcile_batch` call drains it. Test-only helper that appends
+/// to the watcher's `injected_batches` queue (always drained before the
+/// real rx channel).
+#[doc(hidden)]
+pub fn inject_event_for_test(
+    watcher: &mut ScriptWatcher,
+    event: notify_debouncer_full::DebouncedEvent,
+) {
+    watcher.injected_batches.push(vec![event]);
 }
 
 /// Backoff window accessor for tests.

@@ -1,12 +1,9 @@
 //! Integration test: opening a project must not trigger a duplicate
-//! build through the watcher's initial rescan. The contract is that
-//! `compile_and_load` marks each script seen, the watcher then attaches
-//! and seeds its own `seen_paths` snapshot, and the next reconcile's
-//! `full_rescan` finds every script already present (zero dirty).
+//! build through the watcher's initial rescan. The test drives the
+//! production `attach_debouncer` and `reconcile_one_frame` helpers.
 
 #[test]
 fn opening_a_project_does_not_double_build() {
-    // Two scripts in separate folders with the same leaf name.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let body = "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n";
@@ -15,19 +12,8 @@ fn opening_a_project_does_not_double_build() {
     std::fs::create_dir_all(root.join("props")).unwrap();
     std::fs::write(root.join("props/spin.rs"), body).unwrap();
 
-    // Simulate the post-open state. `compile_and_load` already marked
-    // each script seen. The watcher will attach and seed its own
-    // snapshot from `discovery::collect_canonical_scripts`.
     let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
 
-    // Drive the post-open flow:
-    //   1. compile_and_load marks each script seen.
-    //   2. The watcher's Update system runs `watch()` on the next
-    //      frame, which detects the project-path change and calls
-    //      attach_debouncer.
-    //   3. attach_debouncer sets `seen_paths` and
-    //      `needs_initial_rescan = true`.
-    //   4. The next reconcile's full_rescan reports zero dirty.
     let a = renzora_identity::CanonicalId::from_rooted(
         renzora_identity::RootKind::Project,
         "enemy/spin.rs",
@@ -38,26 +24,27 @@ fn opening_a_project_does_not_double_build() {
         "props/spin.rs",
     )
     .unwrap();
+
+    // Simulate compile_and_load marking both scripts seen.
     watcher.mark_seen(a.clone());
     watcher.mark_seen(b.clone());
-
-    // The watcher has not been attached yet (no debouncer, no watched_root).
     assert!(!renzora_rust_script::watch::is_attached(&watcher));
 
-    // The next watcher's Update fires; reconcile_one_frame attaches the
-    // debouncer, seeds seen_paths from the discovery walk, and runs
-    // the initial rescan. That rescan must report zero dirty
-    // (everything is already in the snapshot compile_and_load seeded).
+    // Production flow: watcher's Update runs reconcile_one_frame,
+    // which attaches the debouncer and runs an initial rescan.
     renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
-    let calls = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
-    assert_eq!(
-        calls, 0,
-        "no duplicate build on project open: every script is already in seen_paths"
-    );
-    // attach_debouncer seeds the snapshot directly; the initial
-    // rescan finds nothing new.
+    let plan = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
+    // After mark_seen pre-populated the snapshot, the initial rescan
+    // finds no additions → no dirty, no removed → Some(Plan::default())
+    // (empty). Either Some(empty) or None is acceptable; the
+    // invariant we test is that both ids remain in seen_paths and the
+    // next dirty event is processed correctly.
+    let seen = renzora_rust_script::watch::seen_paths_for_test(&watcher);
+    assert!(seen.contains(&a), "enemy/spin.rs must remain seen");
+    assert!(seen.contains(&b), "props/spin.rs must remain seen");
     assert!(renzora_rust_script::watch::is_attached(&watcher));
-    // Sanity: the snapshot contains both ids.
-    assert!(renzora_rust_script::watch::seen_paths_for_test(&watcher).contains(&a));
-    assert!(renzora_rust_script::watch::seen_paths_for_test(&watcher).contains(&b));
+    // Plan is either None (zero work) or Some with empty buckets.
+    if let Some(p) = plan {
+        assert!(p.dirty.is_empty() && p.removed.is_empty());
+    }
 }

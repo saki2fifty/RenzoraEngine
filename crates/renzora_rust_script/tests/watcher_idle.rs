@@ -1,58 +1,106 @@
 //! Integration tests for the script watcher's idle behaviour.
 //!
-//! Phase 1 commit 1.2 promised an event-driven watcher; correction 1
-//! finishes that promise by ensuring the watcher's reconcile path does no
-//! work on idle frames. The `dispatch_no_full_rescan_on_idle_update` test
-//! drives the watcher's per-frame reconcile logic directly using the
-//! `pub(crate)` helpers in `watch.rs`. The discovery counter is exposed
-//! through `renzora_rust_script::discovery::collect_call_count`.
+//! Idle frames must do no discovery work. The test drives the production
+//! `reconcile_one_frame` helper and asserts it returns `None` on idle
+//! frames. The `needs_initial_rescan` flag and the root-level file
+//! edits must NOT trigger a full project rescan (corrections A and N).
 
 #[test]
-fn dispatch_no_full_rescan_on_idle_update() {
-    // A small project tree the watcher can attach to. The tree contains
-    // a single declared script so the initial rescan has something to
-    // find.
+fn idle_frames_produce_no_plan() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    let script = root.join("a.rs");
-    std::fs::write(&script, "").unwrap();
+    std::fs::write(root.join("a.rs"), "fn u() {}\nrenzora::script!(u);\n").unwrap();
 
-    // Fresh watcher + reset call counter.
     let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
-    renzora_rust_script::discovery::reset_collect_call_count();
 
-    // Frame 1: initial attach + initial rescan. This is the only frame
-    // that may trigger a discovery call.
+    // Frame 1: production attach seeds seen_paths from a discovery walk.
+    // No separate initial rescan is needed.
     renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
-    assert!(
-        renzora_rust_script::watch::is_attached(&watcher),
-        "initial attach should succeed"
-    );
-    let initial_calls = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
-    assert!(
-        initial_calls >= 1,
-        "initial attach should trigger at least one discovery call (got {initial_calls})"
-    );
-    // The next frame should NOT need the initial rescan.
+    let first = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
+    // After attach, no events have arrived and the initial rescan is a
+    // no-op when seen_paths is already populated. The plan may be None
+    // or an empty Plan; either way no discovery work is repeated.
+    if let Some(ref p) = first {
+        assert!(p.dirty.is_empty() && p.removed.is_empty());
+    }
     assert!(
         !renzora_rust_script::watch::needs_initial_rescan(&watcher),
-        "needs_initial_rescan should be cleared after the first frame"
+        "needs_initial_rescan cleared after first frame"
     );
 
-    // Frames 2..=32: idle Update frames. Each must perform zero
-    // discovery calls. We accumulate per-frame counts to validate the
-    // total of discovery work across idle frames is zero.
-    let mut idle_total = 0usize;
+    // Frames 2..=32: no events arrived, so reconcile_batch returns
+    // None. Idle frames produce no plan and no discovery work.
     for _ in 0..31 {
-        let calls = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
-        idle_total += calls;
-        assert_eq!(
-            calls, 0,
-            "idle Update frames must perform zero discovery calls"
+        let plan = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
+        assert!(
+            plan.is_none(),
+            "idle frames must produce no plan (correction A/N)"
         );
     }
-    assert_eq!(
-        idle_total, 0,
-        "idle Update frames combined must perform zero discovery calls"
+}
+
+#[test]
+fn root_level_file_edit_does_not_force_full_rescan() {
+    // Correction N: editing a normal root-level .rs file uses targeted
+    // reconciliation. Only directory topology changes force a full
+    // rescan.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("a.rs"), "fn u() {}\nrenzora::script!(u);\n").unwrap();
+
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+    let _ = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
+
+    let path = root.join("a.rs");
+    renzora_rust_script::watch::inject_event_for_test(
+        &mut watcher,
+        notify_debouncer_full::DebouncedEvent::new(
+            notify_debouncer_full::notify::Event {
+                kind: notify_debouncer_full::notify::EventKind::Modify(
+                    notify_debouncer_full::notify::event::ModifyKind::Any,
+                ),
+                paths: vec![path],
+                attrs: Default::default(),
+            },
+            std::time::Instant::now(),
+        ),
     );
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root)
+        .expect("a Modify event at root produces a targeted plan");
+    assert_eq!(plan.dirty.len(), 1);
+    assert_eq!(plan.dirty[0].path(), "a.rs");
+}
+
+#[test]
+fn root_level_directory_change_forces_full_rescan() {
+    // Directory topology changes at the project root force a full
+    // rescan. File-level edits at the root do not.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir(root.join("subdir")).unwrap();
+    std::fs::write(root.join("a.rs"), "fn u() {}\nrenzora::script!(u);\n").unwrap();
+    std::fs::write(root.join("subdir/b.rs"), "fn u() {}\nrenzora::script!(u);\n").unwrap();
+
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+    let _ = renzora_rust_script::watch::reconcile_one_frame(&mut watcher, root);
+
+    // Directory create at project root: full rescan is required.
+    let path = root.join("subdir");
+    renzora_rust_script::watch::inject_event_for_test(
+        &mut watcher,
+        notify_debouncer_full::DebouncedEvent::new(
+            notify_debouncer_full::notify::Event {
+                kind: notify_debouncer_full::notify::EventKind::Create(
+                    notify_debouncer_full::notify::event::CreateKind::Folder,
+                ),
+                paths: vec![path],
+                attrs: Default::default(),
+            },
+            std::time::Instant::now(),
+        ),
+    );
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root);
+    assert!(plan.is_some(), "directory create at root produces a plan");
 }

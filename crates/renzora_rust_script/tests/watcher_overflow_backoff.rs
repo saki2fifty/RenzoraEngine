@@ -1,35 +1,47 @@
-//! Integration tests for the watcher's overflow-recovery and failed-
-//! attach backoff state transitions (correction 7). The tests focus on
-//! the state machine; the actual notification I/O is replaced with
-//! in-process helpers.
+//! Integration tests for the watcher's overflow-recovery and
+//! failed-attach backoff state transitions (correction 7).
+//!
+//! The tests focus on the production state machine — `ScriptWatcher`
+//! and its `attach_debouncer` / `last_failed_attach` plumbing — not
+//! hand-written replicas.
 
 #[test]
 fn overflow_recovery_continues_through_normal_processing() {
-    // `drain_pending` returns Some(full_rescan(...)) on overflow. The
-    // returned Drained contains the diff, and `apply_drained` processes
-    // it. We assert the state-machine invariant: an overflow event is
-    // not lost — the resulting drained contains the changed ids.
-    use renzora_identity::CanonicalId;
-    let a = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "a.rs").unwrap();
-    let b = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "b.rs").unwrap();
-    let previous = vec![a.clone(), b.clone()];
-    let current = vec![b.clone()];
+    // `drain_pending` returns `Some(BatchOutcome::FullRescan)` on
+    // overflow. `reconcile_batch` translates that into a full
+    // rescan and returns the diff. We assert the production
+    // helper, given an existing seen_paths of two ids and a
+    // current state of one, returns the diff as a Plan.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(root.join("a.rs"), "fn u() {}\nrenzora::script!(u);\n").unwrap();
 
-    let mut drained = renzora_rust_script::watch::Drained::default();
-    for added in current.iter().filter(|c| !previous.contains(c)) {
-        drained.dirty.push((*added).clone());
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    let a = renzora_identity::CanonicalId::from_rooted(
+        renzora_identity::RootKind::Project,
+        "a.rs",
+    )
+    .unwrap();
+    let b = renzora_identity::CanonicalId::from_rooted(
+        renzora_identity::RootKind::Project,
+        "b.rs",
+    )
+    .unwrap();
+    // Pretend both were previously seen but only one still exists.
+    {
+        let seen = renzora_rust_script::watch::seen_paths_for_test_mut(&mut watcher);
+        seen.push(a.clone());
+        seen.push(b.clone());
     }
-    for gone in previous.iter().filter(|c| !current.contains(c)) {
-        drained.removed.push((*gone).clone());
-    }
-    assert_eq!(drained.dirty.len(), 0);
-    assert_eq!(drained.removed.len(), 1);
-    assert_eq!(drained.removed[0], a);
+    // Force a full rescan via the production helper.
+    let plan = renzora_rust_script::watch::full_rescan_for_test(&mut watcher, root);
+    assert_eq!(plan.removed.len(), 1);
+    assert_eq!(plan.dirty.len(), 0);
 }
 
 #[test]
 fn watched_root_only_set_after_successful_attach() {
-    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    let watcher = renzora_rust_script::watch::ScriptWatcher::default();
     assert!(renzora_rust_script::watch::watched_root_for_test(&watcher).is_none());
 }
 

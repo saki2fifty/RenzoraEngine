@@ -1,121 +1,157 @@
 //! Integration tests for the watcher's retire / rename / marker-removal
-//! behaviour. Phase 1 commit 1.2 promised these; correction 2 proves them.
+//! behaviour.
+//!
+//! These tests drive the production reconcile_batch function directly —
+//! the same helper the production `watch` Bevy system calls. They do not
+//! maintain a parallel translate() function or a parallel state-machine
+//! implementation. Each test sends raw events into the production batch
+//! helper and asserts the resulting Plan.
+
+use std::fs;
+use std::path::PathBuf;
 
 use renzora_identity::CanonicalId;
 
-/// Translate a single per-path Modify/Remove event into a (canonical_id,
-/// dir_index) tuple the way `drain_pending` does internally, but with
-/// the file's text inlined so the test is hermetic (no real filesystem
-/// watcher is attached).
-fn translate(
-    watcher_seen_paths: &[CanonicalId],
-    relpath: &str,
-    text: Option<&str>,
-    is_remove: bool,
-) -> Option<(CanonicalId, &'static str)> {
-    let id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        relpath,
-    )
-    .ok()?;
-    let is_script = text
-        .map(renzora_rust_script::declaration_recognised)
-        .unwrap_or(false);
-    if is_remove {
-        Some((id, "removed"))
-    } else if is_script {
-        Some((id, "dirty"))
-    } else if watcher_seen_paths.contains(&id) {
-        Some((id, "removed"))
-    } else {
-        None
+fn script_body() -> &'static str {
+    "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n"
+}
+
+fn write_script(path: &PathBuf, body: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
     }
+    fs::write(path, body).unwrap();
+}
+
+/// Construct a DebouncedEvent whose path list contains one entry.
+fn event_with_path(path: PathBuf) -> notify_debouncer_full::DebouncedEvent {
+    notify_debouncer_full::DebouncedEvent::new(
+        notify_debouncer_full::notify::Event {
+            kind: notify_debouncer_full::notify::EventKind::Create(
+                notify_debouncer_full::notify::event::CreateKind::File,
+            ),
+            paths: vec![path],
+            attrs: Default::default(),
+        },
+        std::time::Instant::now(),
+    )
+}
+
+fn event_removed(path: PathBuf) -> notify_debouncer_full::DebouncedEvent {
+    notify_debouncer_full::DebouncedEvent::new(
+        notify_debouncer_full::notify::Event {
+            kind: notify_debouncer_full::notify::EventKind::Remove(
+                notify_debouncer_full::notify::event::RemoveKind::File,
+            ),
+            paths: vec![path],
+            attrs: Default::default(),
+        },
+        std::time::Instant::now(),
+    )
 }
 
 #[test]
 fn editing_a_non_script_file_schedules_no_build() {
-    // The watcher's translate step must filter out files that lack the
-    // `renzora::script!(` declaration. A Create/Modify on a plain
-    // `.rs` file produces no dirty entry.
-    let plain = "fn helper() {}"; // no marker
-    let outcome = translate(&[], "enemy/helper.rs", Some(plain), false);
-    assert!(outcome.is_none(), "non-script file must produce no work");
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let helper = root.join("enemy/helper.rs");
+    write_script(&helper, "fn helper() {}\n"); // no declaration
+
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+
+    renzora_rust_script::watch::inject_event_for_test(&mut watcher, event_with_path(helper));
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root);
+    assert!(
+        plan.is_none(),
+        "non-script file edits produce no plan (got {:?})",
+        plan
+    );
 }
 
 #[test]
 fn adding_the_marker_turns_it_into_a_script() {
-    let script = "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n";
-    let outcome = translate(&[], "enemy/spin.rs", Some(script), false);
-    let (id, dir) = outcome.expect("marker-bearing file is dirty");
-    assert_eq!(id.path(), "enemy/spin.rs");
-    assert_eq!(dir, "dirty");
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let spin = root.join("enemy/spin.rs");
+    write_script(&spin, script_body());
+
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+
+    renzora_rust_script::watch::inject_event_for_test(&mut watcher, event_with_path(spin));
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root)
+        .expect("a Create event for a declared script produces a plan");
+    assert_eq!(plan.dirty.len(), 1);
+    assert_eq!(plan.dirty[0].path(), "enemy/spin.rs");
+    assert!(plan.removed.is_empty());
 }
 
 #[test]
 fn removing_the_marker_retires_a_previously_loaded_script() {
-    let id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "enemy/spin.rs",
-    )
-    .unwrap();
-    let outcome = translate(&[id.clone()], "enemy/spin.rs", Some(""), false);
-    let (out_id, dir) = outcome.expect("marker-removed previously-loaded script must retire");
-    assert_eq!(out_id, id);
-    assert_eq!(dir, "removed");
-}
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let spin = root.join("enemy/spin.rs");
+    write_script(&spin, script_body());
 
-#[test]
-fn editing_a_file_with_a_temporary_incomplete_save_does_not_retire() {
-    // The file is mid-edit but still contains the full `renzora::script!`
-    // declaration — the recognizer ignores anything that looks like
-    // comments, but a real partial save will eventually lose the
-    // declaration entirely, which the next event catches via the
-    // marker-removal branch.
-    let id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "enemy/spin.rs",
-    )
-    .unwrap();
-    // Source with the full declaration plus an in-progress edit
-    // (extra spaces and a typo in the function body that the editor
-    // hasn't yet cleaned up). The lexer treats the closing `)` and
-    // argument list as still valid Rust tokens; the recognizer finds
-    // `renzora::script!(update)` and reports Recognised.
-    let text_in_progress = "fn update(_: &mut renzora::ScriptCtx) {\n    let _ = 1;\n}\nrenzora::script!(update);\n";
-    let outcome = translate(&[id.clone()], "enemy/spin.rs", Some(text_in_progress), false);
-    let (_, dir) = outcome.expect("in-progress edit with full declaration produces a dirty bucket");
-    assert_eq!(dir, "dirty");
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "enemy/spin.rs").unwrap();
+    watcher.mark_seen(id.clone());
+
+    // Lose the declaration by overwriting the file with empty source.
+    fs::write(&spin, "").unwrap();
+    renzora_rust_script::watch::inject_event_for_test(&mut watcher, event_with_path(spin));
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root)
+        .expect("marker-removal on a previously-loaded script produces a plan");
+    assert!(plan.removed.contains(&id));
+    assert!(!plan.dirty.contains(&id));
 }
 
 #[test]
 fn rename_removes_old_identity_and_adds_new_identity() {
-    let old_id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "enemy/spin.rs",
-    )
-    .unwrap();
-    let new_id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "props/spin.rs",
-    )
-    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let old = root.join("enemy/spin.rs");
+    let new = root.join("props/spin.rs");
+    write_script(&old, script_body());
 
-    let seen = vec![old_id.clone()];
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+    let old_id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "enemy/spin.rs").unwrap();
+    watcher.mark_seen(old_id.clone());
 
-    // The remove-half of a rename: the OS reports the file gone at the
-    // old location. The translate step must retire the old id.
-    let (out_id, dir) = translate(&seen, "enemy/spin.rs", None, true)
-        .expect("rename remove-half must retire old id");
-    assert_eq!(out_id, old_id);
-    assert_eq!(dir, "removed");
+    // Simulate an atomic rename: the old path is reported missing, the
+    // new path is reported present with the declaration.
+    fs::remove_file(&old).unwrap();
+    write_script(&new, script_body());
+    renzora_rust_script::watch::inject_event_for_test(&mut watcher, event_removed(old));
+    renzora_rust_script::watch::inject_event_for_test(&mut watcher, event_with_path(new));
 
-    // The create-half of a rename: the OS reports the file at the new
-    // location with a script declaration. The translate step must dirty
-    // the new id.
-    let new_text = "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n";
-    let (out_id, dir) = translate(&seen, "props/spin.rs", Some(new_text), false)
-        .expect("rename create-half must dirty new id");
-    assert_eq!(out_id, new_id);
-    assert_eq!(dir, "dirty");
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root)
+        .expect("rename batch produces a plan");
+    let new_id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "props/spin.rs").unwrap();
+    assert!(plan.removed.contains(&old_id));
+    assert!(plan.dirty.contains(&new_id));
+    assert!(!plan.dirty.contains(&old_id));
+    assert!(!plan.removed.contains(&new_id));
 }
 
+#[test]
+fn delete_of_known_path_retires_id_via_lexical_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let spin = root.join("enemy/spin.rs");
+    write_script(&spin, script_body());
+
+    let mut watcher = renzora_rust_script::watch::ScriptWatcher::default();
+    renzora_rust_script::watch::attach_debouncer_for_test(&mut watcher, root);
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Project, "enemy/spin.rs").unwrap();
+    watcher.mark_seen(id.clone());
+
+    fs::remove_file(&spin).unwrap();
+    renzora_rust_script::watch::inject_event_for_test(&mut watcher, event_removed(spin));
+    let plan = renzora_rust_script::watch::reconcile_batch_for_test(&mut watcher, root)
+        .expect("delete of a known id produces a plan");
+    assert!(plan.removed.contains(&id));
+}
