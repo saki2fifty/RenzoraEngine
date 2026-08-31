@@ -75,6 +75,7 @@ use renzora_plugin_build::Sdk;
 use renzora_scripting::{scripts_should_run, ScriptComponent};
 
 pub use script_resolve::{build_artifact_path, build_dir_name, ResolvedScript};
+pub use watch::PendingRetires;
 
 /// The symbol a script exports, written by [`renzora::script!`].
 pub const SCRIPT_SYMBOL: &[u8] = b"renzora_script_update\0";
@@ -124,6 +125,7 @@ impl Plugin for RustScriptPlugin {
         }
         app.init_resource::<LoadedScripts>()
             .init_resource::<watch::ScriptWatcher>()
+            .init_resource::<watch::PendingRetires>()
             // Recompile on save. Unlike `dispatch` these are NOT gated on play
             // mode: a script should build when you save it, so the error is in
             // front of you while you are still looking at the code — not the next
@@ -454,10 +456,22 @@ pub fn build_to_path_with_id(
         sdk.manifest().lib_ext
     ));
 
-    // Write the canonical-id marker so the editor and exporter can
-    // detect collisions and stale directories before trusting
-    // their contents (Phase 1 correction 14).
-    let _ = script_resolve::write_build_dir_marker(project, id);
+    // Mark a stale directory (one whose marker does not match this id)
+    // BEFORE compile so a failed compile does not corrupt a working
+    // build. The marker is removed only after the compile writes the
+    // library; until then a verifier sees "missing marker" and refuses
+    // to stage.
+    let marker = script_resolve::build_dir_marker_path(project, id);
+    if marker.exists() {
+        match script_resolve::read_build_dir_marker(&marker) {
+            Ok(Some(text)) if text == id.to_scheme_path() => {}
+            Ok(Some(_)) => {
+                let _ = std::fs::remove_file(&marker);
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("read stale marker {marker:?}: {e}")),
+        }
+    }
 
     sdk.compile(&build, &out).map_err(|e| {
         // Point at the file the author edits, not the staged copy they have never
@@ -472,6 +486,12 @@ pub fn build_to_path_with_id(
             &src.to_string_lossy(),
         )
     })?;
+
+    // Write the marker only after a successful compile, and propagate
+    // any I/O error so the caller knows the directory's identity is not
+    // yet recorded.
+    script_resolve::write_build_dir_marker(project, id)
+        .map_err(|e| format!("write marker: {e}"))?;
     Ok(out)
 }
 

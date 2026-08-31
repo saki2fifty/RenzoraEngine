@@ -79,32 +79,12 @@ pub fn collect_rust_scripts(project_root: &Path) -> Vec<PathBuf> {
 /// lexicographically by relpath so duplicate-leaf-name coexistence is
 /// observable.
 pub fn collect_canonical_scripts(project_root: &Path) -> Vec<renzora_identity::CanonicalId> {
-    COLLECT_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut out: Vec<renzora_identity::CanonicalId> = collect_rust_scripts(project_root)
         .into_iter()
         .filter_map(|p| project_relpath_for(project_root, &p))
         .collect();
     out.sort();
     out
-}
-
-/// Counter for `collect_canonical_scripts` invocations. Test-only
-/// instrumentation exposed via the `pub(crate)` accessors below so the
-/// integration test `tests/watcher_idle.rs` can assert that idle
-/// frames perform zero discovery calls. Marked `#[cfg(test)]` at
-/// the call site (inside the function) so the counter is only
-/// incremented in test builds; the accessors stay callable from
-/// integration tests in any case.
-static COLLECT_CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-#[doc(hidden)]
-pub fn reset_collect_call_count() {
-    COLLECT_CALL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[doc(hidden)]
-pub fn collect_call_count() -> usize {
-    COLLECT_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Compute the canonical project-relpath identity for a single on-disk
