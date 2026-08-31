@@ -1362,7 +1362,7 @@ mod tests {
         });
     }
 
-/// Per-script attempt counter. Indexed by canonical id.
+/// Per-script counter. Indexed by canonical id.
     #[derive(Default)]
     struct AttemptCounts {
         /// `project_calls[path]` — how many times the lifecycle
@@ -1376,11 +1376,15 @@ mod tests {
         /// the same project with the same scripts increments both
         /// counters again, by design).
         id_attempts: std::collections::BTreeMap<CanonicalId, usize>,
-        /// `successful[id]` — how many times the strategy returned a
-        /// usable artifact for this id (the test fake returns `Ok`
-        /// for every script, so this stays equal to `id_attempts[id]`
-        /// while the project is open).
-        successful: std::collections::BTreeMap<CanonicalId, usize>,
+        /// `actions_returned[id]` — how many times the strategy
+        /// returned a `CompileAction` for this id. The test fake
+        /// returns `Ok(action)` for every script it discovers, so this
+        /// stays equal to `id_attempts[id]` while the project is open
+        /// (the fake's artifact path does not exist, so the orchestrator's
+        /// `load_library` step fails after this count is recorded —
+        /// i.e. an "action returned" by the strategy does not imply
+        /// a successful `dlopen`).
+        actions_returned: std::collections::BTreeMap<CanonicalId, usize>,
         /// `failed[id]` — how many times the strategy returned an
         /// error for this id (zero in the happy-path test).
         failed: std::collections::BTreeMap<CanonicalId, usize>,
@@ -1392,6 +1396,9 @@ mod tests {
         }
         fn id_attempts_for(&self, id: &CanonicalId) -> usize {
             self.id_attempts.get(id).copied().unwrap_or(0)
+        }
+        fn actions_returned_for(&self, id: &CanonicalId) -> usize {
+            self.actions_returned.get(id).copied().unwrap_or(0)
         }
         fn failed_for(&self, id: &CanonicalId) -> usize {
             self.failed.get(id).copied().unwrap_or(0)
@@ -1426,7 +1433,7 @@ mod tests {
             AttemptCounts {
                 project_calls: guard.project_calls.clone(),
                 id_attempts: guard.id_attempts.clone(),
-                successful: guard.successful.clone(),
+                actions_returned: guard.actions_returned.clone(),
                 failed: guard.failed.clone(),
             }
         }
@@ -1450,7 +1457,7 @@ mod tests {
                 // orchestrator's error branch runs; this test asserts
                 // strategy records, not the load outcome.
                 let artifact = project.join(".renzora").join("test_artifact.so");
-                *counts.successful.entry(canonical.clone()).or_insert(0) += 1;
+                *counts.actions_returned.entry(canonical.clone()).or_insert(0) += 1;
                 actions.push(CompileAction {
                     src: src.clone(),
                     id: canonical,
@@ -1883,7 +1890,7 @@ mod tests {
     //   2. the PreScript -> Lifecycle ordering is still enforced;
     //   3. the lifecycle + load still work.
     #[test]
-    fn scheduler_with_scripting_plugin_installed() {
+    fn scheduler_with_external_pre_script_provider() {
         // The default `scheduler_seven_frames` test exercises the
         // fallback branch of `RustScriptPlugin::finish` (no
         // `ScriptingPlugin`, so the fallback `ScriptsActive` +
@@ -2007,7 +2014,7 @@ mod tests {
         assert_eq!(counts.id_attempts_for(&a2), 2);
     }
 
-    /// A no-op system used by `scheduler_with_scripting_plugin_installed`
+    /// A no-op system used by `scheduler_with_external_pre_script_provider`
     /// to stand in for `ScriptingPlugin::update_scripts_active`. The
     /// production plugin runs more systems than this — see the editor's
     /// own integration tests for the full wiring.
