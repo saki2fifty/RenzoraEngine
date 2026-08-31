@@ -476,16 +476,26 @@ pub fn collect_project_scripts(project: &Path) -> Vec<PathBuf> {
     crate::discovery::collect_rust_scripts(project)
 }
 
-/// `declares_script` kept here as a free function so [`crate::discovery`]
-/// can call it from a child `walk` (it would not be reachable from a
-/// `super::declares_script` path at module scope otherwise). The substring
-/// test is what Phase 1 commit 1.4 will replace; until that commit lands
-/// the behaviour is unchanged.
+/// Phase 1 commit 1.4: declaration recognition backed by `rustc_lexer`
+/// 0.1.0. Returns `true` when the file source declares a script via
+/// `renzora::script!(...)` somewhere the lexer treats as code (not a
+/// comment, string, byte string, raw string, char literal, or
+/// identifier continuation). Truncated source returns `false` and never
+/// panics.
+pub fn declaration_recognised(source: &str) -> bool {
+    matches!(
+        renzora_identity::Recogniser::new().scan(source),
+        renzora_identity::Declaration::Recognised,
+    )
+}
+
+/// `declares_script` kept here as a thin wrapper for backward-compatibility
+/// with `crates/renzora_plugin_build` callers that still expect it.
 fn declares_script(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
-    text.contains("renzora::script!") || text.contains("script!(")
+    declaration_recognised(&text)
 }
 
 /// The manifest a copy-based export ships beside the script libraries.

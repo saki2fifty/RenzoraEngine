@@ -44,10 +44,12 @@ renzora_plugin_build = { path = "../renzora_plugin_build" }
 renzora_scripting = { path = "../renzora_scripting", default-features = false }
 libloading = "0.8"
 # Canonical plugin/script identity. Used by Phase 1 commits 1.2-1.4
-# (recursive walk, watcher reconciliation, alias-aware dispatch).
-# `discovery` enabled so the watcher uses `DiscoveredPath` for both the
-# recursive collector and the filesystem-watch reconcile.
-renzora_identity = { path = "../renzora_identity", features = ["discovery"] }
+# (recursive walk, watcher reconciliation, alias-aware dispatch,
+# rustc_lexer-backed declaration recogniser). `discovery` enabled so
+# the watcher uses `DiscoveredPath` for both the recursive collector and
+# the filesystem-watch reconcile; `rustc_lexer` enabled so the commit
+# 1.4 recogniser compiles its declarations against the lexer.
+renzora_identity = { path = "../renzora_identity", features = ["discovery", "rustc_lexer"] }
 # OS-backed filesystem notifications. The script watcher (Phase 1 commit 1.2)
 # replaces the previous flat 0.5 s poll with recursive watches driven by
 # `notify_debouncer_full`, matching the C-ABI plugin hot-reload path's

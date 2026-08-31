@@ -136,10 +136,15 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        // Declaration recognition is committed in Phase 1 commit 1.4; this
-        // commit only re-structures the walk so a future recogniser slots
-        // in at one filter point.
-        if !super::declares_script(&path) {
+        // Phase 1 commit 1.4: the recogniser reads the file's bytes into
+        // a `&str` (which is always valid UTF-8 — Rust source files are
+        // UTF-8 by convention) and asks the lexer-based scanner whether
+        // the file declares itself a script. Truncated source returns
+        // `NotRecognised` and is treated as a non-script.
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !crate::declaration_recognised(&text) {
             continue;
         }
         out.push(path);
