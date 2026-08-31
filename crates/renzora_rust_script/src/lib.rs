@@ -130,7 +130,10 @@ impl Plugin for RustScriptPlugin {
             // mode: a script should build when you save it, so the error is in
             // front of you while you are still looking at the code — not the next
             // time you press play.
-            .add_systems(Update, (watch::watch, watch::finish))
+            .add_systems(
+                Update,
+                (watch::watch, watch::compile_for_new_project, watch::finish),
+            )
             // Claims `.rs` with the engine. Not done in `build` because the
             // engine is a resource another plugin creates, and plugin build
             // order is not something to depend on.
@@ -335,10 +338,13 @@ impl LoadedScripts {
     }
 }
 
-/// Build and load every `.rs` in the open project's `scripts/`.
-///
-/// On entering the editor rather than at startup, because a project — and
+/// On entering the editor, build and load every `.rs` in the open
+/// project's `scripts/`. Runs once per editor entry; a project — and
 /// therefore a `scripts/` directory — does not exist before then.
+///
+/// The lifecycle transitions for first open, switch, and reopen all
+/// route through `compile_and_load_for_project` so the orchestration
+/// has one definition.
 fn compile_and_load(world: &mut World) {
     let Some(project) = world
         .get_resource::<CurrentProject>()
@@ -346,9 +352,27 @@ fn compile_and_load(world: &mut World) {
     else {
         return;
     };
-    // The whole project, not `scripts/` alone — see `discovery::collect_rust_scripts`
-    // for why, and for what keeps a non-script `.rs` out of the set.
-    let sources: Vec<PathBuf> = crate::discovery::collect_rust_scripts(&project);
+    compile_and_load_for_project(world, &project);
+}
+
+/// Production orchestration for "open / switch into this project and
+/// load its scripts". Used by both `compile_and_load` (the OnEnter
+/// system that runs on first editor entry) and the watcher's project
+/// lifecycle for switches and reopens.
+///
+/// Discovery happens against the project root; sources that lack a
+/// script-declaration are skipped. Each discovered id is recorded as
+/// seen by the watcher BEFORE the build runs, so the next reconcile
+/// does not re-build it. A failed compile is recorded as seen too —
+/// matching the watcher's own rule that a broken script stays quiet
+/// until the next edit.
+///
+/// The shared SDK is loaded lazily from `<exe-dir>/sdk` because the
+/// installation is per-binary; without an SDK nothing compiles and a
+/// single warn / console-error covers all scripts (no per-script
+/// failures for the same root cause).
+pub(crate) fn compile_and_load_for_project(world: &mut World, project: &Path) {
+    let sources: Vec<PathBuf> = crate::discovery::collect_rust_scripts(project);
     if sources.is_empty() {
         return;
     }
@@ -357,8 +381,6 @@ fn compile_and_load(world: &mut World) {
     let sdk = match Sdk::load(root.join("sdk")) {
         Ok(sdk) => sdk,
         Err(e) => {
-            // Said once rather than per script: without an SDK nothing can be
-            // built, and the reason is the same for all of them.
             warn!("rust scripts cannot be built: {e}");
             console_error("Script", format!("Rust scripts cannot be built — {e}"));
             return;
@@ -366,28 +388,18 @@ fn compile_and_load(world: &mut World) {
     };
 
     for src in sources {
-        let canonical = crate::discovery::project_relpath_for(&project, &src);
+        let canonical = crate::discovery::project_relpath_for(project, &src);
         let canonical = match canonical {
             Some(c) => c,
-            None => continue, // not a `.rs` under the project root; collected but ignored.
+            None => continue,
         };
         let canonical_for_log = canonical.clone();
         let canonical_for_build = canonical.clone();
         let canonical_for_task = canonical.clone();
-        // Claim this source for the watcher BEFORE building it. The watcher decides
-        // what to rebuild by comparing against `seen`, and it has never seen
-        // anything yet — so without this it noticed every script half a second
-        // later and built the whole directory a second time, on the task pool,
-        // while these builds were still finishing. Two rustc runs per script at
-        // project open, and a leaked image for each.
-        //
-        // Recorded even when the build below fails, matching the watcher's own
-        // rule: a script that does not compile stays quiet until it is edited
-        // again rather than re-reporting the same error every poll.
         world
             .resource_mut::<watch::ScriptWatcher>()
             .mark_seen(canonical_for_log.clone());
-        let build_root = project.clone();
+        let build_root = project.to_path_buf();
         let task_path = src.clone();
         match build_to_path_with_id(&sdk, &build_root, &task_path, &canonical_for_build)
             .and_then(|p| load_library(&p))
@@ -400,11 +412,6 @@ fn compile_and_load(world: &mut World) {
                 console_success("Script", format!("compiled {canonical_for_log}"));
             }
             Err(e) => {
-                // Both, and neither is redundant. `error!` reaches stdout and the
-                // Problems panel (which has a tracing layer); the Console panel
-                // has none and only shows what is pushed to it explicitly. A
-                // compile error is the single thing a script author most needs to
-                // see, so it goes to the place they are already looking.
                 error!("[rust-script] {canonical_for_log}: {e}");
                 console_error("Script", format!("{canonical_for_log}\n{e}"));
             }
