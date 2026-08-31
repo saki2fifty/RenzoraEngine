@@ -439,19 +439,37 @@ pub fn build_to_path_with_id(
 ) -> Result<PathBuf, String> {
     let dir_name = script_resolve::build_dir_name(id);
     let build = project.join(".renzora").join("scripts").join(&dir_name);
+    let marker = script_resolve::build_dir_marker_path(project, id);
+
+    // 1. Validate the marker BEFORE touching anything else. If a marker
+    //    already exists for another canonical id, the hashed directory
+    //    collides with that id's existing build output. Return a clear
+    //    error; do NOT remove the marker, do NOT overwrite any staged
+    //    source, do NOT compile into that directory.
+    match std::fs::symlink_metadata(&marker) {
+        Ok(meta) if meta.file_type().is_file() => {
+            match script_resolve::read_build_dir_marker(&marker) {
+                Ok(Some(text)) if text == id.to_scheme_path() => {}
+                Ok(Some(other)) => {
+                    return Err(format!(
+                        "build-directory hash collision: {} already claimed by {other}; \
+                         refusing to overwrite the existing build directory",
+                        marker.display()
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => return Err(format!("read marker {}: {e}", marker.display())),
+            }
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("stat marker {}: {e}", marker.display())),
+    }
+
     std::fs::create_dir_all(build.join("src")).map_err(|e| e.to_string())?;
 
-    // `Sdk::compile` takes a plugin-shaped DIRECTORY (`<dir>/src/lib.rs`) — it
-    // generates the Cargo.toml Bevy's derives need there and takes the crate name
-    // from it. A script is one loose file, so it is staged into that shape rather
-    // than teaching the compiler a second layout.
     std::fs::copy(src, build.join("src").join("lib.rs")).map_err(|e| e.to_string())?;
 
-    // A recompile writes a NEW file rather than overwriting the loaded one: on
-    // Windows the previous library is still mapped and cannot be replaced, and on
-    // every platform overwriting a mapped image is a way to crash later rather
-    // than fail now. The generation counter is the file's own mtime, which is
-    // monotonic enough and needs no state kept anywhere.
     let gen = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -462,27 +480,7 @@ pub fn build_to_path_with_id(
         sdk.manifest().lib_ext
     ));
 
-    // Mark a stale directory (one whose marker does not match this id)
-    // BEFORE compile so a failed compile does not corrupt a working
-    // build. The marker is removed only after the compile writes the
-    // library; until then a verifier sees "missing marker" and refuses
-    // to stage.
-    let marker = script_resolve::build_dir_marker_path(project, id);
-    if marker.exists() {
-        match script_resolve::read_build_dir_marker(&marker) {
-            Ok(Some(text)) if text == id.to_scheme_path() => {}
-            Ok(Some(_)) => {
-                let _ = std::fs::remove_file(&marker);
-            }
-            Ok(None) => {}
-            Err(e) => return Err(format!("read stale marker {marker:?}: {e}")),
-        }
-    }
-
     sdk.compile(&build, &out).map_err(|e| {
-        // Point at the file the author edits, not the staged copy they have never
-        // seen — a diagnostic naming `.renzora/scripts/spin/src/lib.rs` sends
-        // them to a derived file that is overwritten on every build.
         e.to_string().replace(
             &build
                 .join("src")
@@ -493,9 +491,6 @@ pub fn build_to_path_with_id(
         )
     })?;
 
-    // Write the marker only after a successful compile, and propagate
-    // any I/O error so the caller knows the directory's identity is not
-    // yet recorded.
     script_resolve::write_build_dir_marker(project, id)
         .map_err(|e| format!("write marker: {e}"))?;
     Ok(out)
