@@ -589,12 +589,24 @@ fn load_prebuilt_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool
         }
         let canonical = match renzora_identity::CanonicalId::parse(key) {
             Ok(c) => c,
-            Err(e) => {
-                // Pre-Phase-1 exports wrote bare-name keys. We still accept
-                // them, but the call site must have uniqueness at runtime; the
-                // BareAliasIndex will report ambiguity at lookup time.
-                warn!("[rust-script] legacy key in prebuilt manifest: {key} ({e})");
-                continue;
+            Err(_) => {
+                // Pre-Phase-1 exports wrote project-relative rows without
+                // the `project://` prefix. Interpret them as project
+                // canonical ids by prefixing the scheme. If the row
+                // still fails parsing, treat it as a true malformed
+                // entry and emit an explicit unsupported-version error.
+                match renzora_identity::CanonicalId::from_rooted(
+                    renzora_identity::RootKind::Project,
+                    key,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(
+                            "[rust-script] malformed prebuilt manifest row {key:?}: {e}"
+                        );
+                        continue;
+                    }
+                }
             }
         };
         if let Some(f) = opened.get(file) {

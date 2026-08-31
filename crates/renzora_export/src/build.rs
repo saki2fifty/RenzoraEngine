@@ -1198,7 +1198,7 @@ pub fn stage_runtime_native_plugins(
 /// player needs no SDK and no Rust toolchain — the compiling already happened.
 ///
 /// Copies rather than recompiles. The editor builds every script on project open
-/// and again on save, so `<project>/.renzora/scripts/<stem>/` already holds a
+/// and again on save, so `<project>/.renzora/scripts/<dir>/` already holds a
 /// current library; building a second time would only produce the same bytes
 /// more slowly. A script that never compiled has nothing there and is reported
 /// rather than silently omitted.
@@ -1209,6 +1209,14 @@ pub fn stage_runtime_native_plugins(
 /// cross-platform copy export therefore has no Rust scripts, which is a real
 /// gap and the reason the lean path compiles them in instead.
 ///
+/// The manifest (`scripts.index`) uses the same canonical-id derivation
+/// the editor uses for its build directories. Each row's key is a
+/// `project://<rel>` canonical id (which the runtime's
+/// `LoadedScripts::load_prebuilt_scripts` parses). A row keyed by the
+/// bare leaf name is added only when that leaf is unique across the
+/// project — duplicate leaves stay reachable through their full
+/// canonical paths and dispatch reports the bare alias as Ambiguous.
+///
 /// Returns how many were staged.
 pub fn stage_prebuilt_scripts(
     project_dir: &Path,
@@ -1216,40 +1224,39 @@ pub fn stage_prebuilt_scripts(
     lib_ext: &str,
     progress: &mut dyn FnMut(String),
 ) -> Result<usize, String> {
-    let mut sources: Vec<PathBuf> = Vec::new();
-    collect_scripts(project_dir, &mut sources)?;
-    sources.sort();
-    if sources.is_empty() {
+    use renzora_identity::{CanonicalId, RootKind};
+
+    // Discover the canonical ids in the project. We mirror the
+    // editor's discovery layer's walk, including its declaration
+    // recognition, so an exporter that walks a freshly-built project
+    // finds exactly the same canonical ids the editor loaded.
+    let canonical_ids: Vec<CanonicalId> = collect_canonical_scripts_for_export(project_dir)?;
+    if canonical_ids.is_empty() {
         return Ok(0);
     }
 
     let dest = output_dir.join("scripts");
     std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
 
-    // Same dual-key scheme the compiled-in path uses, for the same reason: the
-    // dispatcher resolves by leaf, but leaves are not unique once scripts may
-    // live in any folder.
+    // Compute leaf-occurrence counts so the manifest can offer a
+    // unique bare-leaf key when possible.
     let mut leaf_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for src in &sources {
-        if let Some(leaf) = src.file_name().and_then(|n| n.to_str()) {
-            *leaf_counts.entry(leaf.to_string()).or_default() += 1;
-        }
+    for id in &canonical_ids {
+        *leaf_counts.entry(id.bare_leaf().to_string()).or_default() += 1;
     }
 
     let mut index = String::new();
     let mut staged = 0usize;
     let mut missing: Vec<String> = Vec::new();
-    for (i, src) in sources.iter().enumerate() {
-        let leaf = src.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        let rel =
-            src.strip_prefix(project_dir).unwrap_or(src).to_string_lossy().replace('\\', "/");
-
-        // The editor writes a NEW file per rebuild (a mapped library cannot be
-        // overwritten on Windows), so the directory accumulates generations and
-        // the newest is the current one.
-        let build_dir = project_dir.join(".renzora").join("scripts").join(stem);
+    for (i, id) in canonical_ids.iter().enumerate() {
+        // The editor's build dir is keyed off `build_dir_name(id)` —
+        // a stable hash of the canonical id's scheme-path. This is the
+        // exact same function `renzora_rust_script` uses internally;
+        // we re-derive the hash here so the exporter and the editor
+        // stay in lockstep.
+        let dir_name = build_dir_name_for_export(id);
+        let build_dir = project_dir.join(".renzora").join("scripts").join(&dir_name);
         let newest = std::fs::read_dir(&build_dir)
             .ok()
             .into_iter()
@@ -1260,20 +1267,27 @@ pub fn stage_prebuilt_scripts(
             .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
 
         let Some(lib) = newest else {
-            missing.push(rel);
+            missing.push(id.path().to_string());
             continue;
         };
 
         // Named by index, not by stem: two scripts in different folders may share
-        // a stem, and one would overwrite the other.
+        // a leaf, and one would overwrite the other.
         let file = format!("script_{i}.{lib_ext}");
         std::fs::copy(&lib, dest.join(&file))
             .map_err(|e| format!("copy {} → {}: {e}", lib.display(), file))?;
-        index.push_str(&format!("{rel}\t{file}\n"));
-        if leaf_counts.get(leaf).copied().unwrap_or(0) == 1 {
+
+        // Canonical-key row (mandatory; the runtime requires this).
+        let scheme_path = id.to_scheme_path();
+        index.push_str(&format!("{scheme_path}\t{file}\n"));
+
+        // Bare-leaf alias row (only when unique; never as a duplicate).
+        let leaf = id.bare_leaf().to_string();
+        if leaf_counts.get(&leaf).copied().unwrap_or(0) == 1 {
             index.push_str(&format!("{leaf}\t{file}\n"));
         }
         staged += 1;
+        let _ = RootKind::Project; // silence unused-import warnings when only used in pattern
     }
 
     if !missing.is_empty() {
@@ -1292,6 +1306,82 @@ pub fn stage_prebuilt_scripts(
         .map_err(|e| format!("write script index: {e}"))?;
     progress(format!("Shipped {staged} compiled Rust script(s)"));
     Ok(staged)
+}
+
+/// Reproduce the editor's canonical-id discovery. We walk the project
+/// the same way `discovery::collect_canonical_scripts` does, including
+/// the declaration recognition, so we don't drift from what the editor
+/// loaded.
+fn collect_canonical_scripts_for_export(
+    project_dir: &Path,
+) -> Result<Vec<renzora_identity::CanonicalId>, String> {
+    use renzora_identity::{CanonicalId, RootKind};
+    const SKIP: &[&str] = &[
+        "target", ".git", ".renzora", "node_modules", "dist", ".svn", ".hg",
+    ];
+
+    fn walk(
+        project_root: &Path,
+        current: &Path,
+        out: &mut Vec<CanonicalId>,
+        skip: &[&str],
+    ) -> Result<(), String> {
+        let entries = match std::fs::read_dir(current) {
+            Ok(it) => it,
+            Err(_) => return Ok(()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if path.is_dir() {
+                if !skip.contains(&name) && !name.starts_with('.') {
+                    walk(project_root, &path, out, skip)?;
+                }
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !renzora_rust_script::declaration_recognised(&text) {
+                continue;
+            }
+            // Strip the project root, not the inner current dir, so the
+            // relpath is always project-relative.
+            let rel = match path.strip_prefix(project_root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let rel_norm = rel.to_string_lossy().replace('\\', "/");
+            if let Ok(id) = CanonicalId::from_rooted(RootKind::Project, &rel_norm) {
+                out.push(id);
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    walk(project_dir, project_dir, &mut out, SKIP)?;
+    out.sort();
+    Ok(out)
+}
+
+/// Re-derive `build_dir_name` from `renzora_rust_script`. The exact
+/// algorithm must match the editor's; otherwise the exporter and the
+/// editor will not share build directories. We use SipHash with the
+/// same byte representation the editor uses (scheme://path) so the two
+/// stay in lockstep across renzora_rust_script versions.
+fn build_dir_name_for_export(id: &renzora_identity::CanonicalId) -> String {
+    use std::hash::{Hasher};
+    let s = id.to_scheme_path();
+    let mut h = std::collections::hash_map::DefaultHasher::default();
+    h.write(s.as_bytes());
+    format!("{:016x}", h.finish())
 }
 
 /// The project's scripts, as the EDITOR defines them.
