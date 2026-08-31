@@ -21,7 +21,7 @@ extern crate alloc;
 mod discovery;
 mod identity;
 
-pub use identity::{BareAliasIndex, CanonicalId, IdParseError, RootKind};
+pub use identity::{AliasLookup, BareAliasIndex, CanonicalId, IdParseError, RootKind};
 
 #[cfg(feature = "discovery")]
 pub use discovery::{DiscoveredPath, DiscoveryError};

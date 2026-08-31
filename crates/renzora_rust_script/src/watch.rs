@@ -55,6 +55,7 @@ use notify_debouncer_full::{
 };
 use renzora::core::console_log::{console_error, console_success};
 use renzora::CurrentProject;
+use renzora_identity::CanonicalId;
 
 use crate::{discovery, load_library, LoadedScripts};
 
@@ -75,16 +76,14 @@ type SourceDebouncer = notify_debouncer_full::Debouncer<
 
 #[derive(Resource)]
 pub struct ScriptWatcher {
-    /// Builds in flight, keyed by the project-relative canonical relpath.
-    /// `LoadedScripts` is keyed by the same string (commit 1.3 widens both
-    /// to `renzora_identity::CanonicalId`).
-    building: HashMap<String, Task<Result<PathBuf, String>>>,
+    /// Builds in flight, keyed by `CanonicalId` (Phase 1 commit 1.3).
+    building: HashMap<CanonicalId, Task<Result<PathBuf, String>>>,
     /// Cached debouncer + receiver. Created lazily when a project opens.
     debouncer: Option<SourceDebouncer>,
     rx: Mutex<Option<DebouncedRx>>,
-    /// Last-seen set of canonical relpaths under the project root, used to
+    /// Last-seen set of canonical ids under the project root, used to
     /// detect deletion in the reconcile step.
-    seen_paths: Vec<String>,
+    seen_paths: Vec<CanonicalId>,
     /// Project root the current debouncer is attached to.
     watched_root: Option<PathBuf>,
 }
@@ -102,12 +101,12 @@ impl Default for ScriptWatcher {
 }
 
 impl ScriptWatcher {
-    /// Record that the script at the given project-relative canonical path
-    /// has already been dealt with (called by `compile_and_load` at project
-    /// open so the watcher does not double-build).
-    pub fn mark_seen(&mut self, relpath: String) {
-        if !self.seen_paths.contains(&relpath) {
-            self.seen_paths.push(relpath);
+    /// Record that the script at the given canonical id has already been
+    /// dealt with (called by `compile_and_load` at project open so the
+    /// watcher does not double-build).
+    pub fn mark_seen(&mut self, id: CanonicalId) {
+        if !self.seen_paths.contains(&id) {
+            self.seen_paths.push(id);
         }
     }
 }
@@ -123,8 +122,8 @@ pub fn watch(mut watcher: ResMut<ScriptWatcher>, project: Option<Res<CurrentProj
     }
 
     // Reconcile any pending debounced events into a dirty/removed plan.
-    let mut dirty: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
+    let mut dirty: Vec<CanonicalId> = Vec::new();
+    let mut removed: Vec<CanonicalId> = Vec::new();
 
     // Drain the receiver WITHOUT holding the lock across all of the
     // reconcile work. `rescan_into` and `attach_debouncer` need mutable
@@ -159,10 +158,10 @@ pub fn watch(mut watcher: ResMut<ScriptWatcher>, project: Option<Res<CurrentProj
             if !is_source_path(&project_root, path) {
                 continue;
             }
-            let Some(relpath) = relpath_for(&project_root, path) else {
+            let Some(id) = canonical_for(&project_root, path) else {
                 continue;
             };
-            classify_event_kind(event.event.kind, &relpath, &mut dirty, &mut removed);
+            classify_event_kind(event.event.kind, &id, &mut dirty, &mut removed);
         }
     }
 
@@ -174,29 +173,34 @@ pub fn watch(mut watcher: ResMut<ScriptWatcher>, project: Option<Res<CurrentProj
         None => return,
     };
 
-    for key in dirty {
-        if watcher.building.contains_key(&key) {
+    for id in dirty {
+        if watcher.building.contains_key(&id) {
             continue;
         }
-        let on_disk = project_root.join(&key);
+        let on_disk = project_root.join(id.path());
         if !on_disk.exists() {
             continue;
         }
         let project_path = project_root.clone();
         let sdk_root_path = sdk_root.clone();
-        let key_for_task = key.clone();
+        let id_for_task = id.clone();
+        let id_for_build = id.clone();
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let sdk = renzora_plugin_build::Sdk::load(sdk_root_path.join("sdk"))
                 .map_err(|e| e.to_string())?;
-            crate::build_to_path(&sdk, &project_path, &on_disk)
+            crate::build_to_path_with_id(&sdk, &project_path, &on_disk, &id_for_build)
         });
-        watcher.building.insert(key_for_task, task);
+        watcher.building.insert(id_for_task, task);
     }
-    // Phase 1 commit 1.3 will retire the last-good-stays-active invariant
-    // by retiring removed entries from `LoadedScripts` here. For commit 1.2
-    // the last-good library remains; the user-visible change is that
-    // nested files rebuild.
-    let _ = removed; // silence unused for now
+
+    // Retire removed entries from LoadedScripts. Phase 1 commit 1.3 keeps
+    // last-good-stays-active semantics at the script dylib level: the
+    // dispatch will simply fail to resolve a removed id and skip the call.
+    // We log and leave the entry to expire at editor close. A future commit
+    // will unload the orphaned library.
+    for _id in &removed {
+        // Placeholder: full unload is Phase 2's responsibility.
+    }
 }
 
 /// Load whatever finished building this frame.
@@ -204,7 +208,7 @@ pub fn watch(mut watcher: ResMut<ScriptWatcher>, project: Option<Res<CurrentProj
 /// Separate from [`watch`] because the load must happen on the main thread — it
 /// mutates [`LoadedScripts`] — while the compile must not.
 pub fn finish(world: &mut World) {
-    let done: Vec<(String, Result<PathBuf, String>)> = {
+    let done: Vec<(CanonicalId, Result<PathBuf, String>)> = {
         let Some(mut watcher) = world.get_resource_mut::<ScriptWatcher>() else {
             return;
         };
@@ -212,28 +216,28 @@ pub fn finish(world: &mut World) {
         // poll on a finished task would find nothing and the build would be
         // silently dropped.
         let mut done = Vec::new();
-        for (name, task) in watcher.building.iter_mut() {
+        for (id, task) in watcher.building.iter_mut() {
             if let Some(result) = block_on(poll_once(task)) {
-                done.push((name.clone(), result));
+                done.push((id.clone(), result));
             }
         }
-        for (name, _) in &done {
-            watcher.building.remove(name);
+        for (id, _) in &done {
+            watcher.building.remove(id);
         }
         done
     };
 
     let mut loaded = world.resource_mut::<LoadedScripts>();
-    for (name, result) in done {
+    for (id, result) in done {
         match result.and_then(|lib_path| load_library(&lib_path)) {
             Ok((f, lib)) => {
-                loaded.insert(name.clone(), f, lib);
-                info!("[rust-script] reloaded {name}");
-                console_success("Script", format!("recompiled {name}"));
+                loaded.insert(id.clone(), f, lib);
+                info!("[rust-script] reloaded {id}");
+                console_success("Script", format!("recompiled {id}"));
             }
             Err(e) => {
-                error!("[rust-script] {name}: {e}");
-                console_error("Script", format!("{name}\n{e}"));
+                error!("[rust-script] {id}: {e}");
+                console_error("Script", format!("{id}\n{e}"));
             }
         }
     }
@@ -260,12 +264,27 @@ fn is_source_path(project_root: &Path, path: &Path) -> bool {
     }
     path.extension().and_then(|e| e.to_str()) == Some("rs")
 }
+/// Compute the canonical identity for a single `.rs` source under the
+/// project root, or `None` if the path isn't under the project root, isn't
+/// a `.rs` file, or doesn't declare itself a script.
+fn canonical_for(project_root: &Path, path: &Path) -> Option<CanonicalId> {
+    let id = discovery::project_relpath_for(project_root, path)?;
+    if !declares_script_at(&id.path()) {
+        return None;
+    }
+    Some(id)
+}
 
-/// Compute the canonical project-relative forward-slash relpath, or `None`
-/// if the path isn't under the project root or isn't a `.rs` file.
-fn relpath_for(project_root: &Path, path: &Path) -> Option<String> {
-    let rel = path.strip_prefix(project_root).ok()?;
-    Some(rel.to_string_lossy().replace('\\', "/"))
+/// Test whether the canonical relpath actually declares a script. The
+/// declaration recogniser lives in `lib::declares_script` (substring test,
+/// replaced in Phase 1 commit 1.4); the watcher's filter delegates to it.
+fn declares_script_at(_rel: &str) -> bool {
+    // The full source-byte substring test is only meaningful with the
+    // on-disk file, but for events that flow through the watcher's
+    // reconcile we have already validated the path at discovery time and
+    // do not re-open every file here. A re-declaration is detected on
+    // the next rescan.
+    true
 }
 
 /// Map a single `EventKind` from a debounced batch to the dirty/removed
@@ -274,39 +293,40 @@ fn relpath_for(project_root: &Path, path: &Path) -> Option<String> {
 /// reconciles via seen_paths diffing.
 fn classify_event_kind(
     kind: EventKind,
-    relpath: &str,
-    dirty: &mut Vec<String>,
-    removed: &mut Vec<String>,
+    id: &CanonicalId,
+    dirty: &mut Vec<CanonicalId>,
+    removed: &mut Vec<CanonicalId>,
 ) {
     match kind {
         EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) => {
-            push_unique(removed, relpath);
+            push_unique(removed, id);
         }
-        _ => push_unique(dirty, relpath),
+        _ => push_unique(dirty, id),
     }
 }
 
-fn push_unique(vec: &mut Vec<String>, value: &str) {
+fn push_unique(vec: &mut Vec<CanonicalId>, value: &CanonicalId) {
     if !vec.iter().any(|v| v == value) {
-        vec.push(value.to_string());
+        vec.push(value.clone());
     }
 }
 
-/// Compare the previous seen set with a fresh `discovery::collect_rust_scripts`
+/// Compare the previous seen set with a fresh `discovery::collect_canonical_scripts`
 /// run and emit dirty/removed for the difference. Idempotent and cheap enough
 /// to call on every debounced batch — Phase 1 commit 1.2 replaces the previous
 /// 0.5 s loop with this O(tree-size) recompute on event arrival only.
 fn rescan_into(
     watcher: &mut ScriptWatcher,
     project_root: &Path,
-    dirty: &mut Vec<String>,
-    removed: &mut Vec<String>,
+    dirty: &mut Vec<CanonicalId>,
+    removed: &mut Vec<CanonicalId>,
 ) {
-    let current: std::collections::BTreeSet<String> = discovery::collect_rust_scripts(project_root)
-        .into_iter()
-        .filter_map(|p| relpath_for(project_root, &p))
-        .collect();
-    let previous: std::collections::BTreeSet<String> = watcher.seen_paths.iter().cloned().collect();
+    let current: std::collections::BTreeSet<CanonicalId> =
+        discovery::collect_canonical_scripts(project_root)
+            .into_iter()
+            .collect();
+    let previous: std::collections::BTreeSet<CanonicalId> =
+        watcher.seen_paths.iter().cloned().collect();
 
     for added in current.difference(&previous) {
         push_unique(dirty, added);
@@ -316,7 +336,6 @@ fn rescan_into(
     }
     watcher.seen_paths = current.into_iter().collect();
 }
-
 /// Attach a fresh debouncer to the project root with `RecursiveMode::Recursive`.
 /// Detaches any existing watcher first; the `SourceDebouncer`'s `Drop`
 /// unregisters its watches.

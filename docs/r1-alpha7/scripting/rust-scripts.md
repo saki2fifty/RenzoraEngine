@@ -88,11 +88,11 @@ Scripts run in exports. How they get there depends on the packaging mode, and ne
 
 **Copy-based** exports carry the same `bevy_dylib` and `renzora_dylib` the editor compiled your script against, so it loads exactly as it does in the editor. The export copies the library the editor already built — a script that has never compiled has nothing to ship, and the export says so rather than omitting it quietly.
 
-**Lean** exports link Bevy statically and share no image, so there is no library for a script to bind to. Instead each `scripts/*.rs` becomes a module of the binary and its entry point goes into a table the dispatcher reads. Everything after that is identical: one function per entity per frame, keyed by file name, inside the same panic guard. A script behaves the same in the editor and in an export, or an export could not be tested by playing it.
+**Lean** exports link Bevy statically and share no image, so there is no library for a script to bind to. Instead each `scripts/*.rs` becomes a module of the binary and its entry point goes into a table the dispatcher reads. Everything after that is identical: one function per entity per frame, keyed by **canonical project-relative identity** (`project://enemy/spin.rs`), inside the same panic guard. A script behaves the same in the editor and in an export, or an export could not be tested by playing it.
 
-Every `.rs` in the project is compiled in, not only the ones a scene currently references — a scene can be loaded at runtime and a script attached at runtime, so any "which are used" analysis would eventually be wrong in the direction that breaks a game silently. An unused script costs bytes, never frame time: the dispatcher only ever looks up names a live entity asked for.
+Every `.rs` in the project is compiled in, not only the ones a scene currently references — a scene can be loaded at runtime and a script attached at runtime, so any "which are used" analysis would eventually be wrong in the direction that breaks a game silently. An unused script costs bytes, never frame time: the dispatcher only ever looks up identities a live entity asked for.
 
-Scripts may live anywhere in the project, not only in `scripts/`. Where two folders hold the same file name, each is reachable by its full project-relative path but not by the bare name, which is ambiguous — the export names any that apply.
+Scripts may live anywhere in the project, not only in `scripts/`. Where two folders hold the same file name, each is reachable by its full project-relative path. A bare file-name lookup (no separators) is permitted as a compatibility alias **only when it uniquely resolves**; when two scripts share the same leaf name, the editor surfaces the ambiguity at lookup time and the user must specify the full path.
 
 ## Limits
 

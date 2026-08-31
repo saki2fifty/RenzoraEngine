@@ -60,6 +60,7 @@
 
 pub mod backend;
 pub mod discovery;
+pub mod script_resolve;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -69,8 +70,11 @@ use bevy::prelude::*;
 use libloading::{Library, Symbol};
 use renzora::core::console_log::{console_error, console_success};
 use renzora::{CurrentProject, SplashState};
+use renzora_identity::{BareAliasIndex, CanonicalId};
 use renzora_plugin_build::Sdk;
 use renzora_scripting::{scripts_should_run, ScriptComponent};
+
+pub use script_resolve::{build_artifact_path, build_dir_name, ResolvedScript};
 
 /// The symbol a script exports, written by [`renzora::script!`].
 pub const SCRIPT_SYMBOL: &[u8] = b"renzora_script_update\0";
@@ -242,25 +246,60 @@ fn load_static_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool>)
 /// `ManuallyDrop` because a resource is dropped with the World on every clean
 /// shutdown, and unmapping code something may still call has crashed the runtime
 /// here before. See `renzora_plugin`'s loader.
+///
+/// Phase 1 commit 1.3: keyed by [`CanonicalId`]. The previous file-name
+/// string key is gone. The dispatch resolves a `ScriptComponent::script_path`
+/// to a canonical id via [`script_resolve::LoadedScripts::resolve`], which
+/// tries project-relative canonical, then bare-leaf unique, and reports
+/// ambiguity rather than failing at build time.
 #[derive(Resource, Default)]
 pub struct LoadedScripts {
-    entries: HashMap<String, ScriptFn>,
+    pub(crate) entries: HashMap<CanonicalId, ScriptFn>,
+    alias_index: BareAliasIndex,
     _images: Vec<std::mem::ManuallyDrop<Library>>,
 }
 
 impl LoadedScripts {
-    pub fn is_loaded(&self, file_name: &str) -> bool {
-        self.entries.contains_key(file_name)
+    pub fn is_loaded(&self, id: &CanonicalId) -> bool {
+        self.entries.contains_key(id)
     }
 
-    /// Point `file_name` at a newly loaded image.
+    /// Point the canonical id at a newly loaded image.
     ///
     /// Replacing the entry retires the previous function pointer, but the image
     /// it lived in is kept — see [`crate::watch`] for why unmapping it is not an
     /// option.
-    pub fn insert(&mut self, file_name: String, f: ScriptFn, lib: Library) {
-        self.entries.insert(file_name, f);
+    pub fn insert(&mut self, id: CanonicalId, f: ScriptFn, lib: Library) {
+        self.alias_index.insert(id.clone());
+        self.entries.insert(id, f);
         self._images.push(std::mem::ManuallyDrop::new(lib));
+    }
+
+    /// Same as [`Self::insert`] but for the case where one `Library` is shared
+    /// across multiple canonical ids (the copy-based export's "keys outnumber
+    /// libraries" pattern). Records the function pointer under a new id without
+    /// taking a second `Library` reference.
+    pub fn insert_borrowed(&mut self, id: CanonicalId, f: ScriptFn) {
+        self.alias_index.insert(id.clone());
+        self.entries.insert(id, f);
+    }
+
+    /// Look up by canonical identity.
+    pub fn lookup(&self, id: &CanonicalId) -> Option<ScriptFn> {
+        self.entries.get(id).copied()
+    }
+
+    /// Resolve a `ScriptComponent::script_path` against the open project.
+    pub fn resolve(&self, path: &Path, project_root: &Path) -> ResolvedScript {
+        script_resolve::resolve_script_identity(path, project_root, &self.alias_index)
+    }
+
+    /// Identity-keyed iterator for tests.
+    #[cfg(test)]
+    pub fn ids(&self) -> Vec<CanonicalId> {
+        let mut v: Vec<CanonicalId> = self.entries.keys().cloned().collect();
+        v.sort();
+        v
     }
 }
 
@@ -295,34 +334,38 @@ fn compile_and_load(world: &mut World) {
     };
 
     for src in sources {
-        let name = src
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_string();
-        // Claim this source's mtime for the watcher BEFORE building it. The
-        // watcher decides what to rebuild by comparing against `seen`, and it
-        // has never seen anything yet — so without this it noticed every script
-        // half a second later and built the whole directory a second time, on
-        // the task pool, while these builds were still finishing. Two rustc runs
-        // per script at project open, and a leaked image for each.
+        let canonical = crate::discovery::project_relpath_for(&project, &src);
+        let canonical = match canonical {
+            Some(c) => c,
+            None => continue, // not a `.rs` under the project root; collected but ignored.
+        };
+        let canonical_for_log = canonical.clone();
+        let canonical_for_build = canonical.clone();
+        let canonical_for_task = canonical.clone();
+        // Claim this source for the watcher BEFORE building it. The watcher decides
+        // what to rebuild by comparing against `seen`, and it has never seen
+        // anything yet — so without this it noticed every script half a second
+        // later and built the whole directory a second time, on the task pool,
+        // while these builds were still finishing. Two rustc runs per script at
+        // project open, and a leaked image for each.
         //
         // Recorded even when the build below fails, matching the watcher's own
         // rule: a script that does not compile stays quiet until it is edited
         // again rather than re-reporting the same error every poll.
-        if let Some(rel) = src.strip_prefix(&project).ok() {
-            let relpath = rel.to_string_lossy().into_owned().replace('\\', "/");
-            world
-                .resource_mut::<watch::ScriptWatcher>()
-                .mark_seen(relpath);
-        }
-        match build_to_path(&sdk, &project, &src).and_then(|p| load_library(&p)) {
+        world
+            .resource_mut::<watch::ScriptWatcher>()
+            .mark_seen(canonical_for_log.clone());
+        let build_root = project.clone();
+        let task_path = src.clone();
+        match build_to_path_with_id(&sdk, &build_root, &task_path, &canonical_for_build)
+            .and_then(|p| load_library(&p))
+        {
             Ok((f, lib)) => {
                 world
                     .resource_mut::<LoadedScripts>()
-                    .insert(name.clone(), f, lib);
-                info!("[rust-script] loaded {name}");
-                console_success("Script", format!("compiled {name}"));
+                    .insert(canonical_for_task, f, lib);
+                info!("[rust-script] loaded {canonical_for_log}");
+                console_success("Script", format!("compiled {canonical_for_log}"));
             }
             Err(e) => {
                 // Both, and neither is redundant. `error!` reaches stdout and the
@@ -330,14 +373,18 @@ fn compile_and_load(world: &mut World) {
                 // has none and only shows what is pushed to it explicitly. A
                 // compile error is the single thing a script author most needs to
                 // see, so it goes to the place they are already looking.
-                error!("[rust-script] {name}: {e}");
-                console_error("Script", format!("{name}\n{e}"));
+                error!("[rust-script] {canonical_for_log}: {e}");
+                console_error("Script", format!("{canonical_for_log}\n{e}"));
             }
         }
     }
 }
 
-/// Compile one `.rs` into `<project>/.renzora/scripts/`, returning the library.
+/// Compile one `.rs` into `<project>/.renzora/scripts/<dir>/`, returning the
+/// library. The build directory name is keyed off the canonical identity so
+/// that two identical canonical ids always produce the same build output —
+/// duplicating a script under a different folder no longer collides in
+/// `.renzora/scripts/`.
 ///
 /// Split from [`load_library`] so the compile — the second that matters — can run
 /// on a task pool while the load stays on the main thread. Nothing here touches
@@ -346,9 +393,14 @@ fn compile_and_load(world: &mut World) {
 /// The build directory is hidden inside the project because these are derived:
 /// they belong with the project, but nobody should be asked to look at or commit
 /// them.
-pub fn build_to_path(sdk: &Sdk, project: &Path, src: &Path) -> Result<PathBuf, String> {
-    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("script");
-    let build = project.join(".renzora").join("scripts").join(stem);
+pub fn build_to_path_with_id(
+    sdk: &Sdk,
+    project: &Path,
+    src: &Path,
+    id: &renzora_identity::CanonicalId,
+) -> Result<PathBuf, String> {
+    let dir_name = script_resolve::build_dir_name(id);
+    let build = project.join(".renzora").join("scripts").join(&dir_name);
     std::fs::create_dir_all(build.join("src")).map_err(|e| e.to_string())?;
 
     // `Sdk::compile` takes a plugin-shaped DIRECTORY (`<dir>/src/lib.rs`) — it
@@ -366,7 +418,11 @@ pub fn build_to_path(sdk: &Sdk, project: &Path, src: &Path) -> Result<PathBuf, S
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let out = build.join(format!("{stem}-{gen}.{}", sdk.manifest().lib_ext));
+    let out = build.join(format!(
+        "{}-{gen}.{}",
+        id.bare_leaf(),
+        sdk.manifest().lib_ext
+    ));
 
     sdk.compile(&build, &out).map_err(|e| {
         // Point at the file the author edits, not the staged copy they have never
@@ -480,7 +536,9 @@ fn load_prebuilt_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool
 
     // One `Library` per FILE, not per key: two keys naming the same library must
     // share one image, or the second `dlopen` would map a second copy of a
-    // library holding its own statics.
+    // library holding its own statics. Same image is shared across keys that
+    // point to the same library file (Phase 1 commit 1.3: keys are canonical
+    // ids plus an unambiguous bare-name alias).
     let mut opened: HashMap<String, ScriptFn> = HashMap::new();
     let mut count = 0usize;
     for line in index.lines() {
@@ -491,14 +549,24 @@ fn load_prebuilt_scripts(mut loaded: ResMut<LoadedScripts>, mut done: Local<bool
         if key.is_empty() || file.is_empty() {
             continue;
         }
+        let canonical = match renzora_identity::CanonicalId::parse(key) {
+            Ok(c) => c,
+            Err(e) => {
+                // Pre-Phase-1 exports wrote bare-name keys. We still accept
+                // them, but the call site must have uniqueness at runtime; the
+                // BareAliasIndex will report ambiguity at lookup time.
+                warn!("[rust-script] legacy key in prebuilt manifest: {key} ({e})");
+                continue;
+            }
+        };
         if let Some(f) = opened.get(file) {
-            loaded.entries.insert(key.to_string(), *f);
+            loaded.insert_borrowed(canonical, *f);
             continue;
         }
         match load_library(&dir.join(file)) {
             Ok((f, lib)) => {
                 opened.insert(file.to_string(), f);
-                loaded.insert(key.to_string(), f, lib);
+                loaded.insert(canonical, f, lib);
                 count += 1;
             }
             Err(e) => {
@@ -571,36 +639,90 @@ pub fn dispatch(
         .map(|pm| !pm.is_scripts_running())
         .unwrap_or(false);
 
-    let calls: Vec<(Entity, String)> = q
-        .iter(world)
-        .flat_map(|(entity, sc)| {
-            sc.scripts
-                .iter()
-                .filter(|e| e.enabled && (!preview_only || e.preview))
-                .filter_map(|e| e.script_path.as_ref())
-                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("rs"))
-                // Keyed by file name: an entry's path may be project-relative or
-                // scripts-relative depending on how it was added, but the leaf is
-                // the same either way and is what the loader keyed on.
-                .filter_map(|p| p.file_name()?.to_str().map(|n| (entity, n.to_string())))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    if calls.is_empty() {
+    // Resolve every script_path into a canonical id (or Ambiguous / NotFound)
+    // by asking LoadedScripts. The dispatch becomes identity-keyed, not leaf-
+    // keyed, so two scripts at `enemies/spin.rs` and `props/spin.rs` resolve
+    // to two distinct ids while a bare `spin.rs` resolves through the alias
+    // index.
+    let project_root = world
+        .get_resource::<CurrentProject>()
+        .map(|p| p.path.as_path())
+        .unwrap_or_else(|| Path::new(""));
+
+    let mut resolved: Vec<(Entity, CanonicalId)> = Vec::new();
+    let mut unresolved: Vec<(Entity, std::path::PathBuf, ResolvedScript)> = Vec::new();
+    for (entity, sc) in q.iter(world) {
+        for entry in &sc.scripts {
+            if !entry.enabled {
+                continue;
+            }
+            if preview_only && !entry.preview {
+                continue;
+            }
+            let Some(path) = entry.script_path.as_ref() else {
+                continue;
+            };
+            if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            let outcome = world
+                .resource::<LoadedScripts>()
+                .resolve(path, project_root);
+            match outcome {
+                ResolvedScript::Unique(id) => resolved.push((entity, id)),
+                other => unresolved.push((entity, path.clone(), other)),
+            }
+        }
+    }
+
+    // Log unresolved once each (per-frame, but the outcome is stable; the
+    // Console panel coalesces repeats). A failed resolution is not a panic
+    // — the script simply doesn't run this frame.
+    for (entity, path, outcome) in &unresolved {
+        match outcome {
+            ResolvedScript::Ambiguous(ids) => {
+                let leaves: Vec<String> = ids.iter().map(|c| c.path().to_string()).collect();
+                error!(
+                    "[rust-script] ambiguous bare alias '{}' on {entity}: {} candidates",
+                    path.to_string_lossy(),
+                    leaves.join(", ")
+                );
+                console_error(
+                    "Script",
+                    format!(
+                        "ambiguous bare alias '{}' — use the full project-relative path; candidates: {}",
+                        path.to_string_lossy(),
+                        leaves.join(", "),
+                    ),
+                );
+            }
+            ResolvedScript::NotFound => {
+                warn!(
+                    "[rust-script] unresolved script '{}' on {entity}",
+                    path.to_string_lossy()
+                );
+            }
+            ResolvedScript::Unique(_) => unreachable!(),
+        }
+    }
+
+    if resolved.is_empty() {
         return;
     }
 
-    // Resolved before the loop so the resource is not borrowed across a call that
-    // may insert, remove or despawn anything at all.
-    let resolved: Vec<(Entity, ScriptFn)> = {
+    // Snapshot the function pointers so we can drop the resource borrow
+    // before invoking anything that mutates the world.
+    let mut pairs: Vec<(Entity, ScriptFn)> = Vec::with_capacity(resolved.len());
+    {
         let loaded = world.resource::<LoadedScripts>();
-        calls
-            .into_iter()
-            .filter_map(|(e, name)| loaded.entries.get(&name).map(|f| (e, *f)))
-            .collect()
-    };
+        for (entity, id) in resolved {
+            if let Some(f) = loaded.lookup(&id) {
+                pairs.push((entity, f));
+            }
+        }
+    }
 
-    for (entity, f) in resolved {
+    for (entity, f) in pairs {
         // An earlier script may have despawned this entity — its own, even.
         if world.get_entity(entity).is_err() {
             continue;
