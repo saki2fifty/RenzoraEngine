@@ -119,6 +119,78 @@ fn bin_filename(platform: Platform) -> &'static str {
     }
 }
 
+/// The lean cargo invocation: a builder of the cargo `Command` for the
+/// `renzora` binary in the assembled workspace, with profile, features,
+/// package, and target chosen exactly as production [`build_lean`] does.
+///
+/// `cmd` is the cargo command to amend (with `cargo` set, `current_dir`
+/// pointing at `workspace`, and any env vars the caller wants set).
+/// `subcommand` is `build` for production and `check` for the
+/// integration test that exercises the assembled workspace without
+/// linking the binary. `platform` and `cross` decide whether a
+/// `--target` flag is appended and whether the Linux linker override
+/// is applied. `profile` selects the `--profile` value. `features`
+/// is the comma-separated feature string
+/// (`runtime[,static_plugins][,static_scripts]`); empty is treated as
+/// `runtime`.
+///
+/// The test that proves `renzora_static_scripts::scripts()` actually
+/// reaches the lean binary's feature path uses this same builder with
+/// `subcommand = "check"` and `features = "runtime,static_scripts"`
+/// against the assembled workspace, so the assembly step is exercised
+/// identically.
+pub fn lean_cargo_args(
+    cmd: &mut std::process::Command,
+    workspace: &Path,
+    platform: Platform,
+    cross: bool,
+    profile: LeanProfileArg,
+    features: &str,
+    subcommand: &str,
+) {
+    cmd.current_dir(workspace);
+    cmd.args([
+        subcommand,
+        "--profile",
+        profile.as_str(),
+        "--bin",
+        "renzora",
+        "--no-default-features",
+    ])
+    .arg("--features")
+    .arg(if features.is_empty() { "runtime" } else { features });
+    if cross {
+        let triple = crate::docker::rust_triple(platform)
+            .expect("No Rust target for lean build target");
+        cmd.args(["--target", triple]);
+    }
+    if !cross && matches!(platform, Platform::LinuxX64) {
+        cmd.args(["--config", "target.x86_64-unknown-linux-gnu.linker=\"cc\""]);
+    }
+}
+
+/// Lean-build profile selector. Mirrors `[profile.dist-lean]` in the
+/// root `Cargo.toml` (which is what production uses) and the standalone
+/// `dist` profile used by the test-only check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeanProfileArg {
+    /// `dist-lean` — what `build_lean` actually invokes.
+    DistLean,
+    /// `dist` — used by the test that proves the assembled workspace
+    /// compiles under a fast profile; matches the existing
+    /// `cargo check --profile dist` path.
+    Dist,
+}
+
+impl LeanProfileArg {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DistLean => "dist-lean",
+            Self::Dist => "dist",
+        }
+    }
+}
+
 /// Locate the engine source checkout to compile, by walking up from `start`
 /// (the editor's runtime dir, e.g. `<engine>/dist/windows-x64/`).
 ///
@@ -215,10 +287,10 @@ pub fn find_engine_source(start: &Path) -> Option<PathBuf> {
 /// feature when invoking the actual build.
 ///
 /// This function is the production assembly boundary used by both
-/// `build_lean` and the `renzora_static_scripts` integration test
-/// that asserts the generated crate compiles. There is no
-/// `_for_test` shim; the same code runs in both paths.
-pub fn assemble_lean_export_workspace(
+/// `build_lean` and the lean-export validation test. The function is
+/// `pub(crate)` so `build_lean` and the crate's `#[cfg(test)]` module
+/// can share it without exposing it as a public API.
+pub(crate) fn assemble_lean_export_workspace(
     workspace_dir: &Path,
     project_dir: &Path,
     platform: Platform,
@@ -366,29 +438,7 @@ pub fn build_lean(
     if !cross {
         cmd.env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(platform));
     }
-    cmd.args([
-            "build",
-            "--profile",
-            "dist-lean",
-            "--bin",
-            "renzora",
-            "--no-default-features",
-        ])
-        .arg("--features")
-        .arg(&features);
-    if cross {
-        // `--target` selects the cross-linker, and nests the output under the
-        // triple — which the binary path below accounts for.
-        let triple = crate::docker::rust_triple(platform)
-            .ok_or_else(|| format!("No Rust target for {}", platform.display_name()))?;
-        cmd.args(["--target", triple]);
-    }
-    if !cross && matches!(platform, Platform::LinuxX64) {
-        // The repo config pins linker=clang + `-fuse-ld=mold`; a provisioned
-        // minimal toolchain may have neither. `cc` is present on essentially
-        // every Linux dev host.
-        cmd.args(["--config", "target.x86_64-unknown-linux-gnu.linker=\"cc\""]);
-    }
+    lean_cargo_args(&mut cmd, &ws, platform, cross, LeanProfileArg::DistLean, &features, "build");
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
@@ -1788,6 +1838,138 @@ strip = \"symbols\"
         // `opt-level` is set rather than removed: removing it would inherit
         // `dist`'s speed-tuned `opt-level = 2`.
         assert!(out.contains("opt-level = \"s\""), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod lean_assembly_tests {
+    //! End-to-end validation of the lean export. Drives the production
+    //! [`assemble_lean_export_workspace`] and then runs `cargo check`
+    //! on the assembled workspace, using the same
+    //! [`lean_cargo_args`] builder that [`build_lean`] issues after
+    //! assembly. The test lives in-crate (not in `tests/`) so it can
+    //! call the `pub(crate)` assembly function without exposing it as
+    //! public API.
+    use super::*;
+
+    fn script_body() -> &'static str {
+        "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n"
+    }
+
+    /// Find the engine workspace root by walking up from this crate's
+    /// `Cargo.toml`.
+    fn engine_root() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("CARGO_MANIFEST_DIR must be inside the engine workspace")
+            .canonicalize()
+            .expect("engine root must be canonicalizable")
+    }
+
+    /// Drive the production lean workspace assembly, then run the
+    /// same `cargo check --bin renzora --features runtime,static_scripts`
+    /// that the export's runtime integration path requires.
+    ///
+    /// Substitutes `check` for `build` because the test runs far more
+    /// often than a real export. The package (`--bin renzora`),
+    /// features (`runtime,static_scripts`), `--no-default-features`,
+    /// and the assembled workspace path all match production; the
+    /// profile is `dist` for a faster test, not `dist-lean`. Every
+    /// other flag is shared with `build_lean` via the
+    /// [`lean_cargo_args`] builder.
+    #[test]
+    fn generated_lean_workspace_compiles_in_production_assembly() {
+        // Required tool: cargo. Missing cargo is a failure, not a skip.
+        let cargo_status = std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            cargo_status,
+            "cargo is required for the lean-compilation validation but is not available on PATH"
+        );
+
+        // Build a synthetic project with two scripts. The export path
+        // for these exercises both the static-scripts feature (when
+        // scripts exist) and the runtime integration that consumes
+        // `renzora_static_scripts::scripts()`.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        std::fs::create_dir_all(project.join("enemy")).unwrap();
+        std::fs::write(project.join("enemy/spin.rs"), script_body()).unwrap();
+        std::fs::create_dir_all(project.join("props")).unwrap();
+        std::fs::write(project.join("props/spin.rs"), script_body()).unwrap();
+
+        let engine = engine_root();
+        let mut progress = |s: String| eprintln!("[lean] {s}");
+        let profile = LeanProfile {
+            panic_abort: false,
+            opt_level_z: false,
+            codegen_units_one: false,
+        };
+        let platform = Platform::current().expect("host platform known");
+        let (workspace, has_scripts) = assemble_lean_export_workspace(
+            &engine,
+            project,
+            platform,
+            &[],
+            &[],
+            profile,
+            &[],
+            &mut progress,
+        )
+        .expect("assemble_lean_export_workspace");
+        assert!(
+            has_scripts,
+            "the assembled workspace must report has_scripts = true; \
+             `build_lean` keys `static_scripts` off this flag"
+        );
+
+        // Build the exact production command for the assembled
+        // workspace: same package (`--bin renzora`), same feature set,
+        // same `--no-default-features`, same workspace path. The only
+        // substitution is `check` for `build` and `dist` for
+        // `dist-lean`, both via the production builder.
+        let cross = Platform::current() != Some(platform);
+        let mut cmd = std::process::Command::new("cargo");
+        lean_cargo_args(
+            &mut cmd,
+            &workspace,
+            platform,
+            cross,
+            LeanProfileArg::Dist,
+            "runtime,static_scripts",
+            "check",
+        );
+        // The lean exporter pins RUSTFLAGS through CARGO_ENCODED_RUSTFLAGS
+        // to drop the dev-time `prefer-dynamic`. The test mirrors it so the
+        // two paths exercise the same rustflags side of the build.
+        if !cross && matches!(platform, Platform::LinuxX64) {
+            cmd.env(
+                "CARGO_ENCODED_RUSTFLAGS",
+                // `build_lean` uses the empty string for non-Windows to
+                // *override* (not merge) the config's `prefer-dynamic` /
+                // `mold` flags. The test does the same.
+                "",
+            );
+        }
+        if cross {
+            cmd.env("CARGO_TARGET_DIR", workspace.join("target"));
+        } else {
+            cmd.env("CARGO_TARGET_DIR", workspace.join("target"));
+        }
+        cmd.env_remove("RUSTC_WRAPPER");
+
+        let output = cmd.output().expect("cargo check spawn");
+        assert!(
+            output.status.success(),
+            "cargo check on the assembled lean workspace must succeed.\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 

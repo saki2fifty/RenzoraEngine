@@ -65,17 +65,42 @@ pub mod watch;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use libloading::{Library, Symbol};
 use renzora::core::console_log::{console_error, console_success};
-use renzora::{CurrentProject, SplashState};
+use renzora::CurrentProject;
 use renzora_identity::{BareAliasIndex, CanonicalId};
 use renzora_plugin_build::Sdk;
 use renzora_scripting::{scripts_should_run, ScriptComponent};
 
 pub use script_resolve::{build_artifact_path, build_dir_name, ResolvedScript};
 pub use watch::PendingRetires;
+
+/// System sets for ordering the rust-script lifecycle systems.
+///
+/// The chain is mandatory: detect the project lifecycle transition, retire or
+/// invalidate the previous project's work, compile and load the new project's
+/// scripts, finish in-flight builds, then dispatch only after the lifecycle
+/// transition is safe. `dispatch` runs last so the current-project build can
+/// never deliver a stale function pointer into an entity that has just been
+/// retried.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RustScriptSet {
+    /// Compute the lifecycle action (`watch::watch`). Drains pending events.
+    Lifecycle,
+    /// Schedule or `compile_and_load` a freshly-attached project
+    /// (`watch::compile_for_new_project`).
+    Compile,
+    /// Poll in-flight builds, apply results, retire from `PendingRetires`
+    /// (`watch::finish`).
+    Finish,
+    /// Dispatch `.rs` scripts to entities (`dispatch`). Runs after the
+    /// lifecycle chain so an in-frame switch can never dispatch an
+    /// old-project script.
+    Dispatch,
+}
 
 /// The symbol a script exports, written by [`renzora::script!`].
 pub const SCRIPT_SYMBOL: &[u8] = b"renzora_script_update\0";
@@ -113,7 +138,7 @@ impl Plugin for RustScriptPlugin {
                     Update,
                     dispatch
                         .run_if(scripts_should_run)
-                        .after(renzora_scripting::ScriptingSet::PreScript),
+                        .in_set(RustScriptSet::Dispatch),
                 );
             return;
         }
@@ -126,13 +151,41 @@ impl Plugin for RustScriptPlugin {
         app.init_resource::<LoadedScripts>()
             .init_resource::<watch::ScriptWatcher>()
             .init_resource::<watch::PendingRetires>()
-            // Recompile on save. Unlike `dispatch` these are NOT gated on play
-            // mode: a script should build when you save it, so the error is in
-            // front of you while you are still looking at the code — not the next
-            // time you press play.
+            .init_resource::<RustCompileServiceShim>();
+        app.insert_resource(RustCompileServiceShim(RustCompileService::Real(
+            DefaultCompileService,
+        )));
+
+        // Recompile on save. Unlike `dispatch` these are NOT gated on play
+        // mode: a script should build when you save it, so the error is in
+        // front of you while you are still looking at the code — not the next
+        // time you press play.
+        //
+        // The `Lifecycle → Compile → Finish → Dispatch` chain is the
+        // single owner of first-open, project switch, project close, and
+        // reopen. There is NO second owner: an `OnEnter` system used to
+        // run `compile_and_load` here and double-compiled every first
+        // open.
+        app.configure_sets(
+                Update,
+                (
+                    RustScriptSet::Lifecycle,
+                    RustScriptSet::Compile,
+                    RustScriptSet::Finish,
+                    RustScriptSet::Dispatch,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
-                (watch::watch, watch::compile_for_new_project, watch::finish),
+                (
+                    watch::watch.in_set(RustScriptSet::Lifecycle),
+                    watch::compile_for_new_project.in_set(RustScriptSet::Compile),
+                    watch::finish.in_set(RustScriptSet::Finish),
+                    dispatch
+                        .in_set(RustScriptSet::Dispatch)
+                        .run_if(scripts_should_run),
+                ),
             )
             // Claims `.rs` with the engine. Not done in `build` because the
             // engine is a resource another plugin creates, and plugin build
@@ -142,28 +195,7 @@ impl Plugin for RustScriptPlugin {
             // has nothing to compile: the libraries were built by the editor at
             // export time and travel beside the executable. In the editor the
             // manifest is absent and this is a single failed file read.
-            .add_systems(PreUpdate, (register_backend, load_prebuilt_scripts))
-            // Compiling is separate from dispatching so one script failing to
-            // build leaves the others running, and so the compile can later move
-            // off the main thread without touching the dispatcher.
-            .add_systems(OnEnter(SplashState::Editor), compile_and_load)
-            // Gated exactly like the Lua path. Without this a script starts
-            // running the moment it is dropped on an entity, in edit mode, which
-            // is both surprising and destructive — a script that spawns or
-            // despawns would do so while you are still arranging the scene.
-            //
-            // Ordered after `ScriptingSet::PreScript` because that is where
-            // `ScriptsActive` — the resource the run condition reads — is filled
-            // for the frame. Unordered, this would see last frame's answer
-            // whenever the scheduler happened to run it first, so toggling a
-            // script's preview button would take effect a frame later here than
-            // in the Lua path for no reason anyone could see.
-            .add_systems(
-                Update,
-                dispatch
-                    .after(renzora_scripting::ScriptingSet::PreScript)
-                    .run_if(scripts_should_run),
-            );
+            .add_systems(PreUpdate, (register_backend, load_prebuilt_scripts));
     }
 
     /// Take ownership of `ScriptsActive` when nothing else has.
@@ -189,7 +221,14 @@ impl Plugin for RustScriptPlugin {
             return;
         }
         app.init_resource::<renzora_scripting::ScriptsActive>()
-            .configure_sets(Update, renzora_scripting::ScriptingSet::PreScript)
+            .configure_sets(
+                Update,
+                (
+                    renzora_scripting::ScriptingSet::PreScript,
+                    RustScriptSet::Lifecycle,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 renzora_scripting::update_scripts_active
@@ -338,84 +377,144 @@ impl LoadedScripts {
     }
 }
 
-/// On entering the editor, build and load every `.rs` in the open
-/// project's `scripts/`. Runs once per editor entry; a project — and
-/// therefore a `scripts/` directory — does not exist before then.
+/// The production compile / load boundary.
 ///
-/// The lifecycle transitions for first open, switch, and reopen all
-/// route through `compile_and_load_for_project` so the orchestration
-/// has one definition.
-fn compile_and_load(world: &mut World) {
-    let Some(project) = world
-        .get_resource::<CurrentProject>()
-        .map(|p| p.path.clone())
-    else {
-        return;
-    };
-    compile_and_load_for_project(world, &project);
+/// A Bevy `Resource` that runs the compile/load step. Production
+/// holds [`DefaultCompileService`] (the `Real` variant); tests hold
+/// a fake that records every compile request (the `Test` variant).
+///
+/// The wrapper is a tagged enum so its concrete variants are visible
+/// to Bevy's `Component` derive. The `Box<dyn CompileService>` is
+/// wrapped in `Mutex` so it is `Send + Sync` (which the enum inherits).
+pub enum RustCompileService {
+    Real(DefaultCompileService),
+    Test(std::sync::Mutex<Box<dyn CompileService>>),
 }
 
-/// Production orchestration for "open / switch into this project and
-/// load its scripts". Used by both `compile_and_load` (the OnEnter
-/// system that runs on first editor entry) and the watcher's project
-/// lifecycle for switches and reopens.
+impl Default for RustCompileService {
+    fn default() -> Self {
+        Self::Real(DefaultCompileService)
+    }
+}
+
+#[derive(bevy::prelude::Resource, Default)]
+pub struct RustCompileServiceShim(pub RustCompileService);
+
+/// Compile-and-load boundary. Implementations record / load the scripts
+/// of a freshly-attached project.
 ///
-/// Discovery happens against the project root; sources that lack a
-/// script-declaration are skipped. Each discovered id is recorded as
-/// seen by the watcher BEFORE the build runs, so the next reconcile
-/// does not re-build it. A failed compile is recorded as seen too —
-/// matching the watcher's own rule that a broken script stays quiet
-/// until the next edit.
+/// `compile_and_load` is the single production entry point called by
+/// the lifecycle's `Compile` system set. The function is allowed to
+/// fail on individual scripts: one bad source must not stop the others.
+/// Empty projects (no `.rs` files declaring `renzora::script!(...)`) must
+/// be a no-op.
+pub trait CompileService: Send + Sync + 'static {
+    /// Discover the project's scripts and compile / load each one. The
+    /// returned list contains every canonical id that was attempted,
+    /// so the caller can decide which to mark seen and which to leave
+    /// for the next reconcile. The list may be a subset of the
+    /// project's scripts (a build that errors is reported and skipped).
+    fn compile_and_load(&self, world: &mut World, project: &Path) -> Vec<CanonicalId>;
+}
+
+/// The real compile / load: discovers scripts in `project`, builds each
+/// one through the shared plugin SDK, and inserts the resulting library
+/// into [`LoadedScripts`].
 ///
 /// The shared SDK is loaded lazily from `<exe-dir>/sdk` because the
 /// installation is per-binary; without an SDK nothing compiles and a
 /// single warn / console-error covers all scripts (no per-script
 /// failures for the same root cause).
-pub(crate) fn compile_and_load_for_project(world: &mut World, project: &Path) {
-    let sources: Vec<PathBuf> = crate::discovery::collect_rust_scripts(project);
-    if sources.is_empty() {
-        return;
-    }
+pub struct DefaultCompileService;
 
-    let Some(root) = exe_dir() else { return };
-    let sdk = match Sdk::load(root.join("sdk")) {
-        Ok(sdk) => sdk,
-        Err(e) => {
-            warn!("rust scripts cannot be built: {e}");
-            console_error("Script", format!("Rust scripts cannot be built — {e}"));
-            return;
+impl CompileService for DefaultCompileService {
+    fn compile_and_load(&self, world: &mut World, project: &Path) -> Vec<CanonicalId> {
+        let sources: Vec<PathBuf> = crate::discovery::collect_rust_scripts(project);
+        if sources.is_empty() {
+            return Vec::new();
         }
-    };
 
-    for src in sources {
-        let canonical = crate::discovery::project_relpath_for(project, &src);
-        let canonical = match canonical {
-            Some(c) => c,
-            None => continue,
-        };
-        let canonical_for_log = canonical.clone();
-        let canonical_for_build = canonical.clone();
-        let canonical_for_task = canonical.clone();
-        world
-            .resource_mut::<watch::ScriptWatcher>()
-            .mark_seen(canonical_for_log.clone());
-        let build_root = project.to_path_buf();
-        let task_path = src.clone();
-        match build_to_path_with_id(&sdk, &build_root, &task_path, &canonical_for_build)
-            .and_then(|p| load_library(&p))
-        {
-            Ok((f, lib)) => {
-                world
-                    .resource_mut::<LoadedScripts>()
-                    .insert(canonical_for_task, f, lib);
-                info!("[rust-script] loaded {canonical_for_log}");
-                console_success("Script", format!("compiled {canonical_for_log}"));
-            }
+        let Some(root) = exe_dir() else { return Vec::new() };
+        let sdk = match Sdk::load(root.join("sdk")) {
+            Ok(sdk) => sdk,
             Err(e) => {
-                error!("[rust-script] {canonical_for_log}: {e}");
-                console_error("Script", format!("{canonical_for_log}\n{e}"));
+                warn!("rust scripts cannot be built: {e}");
+                console_error("Script", format!("Rust scripts cannot be built — {e}"));
+                return Vec::new();
+            }
+        };
+
+        let mut attempted = Vec::with_capacity(sources.len());
+        for src in sources {
+            let canonical = match crate::discovery::project_relpath_for(project, &src) {
+                Some(c) => c,
+                None => continue,
+            };
+            attempted.push(canonical.clone());
+            world
+                .resource_mut::<watch::ScriptWatcher>()
+                .mark_seen(canonical.clone());
+            match build_to_path_with_id(&sdk, project, &src, &canonical)
+                .and_then(|p| load_library(&p))
+            {
+                Ok((f, lib)) => {
+                    world
+                        .resource_mut::<LoadedScripts>()
+                        .insert(canonical.clone(), f, lib);
+                    info!("[rust-script] loaded {canonical}");
+                    console_success("Script", format!("compiled {canonical}"));
+                }
+                Err(e) => {
+                    error!("[rust-script] {canonical}: {e}");
+                    console_error("Script", format!("{canonical}\n{e}"));
+                }
             }
         }
+        attempted
+    }
+}
+
+/// The single production entry point: "open / switch into this project
+/// and load its scripts".
+///
+/// Called by:
+/// - `watch::compile_for_new_project`, the Bevy `Compile` system set
+///   that runs whenever the lifecycle flag is set after a first-open
+///   or a project switch.
+///
+/// The function pulls the [`RustCompileService`] from the world, hands
+/// it `&mut World` for the duration, and records the result.
+///
+/// Empty projects are a no-op. Failed compiles are reported per-script
+/// (so a broken source does not stop the rest) and the failure remains
+/// recorded in the watcher so the next real edit can rebuild.
+pub fn compile_and_load_for_project(world: &mut World, project: &Path) {
+    // Two variants. For `Real` we call the concrete struct's method
+    // directly — no trait object indirection. For `Test` the boxed
+    // trait object is behind a Mutex; we lock, take a raw pointer to
+    // the inner value, drop the guard, and call through the pointer.
+    // Both paths share the same `compile_and_load` signature on the
+    // trait, so the lifecycle observes identical behaviour.
+    let taken = world.remove_resource::<RustCompileServiceShim>();
+    match taken {
+        Some(RustCompileServiceShim(RustCompileService::Real(real))) => {
+            world.insert_resource(RustCompileServiceShim(RustCompileService::Real(
+                DefaultCompileService,
+            )));
+            let _ = real.compile_and_load(world, project);
+        }
+        Some(RustCompileServiceShim(RustCompileService::Test(mutex))) => {
+            let ptr: *const (dyn CompileService + Send + Sync + 'static) = {
+                let guard = mutex.lock().expect("compile service poisoned");
+                let boxed: &Box<dyn CompileService> = &*guard;
+                boxed.as_ref() as *const (dyn CompileService + Send + Sync + 'static)
+            };
+            world.insert_resource(RustCompileServiceShim(RustCompileService::Test(mutex)));
+            // SAFETY: the resource lives in `world`; the test does
+            // not race against production code.
+            let _ = unsafe { (*ptr).compile_and_load(world, project) };
+        }
+        None => {}
     }
 }
 

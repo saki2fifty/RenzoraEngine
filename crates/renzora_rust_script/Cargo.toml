@@ -63,6 +63,12 @@ sha2 = "0.10"
 [dev-dependencies]
 # Tests in `src/discovery.rs` build synthetic project trees under a tempdir.
 tempfile = "3"
+# Pull `renzora_runtime` so the `dynamic_linking` feature on this crate
+# is enabled when the lib's tests run in isolation. Production pulls
+# `renzora_runtime` through the binary crate, so the dev-dep is
+# strictly test-time and does not affect any shipped build.
+renzora_runtime = { path = "../renzora_runtime" }
+renzora = { path = "../renzora", features = ["editor"] }
 
 [lints]
 workspace = true
