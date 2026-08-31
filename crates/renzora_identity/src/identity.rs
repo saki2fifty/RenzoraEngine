@@ -272,15 +272,23 @@ impl BareAliasIndex {
     }
 
     /// Insert a canonical id. Inserts preserve the sorted-by-identity list
-    /// in each bucket.
+    /// in each bucket. **Idempotent:** inserting the same id twice is a
+    /// no-op. A reload of one script therefore preserves its bare alias
+    /// uniqueness.
     pub fn insert(&mut self, id: CanonicalId) {
         let leaf = id.bare_leaf().to_string();
         match self.by_leaf.binary_search_by(|probe| probe.0.cmp(&leaf)) {
             Ok(idx) => {
                 let bucket = &mut self.by_leaf[idx].1;
+                // Idempotency: skip if the id is already present in the
+                // bucket. binary_search_by returns the position of the
+                // existing entry; if found, do nothing.
+                if bucket.binary_search_by(|probe| probe.cmp(&id)).is_ok() {
+                    return;
+                }
                 let pos = bucket
                     .binary_search_by(|probe| probe.cmp(&id))
-                    .unwrap_or_else(|p| p);
+                    .unwrap_err();
                 bucket.insert(pos, id);
             }
             Err(idx) => {

@@ -269,8 +269,16 @@ impl LoadedScripts {
     /// Replacing the entry retires the previous function pointer, but the image
     /// it lived in is kept — see [`crate::watch`] for why unmapping it is not an
     /// option.
+    ///
+    /// Idempotent on the alias index: re-inserting the same canonical id
+    /// does NOT add a duplicate bare-leaf entry. A reload of one script
+    /// therefore preserves its bare alias uniqueness.
     pub fn insert(&mut self, id: CanonicalId, f: ScriptFn, lib: Library) {
-        self.alias_index.insert(id.clone());
+        let already_present = self.entries.contains_key(&id);
+        if !already_present {
+            // First insert for this id — record the bare alias.
+            self.alias_index.insert(id.clone());
+        }
         self.entries.insert(id, f);
         self._images.push(std::mem::ManuallyDrop::new(lib));
     }
@@ -279,8 +287,13 @@ impl LoadedScripts {
     /// across multiple canonical ids (the copy-based export's "keys outnumber
     /// libraries" pattern). Records the function pointer under a new id without
     /// taking a second `Library` reference.
+    ///
+    /// Idempotent on the alias index — see [`Self::insert`].
     pub fn insert_borrowed(&mut self, id: CanonicalId, f: ScriptFn) {
-        self.alias_index.insert(id.clone());
+        let already_present = self.entries.contains_key(&id);
+        if !already_present {
+            self.alias_index.insert(id.clone());
+        }
         self.entries.insert(id, f);
     }
 
