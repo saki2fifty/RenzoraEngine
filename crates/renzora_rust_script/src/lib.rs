@@ -289,6 +289,15 @@ impl LoadedScripts {
         self.entries.get(id).copied()
     }
 
+    /// Remove a canonical identity from the index. The mapped `Library`
+    /// stays alive — function pointers the engine still calls may
+    /// reference symbols inside it. The next dispatch will see the id
+    /// resolve to nothing and skip the call.
+    pub fn remove(&mut self, id: &CanonicalId) {
+        self.entries.remove(id);
+        self.alias_index.remove(id);
+    }
+
     /// Resolve a `ScriptComponent::script_path` against the open project.
     pub fn resolve(&self, path: &Path, project_root: &Path) -> ResolvedScript {
         script_resolve::resolve_script_identity(path, project_root, &self.alias_index)
@@ -490,7 +499,9 @@ pub fn declaration_recognised(source: &str) -> bool {
 }
 
 /// `declares_script` kept here as a thin wrapper for backward-compatibility
-/// with `crates/renzora_plugin_build` callers that still expect it.
+/// with `crates/renzora_plugin_build` callers that still expect it. The
+/// real declaration test lives in the watcher / discovery module.
+#[allow(dead_code)]
 fn declares_script(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
