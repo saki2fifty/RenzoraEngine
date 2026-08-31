@@ -76,6 +76,11 @@ pub struct ScriptWatcher {
     /// True when the next frame must reconcile. Set when the watcher
     /// was just attached (initial rescan), cleared once consumed.
     needs_initial_rescan: bool,
+    /// Last time an attach attempt failed. Combined with the
+    /// `attach_backoff` constant, used to throttle retry attempts when
+    /// the FS does not support notifications or the project root is
+    /// not yet present.
+    last_failed_attach: Option<std::time::Instant>,
 }
 
 #[derive(Debug)]
@@ -97,6 +102,7 @@ impl Default for ScriptWatcher {
             seen_paths: Vec::new(),
             watched_root: None,
             needs_initial_rescan: false,
+            last_failed_attach: None,
         }
     }
 }
@@ -136,9 +142,19 @@ pub fn watch(mut watcher: ResMut<ScriptWatcher>, project: Option<Res<CurrentProj
 
     // Reattach if the project path changed or first time.
     if watcher.watched_root.as_deref() != Some(project_root.as_path()) {
-        attach_debouncer(&mut watcher, &project_root);
-        // attach_debouncer sets watched_root only on success; if it
-        // returned without setting it, the next frame will retry.
+        // Honour the failed-attach backoff: do not retry while we are
+        // still inside the cooldown window. Without this, every frame
+        // would re-attempt and emit a warning, and on a permanently
+        // broken watcher the user's log would be unusable.
+        let backoff_active = watcher
+            .last_failed_attach
+            .map(|prev| prev.elapsed() < attach_backoff())
+            .unwrap_or(false);
+        if !backoff_active {
+            let _ = attach_debouncer(&mut watcher, &project_root);
+            // attach_debouncer sets watched_root only on success; if it
+            // returned Failed, the next frame retries (after the backoff).
+        }
     }
 
     if watcher.debouncer.is_none() {
@@ -253,9 +269,10 @@ pub(crate) fn drain_pending(watcher: &mut ScriptWatcher, project_root: &Path) ->
 }
 
 #[derive(Default)]
-pub(crate) struct Drained {
-    dirty: Vec<CanonicalId>,
-    removed: Vec<CanonicalId>,
+#[doc(hidden)]
+pub struct Drained {
+    pub dirty: Vec<CanonicalId>,
+    pub removed: Vec<CanonicalId>,
 }
 
 /// Full reconciliation: rescan the project once, diff against
@@ -486,6 +503,30 @@ pub fn seen_paths_for_test(watcher: &ScriptWatcher) -> &[CanonicalId] {
     &watcher.seen_paths
 }
 
+/// Test-only accessor for `watched_root`. Used by integration tests
+/// to verify the "set only on success" invariant.
+#[doc(hidden)]
+pub fn watched_root_for_test(watcher: &ScriptWatcher) -> Option<&Path> {
+    watcher.watched_root.as_deref()
+}
+
+/// Test-only setter for `last_failed_attach`. Used by integration
+/// tests to verify backoff state transitions without exercising the
+/// real attach failure path.
+#[doc(hidden)]
+pub fn set_last_failed_attach_for_test(
+    watcher: &mut ScriptWatcher,
+    when: Option<std::time::Instant>,
+) {
+    watcher.last_failed_attach = when;
+}
+
+/// Test-only getter for `last_failed_attach`.
+#[doc(hidden)]
+pub fn last_failed_attach_for_test(watcher: &ScriptWatcher) -> Option<std::time::Instant> {
+    watcher.last_failed_attach
+}
+
 /// Drive `attach_debouncer` from tests. Same as the internal helper;
 /// separated to make integration tests more readable.
 #[doc(hidden)]
@@ -536,7 +577,7 @@ fn push_unique(vec: &mut Vec<CanonicalId>, value: &CanonicalId) {
     }
 }
 
-pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path) {
+pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path) -> AttachOutcome {
     *watcher.rx.lock().unwrap() = None;
     watcher.debouncer = None;
     watcher.needs_initial_rescan = false;
@@ -556,13 +597,13 @@ pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path)
     let mut debouncer = match new_debouncer(DEBOUNCE, None, tx) {
         Ok(d) => d,
         Err(e) => {
-            warn!("[rust-script] could not start source watch ({e})");
-            return;
+            record_failed_attach(watcher, e);
+            return AttachOutcome::Failed;
         }
     };
     if let Err(e) = debouncer.watch(project_root, RecursiveMode::Recursive) {
-        warn!("[rust-script] could not watch project root ({e})");
-        return;
+        record_failed_attach(watcher, e);
+        return AttachOutcome::Failed;
     }
     info!(
         "[rust-script] watching {} recursively",
@@ -573,6 +614,8 @@ pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path)
     // Set watched_root ONLY on success. Failed attaches leave the field
     // at its previous value so the next frame retries.
     watcher.watched_root = Some(project_root.to_path_buf());
+    // Reset the failed-attach backoff on success.
+    watcher.last_failed_attach = None;
 
     if was_empty {
         // First attach: walk the project to seed the snapshot. Subsequent
@@ -580,10 +623,45 @@ pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path)
         let ids = discovery::collect_canonical_scripts(project_root);
         watcher.seed_seen(ids);
     }
-    // Always set the flag; the next reconcile runs full_rescan once.
+    // Always set the flag; the next reconcile runs `full_rescan` once.
     // When compile_and_load already populated seen_paths, the diff is
     // empty and the loop does nothing.
     watcher.needs_initial_rescan = true;
+    AttachOutcome::Live
+}
+
+enum AttachOutcome {
+    Live,
+    Failed,
+}
+
+fn record_failed_attach(watcher: &mut ScriptWatcher, e: impl std::fmt::Display) {
+    let now = std::time::Instant::now();
+    // Log only on the first failure and when the backoff expires --
+    // never every frame. The next log fires `attach_backoff` after the
+    // previous one, so a project with a permanently broken watcher
+    // emits at most one warning every few seconds.
+    let should_log = match watcher.last_failed_attach {
+        None => true,
+        Some(prev) => now.duration_since(prev) >= attach_backoff(),
+    };
+    if should_log {
+        warn!("[rust-script] could not start source watch ({e})");
+    }
+    watcher.last_failed_attach = Some(now);
+    // `watched_root` is intentionally left at its previous value
+    // (None on the first attempt) so the next frame retries.
+}
+
+/// Backoff between failed-attach retries.
+fn attach_backoff() -> std::time::Duration {
+    std::time::Duration::from_secs(5)
+}
+
+/// Test-only accessor for the backoff duration.
+#[doc(hidden)]
+pub fn attach_backoff_for_test() -> std::time::Duration {
+    attach_backoff()
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
