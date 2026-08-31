@@ -333,12 +333,6 @@ impl LoadedScripts {
         v.sort();
         v
     }
-
-    /// Test-only accessor: bare-leaf alias entries.
-    #[doc(hidden)]
-    pub fn alias_entries_for_test(&self, leaf: &str) -> Vec<CanonicalId> {
-        self.alias_index.entries(leaf).to_vec()
-    }
 }
 
 /// Build and load every `.rs` in the open project's `scripts/`.
@@ -437,35 +431,9 @@ pub fn build_to_path_with_id(
     src: &Path,
     id: &renzora_identity::CanonicalId,
 ) -> Result<PathBuf, String> {
+    validate_build_dir_marker(project, id)?;
     let dir_name = script_resolve::build_dir_name(id);
     let build = project.join(".renzora").join("scripts").join(&dir_name);
-    let marker = script_resolve::build_dir_marker_path(project, id);
-
-    // 1. Validate the marker BEFORE touching anything else. If a marker
-    //    already exists for another canonical id, the hashed directory
-    //    collides with that id's existing build output. Return a clear
-    //    error; do NOT remove the marker, do NOT overwrite any staged
-    //    source, do NOT compile into that directory.
-    match std::fs::symlink_metadata(&marker) {
-        Ok(meta) if meta.file_type().is_file() => {
-            match script_resolve::read_build_dir_marker(&marker) {
-                Ok(Some(text)) if text == id.to_scheme_path() => {}
-                Ok(Some(other)) => {
-                    return Err(format!(
-                        "build-directory hash collision: {} already claimed by {other}; \
-                         refusing to overwrite the existing build directory",
-                        marker.display()
-                    ));
-                }
-                Ok(None) => {}
-                Err(e) => return Err(format!("read marker {}: {e}", marker.display())),
-            }
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("stat marker {}: {e}", marker.display())),
-    }
-
     std::fs::create_dir_all(build.join("src")).map_err(|e| e.to_string())?;
 
     std::fs::copy(src, build.join("src").join("lib.rs")).map_err(|e| e.to_string())?;
@@ -494,6 +462,46 @@ pub fn build_to_path_with_id(
     script_resolve::write_build_dir_marker(project, id)
         .map_err(|e| format!("write marker: {e}"))?;
     Ok(out)
+}
+
+/// Validate the per-directory marker for `id` BEFORE any other file
+/// mutation. Returns `Ok(())` when:
+/// - the marker does not exist;
+/// - the marker names `id`'s scheme-path (an existing successful
+///   build of the same canonical id — that build is being rebuilt).
+///
+/// Returns `Err(...)` when:
+/// - the marker names a DIFFERENT canonical id's scheme-path (a real
+///   hash collision — the existing directory and its staged source
+///   must not be touched);
+/// - the marker file is unreadable for any other reason.
+///
+/// `build_to_path_with_id` calls this before any other mutation.
+/// Callers that perform staging on their own (the exporter, for
+/// example) can use this as a pre-flight to refuse a colliding
+/// directory without taking the SDK dependency.
+pub fn validate_build_dir_marker(
+    project: &Path,
+    id: &renzora_identity::CanonicalId,
+) -> Result<(), String> {
+    let marker = script_resolve::build_dir_marker_path(project, id);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(meta) if meta.file_type().is_file() => {
+            match script_resolve::read_build_dir_marker(&marker) {
+                Ok(Some(text)) if text == id.to_scheme_path() => Ok(()),
+                Ok(Some(other)) => Err(format!(
+                    "build-directory hash collision: {} already claimed by {other}; \
+                     refusing to overwrite the existing build directory",
+                    marker.display()
+                )),
+                Ok(None) => Ok(()),
+                Err(e) => Err(format!("read marker {}: {e}", marker.display())),
+            }
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("stat marker {}: {e}", marker.display())),
+    }
 }
 
 /// `dlopen` a built script and find its entry point.

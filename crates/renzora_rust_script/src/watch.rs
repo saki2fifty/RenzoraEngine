@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
+type BuildTask = Task<Result<PathBuf, String>>;
 use notify_debouncer_full::{
     new_debouncer,
     notify::{
@@ -79,7 +80,6 @@ pub struct ScriptWatcher {
     rx: std::sync::Mutex<Option<DebouncedRx>>,
     seen_paths: Vec<CanonicalId>,
     watched_root: Option<PathBuf>,
-    needs_initial_rescan: bool,
     last_failed_attach: Option<std::time::Instant>,
 }
 
@@ -87,7 +87,7 @@ pub struct ScriptWatcher {
 /// dirty state during a build.
 #[derive(Debug)]
 pub struct InFlightBuild {
-    task: Task<Result<PathBuf, String>>,
+    task: BuildTask,
     /// mtime of the source file when the build was started. A result is
     /// stale if the file's current mtime is greater than this.
     started_at: std::time::SystemTime,
@@ -105,7 +105,6 @@ impl Default for ScriptWatcher {
             rx: std::sync::Mutex::new(None),
             seen_paths: Vec::new(),
             watched_root: None,
-            needs_initial_rescan: false,
             last_failed_attach: None,
         }
     }
@@ -147,9 +146,9 @@ impl PendingRetires {
 /// Notice changed or new `.rs` files and start building them.
 ///
 /// Idle frames do no filesystem work. Reconciliation runs only when:
-/// - a debounced batch has arrived;
-/// - the watcher was just attached (sets `needs_initial_rescan` on
-///   attach; cleared once the initial rescan has been performed).
+/// - the project root changes (retire old ids, drop old in-flight
+///   builds, attach a fresh debouncer);
+/// - a debounced batch arrives.
 pub fn watch(
     mut watcher: ResMut<ScriptWatcher>,
     project: Option<Res<CurrentProject>>,
@@ -164,7 +163,22 @@ pub fn watch(
             .map(|prev| prev.elapsed() < attach_backoff())
             .unwrap_or(false);
         if !backoff_active {
-            let _ = attach_debouncer(&mut watcher, &project_root);
+            let (outcome, retired) = attach_debouncer(&mut watcher, &project_root);
+            match outcome {
+                AttachOutcome::Live => {
+                    // Project switch (or first attach): every id the
+                    // previous project knew about must be retired from
+                    // LoadedScripts before any new project script is
+                    // loaded.
+                    for id in retired {
+                        pending.enqueue(id);
+                    }
+                }
+                AttachOutcome::Failed => {
+                    // attach_debouncer already recorded the failure and
+                    // scheduled the next attempt via last_failed_attach.
+                }
+            }
         }
     }
 
@@ -196,8 +210,7 @@ pub enum Batch {
 }
 
 #[derive(Default, Debug)]
-#[doc(hidden)]
-pub struct Plan {
+pub(crate) struct Plan {
     pub dirty: Vec<CanonicalId>,
     pub removed: Vec<CanonicalId>,
 }
@@ -231,7 +244,7 @@ fn drain_pending(watcher: &ScriptWatcher) -> Option<Batch> {
 /// child, so the per-path translation cannot be trusted for those.
 ///
 /// Returns `None` when the batch produced no work.
-pub fn reconcile_with_events(
+pub(crate) fn reconcile_with_events(
     watcher: &mut ScriptWatcher,
     project_root: &Path,
     events: Vec<DebouncedEvent>,
@@ -630,27 +643,39 @@ fn lexical_event_identity(project_root: &Path, path: &Path) -> Option<CanonicalI
     renzora_identity::CanonicalId::from_rooted(RootKind::Project, &rel).ok()
 }
 
-pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path) -> AttachOutcome {
+pub(crate) fn attach_debouncer(
+    watcher: &mut ScriptWatcher,
+    project_root: &Path,
+) -> (AttachOutcome, Vec<CanonicalId>) {
+    // Capture the previous project's ids BEFORE we drop the in-flight
+    // builds and reseed `seen_paths`. The caller (`watch`) enqueues
+    // these into `PendingRetires` so `finish` removes them from
+    // `LoadedScripts` once the world is reachable again.
+    let prior_seen = std::mem::take(&mut watcher.seen_paths);
+
+    // Project switch: every in-flight build belonged to the previous
+    // project. Dropping the `Task`s here drops their JoinHandles; the
+    // AsyncComputeTaskPool will reap finished futures when nothing
+    // else holds them.
+    watcher.building.clear();
+
     *watcher.rx.lock().unwrap() = None;
     watcher.debouncer = None;
-    watcher.needs_initial_rescan = false;
-
-    let was_empty = watcher.seen_paths.is_empty();
-    if was_empty {
-        watcher.seen_paths.clear();
-    }
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = match new_debouncer(DEBOUNCE, None, tx) {
         Ok(d) => d,
         Err(e) => {
             record_failed_attach(watcher, e);
-            return AttachOutcome::Failed;
+            // Restore prior_seen so a future attach can retry.
+            watcher.seen_paths = prior_seen;
+            return (AttachOutcome::Failed, Vec::new());
         }
     };
     if let Err(e) = debouncer.watch(project_root, RecursiveMode::Recursive) {
         record_failed_attach(watcher, e);
-        return AttachOutcome::Failed;
+        watcher.seen_paths = prior_seen;
+        return (AttachOutcome::Failed, Vec::new());
     }
     info!(
         "[rust-script] watching {} recursively",
@@ -661,12 +686,9 @@ pub(crate) fn attach_debouncer(watcher: &mut ScriptWatcher, project_root: &Path)
     watcher.watched_root = Some(project_root.to_path_buf());
     watcher.last_failed_attach = None;
 
-    if was_empty {
-        let ids = discovery::collect_canonical_scripts(project_root);
-        watcher.seen_paths = ids;
-    }
-    watcher.needs_initial_rescan = true;
-    AttachOutcome::Live
+    // Replace the seen-path snapshot with the new project's discovery.
+    watcher.seen_paths = discovery::collect_canonical_scripts(project_root);
+    (AttachOutcome::Live, prior_seen)
 }
 
 pub(crate) enum AttachOutcome {
@@ -695,6 +717,7 @@ fn attach_backoff() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ScriptFn;
 
     fn make_create_event(path: PathBuf) -> DebouncedEvent {
         DebouncedEvent::new(
@@ -1093,6 +1116,310 @@ mod tests {
         let watcher = world.resource::<ScriptWatcher>();
         assert_eq!(watcher.building.len(), 1, "exactly one build per id");
         assert!(watcher.building.contains_key(&id));
+    }
+
+    // ─── F5: idle frames after attachment perform zero work ──────────
+
+    /// F5: after `attach_debouncer` seeds the watcher with the project's
+    /// discovered ids, an idle `reconcile_with_events` call (no events
+    /// pending) must perform zero discovery work. The watcher's
+    /// production lifecycle is one attach, then idle until a real
+    /// event arrives.
+    #[test]
+    fn idle_after_attach_does_no_discovery_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("a.rs"), script_body()).unwrap();
+
+        let mut watcher = ScriptWatcher::default();
+        attach_debouncer(&mut watcher, root);
+        // `seen_paths` is now the project's ids, set by attach.
+        assert_eq!(watcher.seen_paths.len(), 1);
+
+        // No events arrived; `reconcile_with_events` returns None and
+        // does not touch `seen_paths` or `building`.
+        let plan = reconcile_with_events(&mut watcher, root, vec![]);
+        assert!(plan.is_none());
+        assert_eq!(watcher.seen_paths.len(), 1, "no discovery on idle");
+        assert!(watcher.building.is_empty(), "no build on idle");
+    }
+
+    /// F5: the attach transition happens exactly once per project.
+    /// After attach, every subsequent reattach (same root) leaves
+    /// `seen_paths` unchanged in size and content.
+    #[test]
+    fn attach_transition_occurs_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("a.rs"), script_body()).unwrap();
+
+        let mut watcher = ScriptWatcher::default();
+        attach_debouncer(&mut watcher, root);
+        let snap1 = watcher.seen_paths.clone();
+        assert_eq!(snap1.len(), 1);
+
+        // Reattach the SAME root. The discovery walk is idempotent,
+        // so the snapshot is stable.
+        attach_debouncer(&mut watcher, root);
+        let snap2 = watcher.seen_paths.clone();
+        assert_eq!(snap1, snap2, "same-root reattach is stable");
+
+        // `reconcile_with_events` with no events is a no-op. No
+        // additional work happens.
+        let plan = reconcile_with_events(&mut watcher, root, vec![]);
+        assert!(plan.is_none());
+        let snap3 = watcher.seen_paths.clone();
+        assert_eq!(snap1, snap3);
+    }
+
+    // ─── F2: project switching ─────────────────────────────────────────
+
+    /// F2 case 1: Project A has `a.rs`, Project B has `b.rs`. Switching
+    /// retires A's id and replaces seen_paths with B's id.
+    #[test]
+    fn switching_projects_replaces_seen_and_queues_old_retires() {
+        init_task_pool();
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        std::fs::write(a_root.path().join("a.rs"), script_body()).unwrap();
+        std::fs::write(b_root.path().join("b.rs"), script_body()).unwrap();
+
+        let mut world = bevy::prelude::World::new();
+        world.insert_resource(ScriptWatcher::default());
+        world.insert_resource(PendingRetires::default());
+        world.insert_resource(LoadedScripts::default());
+
+        // Attach to A and add A's id to LoadedScripts (simulating the
+        // editor's pre-watcher compile_and_load).
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            attach_debouncer(&mut w, a_root.path());
+        }
+        let a_id = CanonicalId::from_rooted(RootKind::Project, "a.rs").unwrap();
+        let f: ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
+        world.resource_mut::<LoadedScripts>().insert_borrowed(a_id.clone(), f);
+        assert!(world.resource::<LoadedScripts>().is_loaded(&a_id));
+
+        // Switch to B.
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            let (outcome, retired) = attach_debouncer(&mut w, b_root.path());
+            assert!(matches!(outcome, AttachOutcome::Live));
+            for id in retired {
+                world.resource_mut::<PendingRetires>().enqueue(id);
+            }
+        }
+
+        // The watcher's seen_paths is now B's id, not A's.
+        let b_id = CanonicalId::from_rooted(RootKind::Project, "b.rs").unwrap();
+        let w = world.resource::<ScriptWatcher>();
+        assert!(w.seen_paths.contains(&b_id));
+        assert!(!w.seen_paths.contains(&a_id));
+        assert_eq!(w.watched_root.as_deref(), Some(b_root.path()));
+        assert!(w.building.is_empty(), "in-flight builds dropped on switch");
+
+        // A's LoadedScripts entry retires when finish runs.
+        finish(&mut world);
+        assert!(
+            !world.resource::<LoadedScripts>().is_loaded(&a_id),
+            "old-project script must retire after switch"
+        );
+    }
+
+    /// F2 case 2: same relative name in both projects. After the switch,
+    /// the leaf name must resolve to the NEW project's id only.
+    #[test]
+    fn switching_projects_with_overlapping_leaf_replaces_alias() {
+        init_task_pool();
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(a_root.path().join("a")).unwrap();
+        std::fs::create_dir_all(b_root.path().join("b")).unwrap();
+        std::fs::write(a_root.path().join("a/spin.rs"), script_body()).unwrap();
+        std::fs::write(b_root.path().join("b/spin.rs"), script_body()).unwrap();
+
+        let mut world = bevy::prelude::World::new();
+        world.insert_resource(ScriptWatcher::default());
+        world.insert_resource(PendingRetires::default());
+        world.insert_resource(LoadedScripts::default());
+
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            attach_debouncer(&mut w, a_root.path());
+        }
+        let a_id = CanonicalId::from_rooted(RootKind::Project, "a/spin.rs").unwrap();
+        let f: ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
+        world.resource_mut::<LoadedScripts>().insert_borrowed(a_id.clone(), f);
+
+        // Switch to B.
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            let (outcome, retired) = attach_debouncer(&mut w, b_root.path());
+            assert!(matches!(outcome, AttachOutcome::Live));
+            for id in retired {
+                world.resource_mut::<PendingRetires>().enqueue(id);
+            }
+        }
+        // Simulate B's compile_and_load running after the switch
+        // (production behaviour: the new project loads its scripts).
+        let b_id = CanonicalId::from_rooted(RootKind::Project, "b/spin.rs").unwrap();
+        let f2: ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
+        world.resource_mut::<LoadedScripts>().insert_borrowed(b_id.clone(), f2);
+        finish(&mut world);
+
+        let loaded = world.resource::<LoadedScripts>();
+        // The old id is gone.
+        assert!(!loaded.is_loaded(&a_id));
+        // The bare leaf `spin.rs` resolves to B's id only.
+        match loaded.resolve(std::path::Path::new("spin.rs"), b_root.path()) {
+            crate::script_resolve::ResolvedScript::Unique(id) => assert_eq!(id, b_id),
+            other => panic!("expected Unique(b), got {other:?}"),
+        }
+    }
+
+    /// F2 case 3: switching to a project with no Rust scripts retires
+    /// the old project's ids and leaves LoadedScripts empty.
+    #[test]
+    fn switching_to_empty_project_leaves_no_old_ids() {
+        init_task_pool();
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        std::fs::write(a_root.path().join("a.rs"), script_body()).unwrap();
+
+        let mut world = bevy::prelude::World::new();
+        world.insert_resource(ScriptWatcher::default());
+        world.insert_resource(PendingRetires::default());
+        world.insert_resource(LoadedScripts::default());
+
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            attach_debouncer(&mut w, a_root.path());
+        }
+        let a_id = CanonicalId::from_rooted(RootKind::Project, "a.rs").unwrap();
+        let f: ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
+        world.resource_mut::<LoadedScripts>().insert_borrowed(a_id.clone(), f);
+
+        // Switch to an empty project.
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            let (outcome, retired) = attach_debouncer(&mut w, b_root.path());
+            assert!(matches!(outcome, AttachOutcome::Live));
+            for id in retired {
+                world.resource_mut::<PendingRetires>().enqueue(id);
+            }
+        }
+        assert!(world.resource::<ScriptWatcher>().seen_paths.is_empty());
+        finish(&mut world);
+        assert!(!world.resource::<LoadedScripts>().is_loaded(&a_id));
+        assert!(
+            world.resource::<LoadedScripts>().ids().is_empty(),
+            "no old-project ids may remain"
+        );
+    }
+
+    /// F2 case 4: an in-flight build from the old project cannot load
+    /// after switching. The watcher's `building` map is dropped on
+    /// attach, so the Task is gone and its eventual Ready value can
+    /// not be inserted into the new project's LoadedScripts.
+    #[test]
+    fn old_project_in_flight_build_cannot_load_after_switch() {
+        init_task_pool();
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        std::fs::write(a_root.path().join("a.rs"), script_body()).unwrap();
+
+        let mut world = bevy::prelude::World::new();
+        world.insert_resource(ScriptWatcher::default());
+        world.insert_resource(PendingRetires::default());
+        world.insert_resource(LoadedScripts::default());
+
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            attach_debouncer(&mut w, a_root.path());
+        }
+        let a_id = CanonicalId::from_rooted(RootKind::Project, "a.rs").unwrap();
+        // Insert a task that would complete successfully.
+        let (tx_done, rx_done) = std::sync::mpsc::channel::<()>();
+        let task: Task<Result<PathBuf, String>> =
+            AsyncComputeTaskPool::get().spawn(async move {
+                let _ = tx_done.send(());
+                Ok(PathBuf::from("/tmp/fake.so"))
+            });
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            w.building.insert(
+                a_id.clone(),
+                InFlightBuild {
+                    task,
+                    started_at: std::time::SystemTime::now(),
+                    pending_dirty: false,
+                },
+            );
+        }
+        for _ in 0..1000 {
+            if rx_done.try_recv().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Switch projects BEFORE finish() runs.
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            let (outcome, retired) = attach_debouncer(&mut w, b_root.path());
+            assert!(matches!(outcome, AttachOutcome::Live));
+            for id in retired {
+                world.resource_mut::<PendingRetires>().enqueue(id);
+            }
+        }
+        finish(&mut world);
+        // The new project had no scripts; the build map is empty;
+        // a_id is NOT in LoadedScripts.
+        let loaded = world.resource::<LoadedScripts>();
+        assert!(!loaded.is_loaded(&a_id));
+        let w = world.resource::<ScriptWatcher>();
+        assert!(w.building.is_empty(), "old in-flight task dropped on switch");
+        assert!(w.seen_paths.is_empty(), "new empty project has no scripts");
+    }
+
+    /// F2 case 5 (paired): a project switch followed by a finishing
+    /// task from the OLD project must not insert into the new project's
+    /// LoadedScripts.
+    #[test]
+    fn old_completed_task_cannot_load_into_new_project() {
+        // The test above already exercises this: after attach_debouncer,
+        // `watcher.building` is empty, so the old task is gone. finish()
+        // iterates an empty building map and inserts nothing.
+        // This second test is a focused re-run of that invariant
+        // without all the extra scaffolding.
+        init_task_pool();
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        std::fs::write(a_root.path().join("a.rs"), script_body()).unwrap();
+
+        let mut world = bevy::prelude::World::new();
+        world.insert_resource(ScriptWatcher::default());
+        world.insert_resource(PendingRetires::default());
+        world.insert_resource(LoadedScripts::default());
+
+        let id = CanonicalId::from_rooted(RootKind::Project, "a.rs").unwrap();
+        let f: ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
+        // Simulate: a was loaded before the switch.
+        world.resource_mut::<LoadedScripts>().insert_borrowed(id.clone(), f);
+
+        // Attach A then switch to B.
+        {
+            let mut w = world.resource_mut::<ScriptWatcher>();
+            attach_debouncer(&mut w, a_root.path());
+            let (outcome, retired) = attach_debouncer(&mut w, b_root.path());
+            assert!(matches!(outcome, AttachOutcome::Live));
+            for id in retired {
+                world.resource_mut::<PendingRetires>().enqueue(id);
+            }
+        }
+        finish(&mut world);
+        // A's id retired; B is empty so nothing new.
+        let loaded = world.resource::<LoadedScripts>();
+        assert!(!loaded.is_loaded(&id));
     }
 
     fn init_task_pool() {

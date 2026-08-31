@@ -1314,17 +1314,13 @@ fn collect_scripts(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// Test-only accessor for the production `stage_static_scripts`.
-#[doc(hidden)]
-pub fn stage_static_scripts_for_test(
-    project_dir: &Path,
-    copy_root: &Path,
-    progress: &mut dyn FnMut(String),
-) -> Result<bool, String> {
-    stage_static_scripts(project_dir, copy_root, progress)
-}
-
-fn stage_static_scripts(
+/// Lean-export assembly: write the project's Rust scripts into the
+/// generated `crates/renzora_static_scripts/` crate at `copy_root`.
+/// Returns `Ok(true)` when at least one script was assembled.
+///
+/// This is the production entry point for lean-script generation.
+/// `build_lean` calls it; the lean-compilation test calls it.
+pub fn stage_static_scripts(
     project_dir: &Path,
     copy_root: &Path,
     progress: &mut dyn FnMut(String),
