@@ -67,7 +67,7 @@ A script that fails to compile is not retried until you edit it again, so one er
 
 Every reload leaks its old image, roughly 200 KB. It has to: components the script inserted carry `Drop` impls and vtables living in that image, so unmapping it would turn a later despawn into a jump through freed memory. A restart reclaims all of it.
 
-The watcher keeps an explicit per-id build state machine: a Rust compilation can take many editor frames to finish, edits during compilation set a dirty flag rather than starting a second build, and a stale result is never allowed to overwrite a newer generation. Deletions retire the script immediately, even when no SDK is installed — retiring is independent of building.
+The watcher keeps a per-id build state: each in-flight build is one entry holding its `Task`. A Rust compilation can take many editor frames to finish; while it is in flight, edits to the same script set a dirty flag rather than starting a parallel build. When the old task completes with the dirty flag set, its result is discarded and a single replacement build is spawned immediately — no wait for another save. Deletions retire the script straight away, even when no SDK is installed — retirement is independent of building.
 
 ## Requirements
 
@@ -90,7 +90,7 @@ Scripts run in exports. How they get there depends on the packaging mode, and ne
 
 **Copy-based** exports carry the same `bevy_dylib` and `renzora_dylib` the editor compiled your script against, so it loads exactly as it does in the editor. The export copies the library the editor already built — a script that has never compiled has nothing to ship, and the export says so rather than omitting it quietly.
 
-**Lean** exports link Bevy statically and share no image, so there is no library for a script to bind to. Instead each `scripts/*.rs` becomes a module of the binary and its entry point goes into a table the dispatcher reads. Everything after that is identical: one function per entity per frame, keyed by **canonical project-relative identity** (`project://enemy/spin.rs`), inside the same panic guard. A script behaves the same in the editor and in an export, or an export could not be tested by playing it.
+**Lean** exports link Bevy statically and share no image, so there is no library for a script to bind to. Instead each `scripts/*.rs` becomes a module of the binary and its entry point goes into a table the dispatcher reads. Everything after that is identical: one function per entity per frame, keyed by **canonical project-relative identity** (`project://enemy/spin.rs`), inside the same panic guard. A script behaves the same in the editor and in an export, or an export could not be tested by playing it. The lean exporter writes exactly one canonical row per script — bare-leaf aliases are derived by `LoadedScripts::insert` from the canonical id at load time, so the alias index never sees two competing ids for one script.
 
 Every `.rs` in the project is compiled in, not only the ones a scene currently references — a scene can be loaded at runtime and a script attached at runtime, so any "which are used" analysis would eventually be wrong in the direction that breaks a game silently. An unused script costs bytes, never frame time: the dispatcher only ever looks up identities a live entity asked for.
 
