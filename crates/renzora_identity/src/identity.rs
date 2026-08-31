@@ -15,7 +15,7 @@
 //!   bytes the type stores. `eq`, `Hash`, and `Ord` use exact byte equality.
 //! - Unicode: preserved.
 //! - Symlinks: NOT inspected by this layer. A symlink that escapes the root
-//!   is detected by [`super::discovery::DiscoveredPath`].
+//!   is detected by the symlink-safety layer in `discovery` consumers.
 
 extern crate alloc;
 
