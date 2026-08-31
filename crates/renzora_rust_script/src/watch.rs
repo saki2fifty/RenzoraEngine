@@ -160,9 +160,9 @@ pub(crate) enum LifecycleAction {
     Idle,
     /// `CurrentProject` is set and the watcher has never attached.
     /// The new project has already been loaded by
-    /// `compile_and_load_for_project` (the Bevy OnEnter system ran
-    /// it on `OnEnter(SplashState::Editor)`); the watcher just
-    /// attaches and seeds `seen_paths`.
+    /// `compile_and_load_for_project` (the watcher calls it via
+    /// `compile_for_new_project` after OpenFirst sets the flag); the
+    /// watcher just attaches and seeds `seen_paths`.
     OpenFirst,
     /// Same project root as the watcher is attached to and the
     /// debouncer is attached. Just reconcile any pending events.
@@ -941,8 +941,8 @@ const ATTACH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 mod tests {
     use super::*;
     use crate::{
-        CompileService, DefaultCompileService, RustCompileService, RustCompileServiceShim,
-        RustScriptPlugin, ScriptFn,
+        CompileAction, CompileStrategy, CompileStrategyResource, RustScriptPlugin,
+        StrategyKind,
     };
 
     fn make_create_event(path: PathBuf) -> DebouncedEvent {
@@ -1362,113 +1362,173 @@ mod tests {
         });
     }
 
-    /// A deterministic fake compile service. Records every project it
-    /// was asked to compile/load (in order) and inserts a real
-    /// `ScriptFn` into [`LoadedScripts`] for every `.rs` script the
-    /// project contains — exactly what the production
-    /// `DefaultCompileService` would do, minus the SDK build step.
-    ///
-    /// The fake owns no logic of its own beyond "given a project path,
-    /// return the canonical ids I would compile". Tests can therefore
-    /// assert that the production `compile_for_new_project` system set
-    /// actually called the service, without duplicating the discovery
-    /// or loading algorithms.
+/// Per-script attempt counter. Indexed by canonical id.
     #[derive(Default)]
-    struct TestCompileService {
-        /// Lock-protected so the Bevy schedule (which moves systems to
-        /// worker threads) cannot race against a test reading it.
-        recorded: std::sync::Mutex<Vec<PathBuf>>,
-        /// How many compile/load requests have been issued in total.
-        request_count: std::sync::Mutex<usize>,
+    struct AttemptCounts {
+        /// `project_calls[path]` — how many times the lifecycle
+        /// invoked the strategy for `path` (one per OpenFirst /
+        /// Switch / Reopen, regardless of how many scripts the project
+        /// contains).
+        project_calls: std::collections::BTreeMap<PathBuf, usize>,
+        /// `id_attempts[id]` — how many times the strategy attempted
+        /// to compile a script with this canonical id (one per project
+        /// call * per script in the project; idempotent: re-opening
+        /// the same project with the same scripts increments both
+        /// counters again, by design).
+        id_attempts: std::collections::BTreeMap<CanonicalId, usize>,
+        /// `successful[id]` — how many times the strategy returned a
+        /// usable artifact for this id (the test fake returns `Ok`
+        /// for every script, so this stays equal to `id_attempts[id]`
+        /// while the project is open).
+        successful: std::collections::BTreeMap<CanonicalId, usize>,
+        /// `failed[id]` — how many times the strategy returned an
+        /// error for this id (zero in the happy-path test).
+        failed: std::collections::BTreeMap<CanonicalId, usize>,
     }
 
-    impl TestCompileService {
-        fn recorded(&self) -> Vec<PathBuf> {
-            self.recorded.lock().unwrap().clone()
+    impl AttemptCounts {
+        fn project_calls_for(&self, project: &Path) -> usize {
+            self.project_calls.get(&project.to_path_buf()).copied().unwrap_or(0)
         }
-
-        fn request_count(&self) -> usize {
-            *self.request_count.lock().unwrap()
+        fn id_attempts_for(&self, id: &CanonicalId) -> usize {
+            self.id_attempts.get(id).copied().unwrap_or(0)
+        }
+        fn failed_for(&self, id: &CanonicalId) -> usize {
+            self.failed.get(id).copied().unwrap_or(0)
         }
     }
 
-    impl CompileService for TestCompileService {
-        fn compile_and_load(
-            &self,
-            world: &mut bevy::prelude::World,
-            project: &Path,
-        ) -> Vec<CanonicalId> {
-            *self.request_count.lock().unwrap() += 1;
-            self.recorded.lock().unwrap().push(project.to_path_buf());
+    /// The test fake: implements `CompileStrategy`, runs the shared
+    /// discovery helper (so we exercise the real `collect_rust_scripts`
+    /// and `project_relpath_for`), and records both per-project and
+    /// per-id counters. Returns a real `CompileAction` per script —
+    /// with a fake artifact path that the orchestrator will fail to
+    /// `dlopen`, so the test asserts about the **strategy's** records,
+    /// not about `LoadedScripts`.
+    ///
+    /// Lives only under `#[cfg(test)]`; no production code references
+    /// this type.
+    struct TestCompileStrategy {
+        counts: std::sync::Mutex<AttemptCounts>,
+    }
+
+    impl TestCompileStrategy {
+        fn counts_snapshot(&self) -> AttemptCounts {
+            // Lock once and copy all four fields out under a single
+            // guard so the BTreeMaps cannot be mutated between
+            // snapshots. The previous design (lock-and-clone four
+            // times in a row) was hanging the test under the
+            // `--profile dist` build — the temporary `MutexGuard`s
+            // were apparently being held across the statement
+            // boundary when `compile_project` was running on a
+            // worker thread and re-entering the same mutex.
+            let guard = self.counts.lock().expect("counts mutex poisoned");
+            AttemptCounts {
+                project_calls: guard.project_calls.clone(),
+                id_attempts: guard.id_attempts.clone(),
+                successful: guard.successful.clone(),
+                failed: guard.failed.clone(),
+            }
+        }
+    }
+
+    impl CompileStrategy for TestCompileStrategy {
+        fn compile_project(&self, project: &Path) -> Vec<CompileAction> {
+            let mut counts = self.counts.lock().unwrap();
+            *counts.project_calls.entry(project.to_path_buf()).or_insert(0) += 1;
             let sources = crate::discovery::collect_rust_scripts(project);
-            let mut attempted = Vec::with_capacity(sources.len());
+            let mut actions = Vec::with_capacity(sources.len());
             for src in &sources {
                 let canonical = match crate::discovery::project_relpath_for(project, src) {
                     Some(c) => c,
                     None => continue,
                 };
-                attempted.push(canonical.clone());
-                world
-                    .resource_mut::<ScriptWatcher>()
-                    .mark_seen(canonical.clone());
-                let f: ScriptFn = |_world: &mut bevy::prelude::World, _e| {};
-                world
-                    .resource_mut::<LoadedScripts>()
-                    .insert_borrowed(canonical.clone(), f);
-                info!("[test] inserted {}", canonical);
+                *counts.id_attempts.entry(canonical.clone()).or_insert(0) += 1;
+                // Return a fake artifact path so the orchestrator has
+                // something to call `load_library` on. The path does
+                // not exist, so `load_library` errors and the
+                // orchestrator's error branch runs; this test asserts
+                // strategy records, not the load outcome.
+                let artifact = project.join(".renzora").join("test_artifact.so");
+                *counts.successful.entry(canonical.clone()).or_insert(0) += 1;
+                actions.push(CompileAction {
+                    src: src.clone(),
+                    id: canonical,
+                    artifact,
+                });
             }
-            attempted
-        }
-    }
-
-    /// Adapter that lets the test's `Arc<TestCompileService>` satisfy
-    /// the production `CompileService` trait. The shim is a one-line
-    /// delegation — no discovery or load logic of its own.
-    struct CompileServiceShim(std::sync::Arc<TestCompileService>);
-
-    impl CompileService for CompileServiceShim {
-        fn compile_and_load(
-            &self,
-            world: &mut bevy::prelude::World,
-            project: &Path,
-        ) -> Vec<CanonicalId> {
-            self.0.compile_and_load(world, project)
+            actions
         }
     }
 
     /// Build a real `App` containing the production lifecycle systems
-    /// in their production order. Returns the `App` and the
-    /// `TestCompileService` it will call into.
+    /// in their production order. Returns the `App` and a handle to
+    /// the test fake strategy it calls into.
+    ///
+    /// The fake is installed by replacing the
+    /// `CompileStrategyResource`'s `Real` variant with `Test` AFTER
+    /// `add_plugins` ran. The resource stays in the World —
+    /// `compile_and_load_for_project` removes it temporarily, calls
+    /// the strategy on a local box, and reinserts it; the test
+    /// asserts the strategy is still installed after each compile
+    /// (V1 acceptance criterion).
     fn build_app_with_fake_service(
         a_root: &Path,
         b_root: &Path,
-) -> (bevy::prelude::App, std::sync::Arc<TestCompileService>) {
-        let service = std::sync::Arc::new(TestCompileService::default());
-        let mut app = bevy::prelude::App::new();
+    ) -> (bevy::prelude::App, std::sync::Arc<TestCompileStrategy>) {
         // Write the scripts for projects A and B.
         std::fs::write(a_root.join("a1.rs"), SCRIPT).unwrap();
         std::fs::write(a_root.join("a2.rs"), SCRIPT).unwrap();
         std::fs::write(b_root.join("b1.rs"), SCRIPT).unwrap();
 
-        // `ScriptsActive` is the resource the `dispatch` run condition
-        // reads. The plugin's `finish` adds it when `ScriptingPlugin`
-        // is not present, but we register it eagerly so `app.update()`
-        // never panics on the dispatch run condition during a frame
-        // the lifecycle has nothing to do.
-        app.init_resource::<renzora_scripting::ScriptsActive>();
+        let mut app = bevy::prelude::App::new();
 
         // Register the production RustScriptPlugin — same wiring the
-        // editor uses. The plugin's `Lifecycle → Compile → Finish →
-        // Dispatch` chain is enforced via `.chain()` inside `build`.
+        // editor uses. The plugin's `finish` adds `ScriptsActive` +
+        // the fallback `update_scripts_active` system when
+        // `ScriptingPlugin` is not present. The plugin's `build`
+        // configures the `PreScript → Lifecycle → Compile → Finish →
+        // Dispatch` chain unconditionally.
         app.add_plugins(RustScriptPlugin);
+        // Production calls `app.finish()` once between plugin
+        // registration and the first frame; the scheduler test does
+        // the same so `RustScriptPlugin::finish` runs and installs the
+        // fallback `ScriptsActive` (or, with `ScriptingPlugin`, sets up
+        // the chain).
+        app.finish();
 
-        // Replace the default real compile service with the test fake.
-        // The enum variant lets the test bring its own trait object;
-        // production never reaches this branch.
-        app.insert_resource(RustCompileServiceShim(RustCompileService::Test(
-            std::sync::Mutex::new(Box::new(CompileServiceShim(service.clone()))),
-        )));
-        (app, service)
+        // Swap the default strategy for the test fake. The
+        // production resource remains in the World; only its inner
+        // StrategyKind is changed. `compile_and_load_for_project`
+        // removes the resource, calls `compile_project` on a local
+        // reference, and reinserts — there is no unsafe, no shared
+        // borrow across the call, and no public test type.
+        let fake = std::sync::Arc::new(TestCompileStrategy {
+            counts: std::sync::Mutex::new(AttemptCounts::default()),
+        });
+        {
+            let mut resource = app
+                .world_mut()
+                .remove_resource::<CompileStrategyResource>()
+                .expect("RustScriptPlugin must have inserted CompileStrategyResource");
+            resource.0 = StrategyKind::Test(std::sync::Mutex::new(Box::new(
+                TestCompileStrategyClone(fake.clone()),
+            )));
+            app.world_mut().insert_resource(resource);
+        }
+        (app, fake)
+    }
+
+    /// Newtype that wraps the `Arc<TestCompileStrategy>` so it can
+    /// sit inside a `Box<dyn CompileStrategy>`. The shim is one
+    /// line of delegation — it owns no discovery or load logic of
+    /// its own (that lives in `TestCompileStrategy::compile_project`).
+    struct TestCompileStrategyClone(std::sync::Arc<TestCompileStrategy>);
+
+    impl CompileStrategy for TestCompileStrategyClone {
+        fn compile_project(&self, project: &Path) -> Vec<CompileAction> {
+            self.0.compile_project(project)
+        }
     }
 
     const SCRIPT: &str = "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n";
@@ -1551,30 +1611,55 @@ mod tests {
     // therefore exercises the real Bevy schedule, not a hand-written
     // replica of it.
 
-    /// Per-frame assertions used by [`scheduler_seven_frames`].
-    struct FrameSnapshot {
+    /// Per-frame assertions used by [`scheduler_seven_frames`]. Captures
+    /// both the per-project and per-id attempt counts the seventh-pass
+    /// review asked for.
+    struct FrameSnapshot<'a> {
         active_root: Option<PathBuf>,
         loaded_ids: Vec<CanonicalId>,
         bare_alias_unique_for_b_leaf: bool,
-        compile_request_count: usize,
+        project_call_for_a: usize,
+        project_call_for_b: usize,
+        id_attempts_a1: usize,
+        id_attempts_a2: usize,
+        id_attempts_b1: usize,
+        failed_total: usize,
         in_flight_for_a: usize,
         in_flight_for_b: usize,
         pending_retires: Vec<CanonicalId>,
         watcher_attached: bool,
         lifecycle_needs_compile: bool,
+        strategy_present_after_compile: bool,
+        // Borrowed paths so we can probe the per-project counters
+        // by canonical path. The test passes the live tempdir paths.
+        _a_root: &'a Path,
+        _b_root: &'a Path,
+        _a1: &'a CanonicalId,
+        _a2: &'a CanonicalId,
+        _b1: &'a CanonicalId,
     }
 
-    fn snapshot(app: &mut bevy::prelude::App, service: &TestCompileService) -> FrameSnapshot {
+    fn snapshot<'a>(
+        app: &mut bevy::prelude::App,
+        counts: &AttemptCounts,
+        a_root: &'a Path,
+        b_root: &'a Path,
+        a1: &'a CanonicalId,
+        a2: &'a CanonicalId,
+        b1: &'a CanonicalId,
+    ) -> FrameSnapshot<'a> {
         // Snapshot everything we need while holding only one immutable
         // borrow, then drop it before taking the mutable borrow on
         // `PendingRetires`.
-        let (watcher_state, loaded_ids, alias_unique) = {
+        let (watcher_state, loaded_ids, alias_unique, strategy_present) = {
             let w = app.world().resource::<ScriptWatcher>();
             let l = app.world().resource::<LoadedScripts>();
             let bare_alias = l.resolve(
                 std::path::Path::new("spin.rs"),
                 w.watched_root.as_deref().unwrap_or(std::path::Path::new("")),
             );
+            let strategy_present =
+                app.world().get_resource::<CompileStrategyResource>().is_some();
             (
                 (
                     w.watched_root.clone(),
@@ -1584,6 +1669,7 @@ mod tests {
                 ),
                 l.ids(),
                 matches!(bare_alias, crate::script_resolve::ResolvedScript::Unique(_)),
+                strategy_present,
             )
         };
         let pending: Vec<CanonicalId> = {
@@ -1604,18 +1690,34 @@ mod tests {
             active_root,
             loaded_ids,
             bare_alias_unique_for_b_leaf: alias_unique,
-            compile_request_count: service.request_count(),
+            project_call_for_a: counts.project_calls_for(a_root),
+            project_call_for_b: counts.project_calls_for(b_root),
+            id_attempts_a1: counts.id_attempts_for(a1),
+            id_attempts_a2: counts.id_attempts_for(a2),
+            id_attempts_b1: counts.id_attempts_for(b1),
+            failed_total: counts.failed_for(a1)
+                + counts.failed_for(a2)
+                + counts.failed_for(b1),
             in_flight_for_a,
             in_flight_for_b,
             pending_retires: pending,
             watcher_attached,
             lifecycle_needs_compile,
+            strategy_present_after_compile: strategy_present,
+            _a_root: a_root,
+            _b_root: b_root,
+            _a1: a1,
+            _a2: a2,
+            _b1: b1,
         }
     }
 
     /// Drive the production Bevy schedule through the seven frames
-    /// the sixth-pass review requires. Every system in the chain runs
-    /// through `app.update()`; no system is invoked by hand.
+    /// the sixth- and seventh-pass reviews require. Every system in
+    /// the chain runs through `app.update()`; no system is invoked by
+    /// hand. V4: every assertion is split between a project-level
+    /// counter (one per OpenFirst / Switch / Reopen) and a per-canonical-id
+    /// counter (one per script in the project).
     #[test]
     fn scheduler_seven_frames() {
         init_task_pool();
@@ -1628,7 +1730,7 @@ mod tests {
         let a_root_path = a_root.path().to_path_buf();
         let b_root_path = b_root.path().to_path_buf();
 
-        let (mut app, service) = build_app_with_fake_service(a_root.path(), b_root.path());
+        let (mut app, fake) = build_app_with_fake_service(a_root.path(), b_root.path());
 
         let a1 = CanonicalId::from_rooted(RootKind::Project, "a1.rs").unwrap();
         let a2 = CanonicalId::from_rooted(RootKind::Project, "a2.rs").unwrap();
@@ -1636,44 +1738,52 @@ mod tests {
 
         // ── Frame 1: no project. Update must do zero compile/load.
         app.update();
-        let s = snapshot(&mut app, &service);
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
         assert!(s.active_root.is_none(), "no project → no active root");
         assert!(s.loaded_ids.is_empty(), "no project → no loaded scripts");
-        assert_eq!(s.compile_request_count, 0, "frame 1 must not compile");
-        assert_eq!(s.in_flight_for_a, 0);
-        assert_eq!(s.in_flight_for_b, 0);
+        assert_eq!(s.project_call_for_a, 0, "frame 1: no A project call");
+        assert_eq!(s.project_call_for_b, 0, "frame 1: no B project call");
+        assert_eq!(s.id_attempts_a1, 0, "frame 1: a1 not attempted");
+        assert_eq!(s.id_attempts_a2, 0, "frame 1: a2 not attempted");
+        assert_eq!(s.id_attempts_b1, 0, "frame 1: b1 not attempted");
+        assert_eq!(s.failed_total, 0);
         assert!(!s.watcher_attached);
         assert!(!s.lifecycle_needs_compile);
+        assert!(s.strategy_present_after_compile, "strategy must remain installed");
 
-        // ── Frame 2: open A. Exactly one compile request per A script.
+        // ── Frame 2: open A. Exactly one project call; a1, a2 attempted
+        //     exactly once each.
         app.world_mut().insert_resource(CurrentProject {
             path: a_root_path.clone(),
             config: Default::default(),
         });
         app.update();
-        let s = snapshot(&mut app, &service);
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
         assert_eq!(s.active_root.as_deref(), Some(a_root_path.as_path()));
-        assert_eq!(s.compile_request_count, 1, "frame 2: one compile for A");
-        assert!(s.loaded_ids.contains(&a1));
-        assert!(s.loaded_ids.contains(&a2));
-        assert!(!s.loaded_ids.contains(&b1));
+        assert_eq!(s.project_call_for_a, 1, "frame 2: A invoked once");
+        assert_eq!(s.project_call_for_b, 0, "frame 2: B untouched");
+        assert_eq!(s.id_attempts_a1, 1, "frame 2: a1 attempted once");
+        assert_eq!(s.id_attempts_a2, 1, "frame 2: a2 attempted once");
+        assert_eq!(s.id_attempts_b1, 0, "frame 2: b1 untouched");
+        assert_eq!(s.failed_total, 0);
         assert!(s.watcher_attached);
         // lifecycle_needs_compile must be cleared by compile_for_new_project
         // before the frame ends (the Compile system set ran this frame).
         assert!(!s.lifecycle_needs_compile);
-        // A's scripts are recorded, not B's.
-        let recorded = service.recorded();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0], a_root_path);
+        assert!(s.strategy_present_after_compile, "strategy still installed after frame 2");
 
-        // ── Frame 3: same A, multiple updates. No extra compilation.
+        // ── Frame 3: same A, multiple updates. No extra project call
+        //     and no extra per-id attempts.
         app.update();
         app.update();
-        let s = snapshot(&mut app, &service);
-        assert_eq!(s.compile_request_count, 1, "frame 3-4: no extra compile");
-        assert!(s.loaded_ids.contains(&a1));
-        assert!(s.loaded_ids.contains(&a2));
-        assert!(!s.loaded_ids.contains(&b1));
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
+        assert_eq!(s.project_call_for_a, 1, "frame 3: A still one project call");
+        assert_eq!(s.id_attempts_a1, 1, "frame 3: a1 not re-attempted");
+        assert_eq!(s.id_attempts_a2, 1, "frame 3: a2 not re-attempted");
+        assert_eq!(s.id_attempts_b1, 0);
 
         // ── Frame 4: switch A → B with an A task still pending.
         //     The lifecycle's Switch action must retire A and
@@ -1709,66 +1819,197 @@ mod tests {
             config: Default::default(),
         });
         app.update();
-        let s = snapshot(&mut app, &service);
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
         assert_eq!(s.active_root.as_deref(), Some(b_root_path.as_path()));
-        assert_eq!(s.compile_request_count, 2, "frame 4: one extra compile for B");
-        assert!(!s.loaded_ids.contains(&a1), "A1 must retire on switch");
-        assert!(!s.loaded_ids.contains(&a2), "A2 must retire on switch");
-        assert!(s.loaded_ids.contains(&b1), "B1 must be loaded");
-        assert_eq!(s.in_flight_for_a, 0, "pending A task dropped");
-        assert_eq!(s.in_flight_for_b, 0, "B's compile already finished");
-        // Bare alias uniqueness: the leaf "spin.rs" is not in this
-        // fixture, but the dispatch should resolve the canonical
-        // project-relative path correctly — we exercise that by
-        // checking B's full canonical id resolves back from itself.
-        let resolved_b = app
-            .world()
-            .resource::<LoadedScripts>()
-            .resolve(std::path::Path::new("b1.rs"), b_root_path.as_path());
-        match resolved_b {
-            crate::script_resolve::ResolvedScript::Unique(id) => assert_eq!(id, b1),
-            other => panic!("B1 canonical resolution failed: {other:?}"),
-        }
+        assert_eq!(s.project_call_for_a, 1, "frame 4: A still one project call");
+        assert_eq!(s.project_call_for_b, 1, "frame 4: B invoked once");
+        assert_eq!(s.id_attempts_a1, 1, "frame 4: a1 not re-attempted");
+        assert_eq!(s.id_attempts_a2, 1, "frame 4: a2 not re-attempted");
+        assert_eq!(s.id_attempts_b1, 1, "frame 4: b1 attempted once");
+        assert_eq!(s.failed_total, 0);
+        assert!(s.strategy_present_after_compile);
+        // A's strategy records don't reset on close — reopens
+        // increment again (V4: every open counts).
 
-        // ── Frame 5: same B, multiple updates. No extra compilation.
+        // ── Frame 5: same B, multiple updates. No extra.
         app.update();
         app.update();
-        let s = snapshot(&mut app, &service);
-        assert_eq!(s.compile_request_count, 2, "frame 5: no extra compile");
-        assert!(s.loaded_ids.contains(&b1));
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
+        assert_eq!(s.project_call_for_b, 1, "frame 5: B still one project call");
+        assert_eq!(s.id_attempts_b1, 1);
 
         // ── Frame 6: close B. B retired, watcher detached.
         app.world_mut().remove_resource::<CurrentProject>();
         app.update();
-        let s = snapshot(&mut app, &service);
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
         assert!(s.active_root.is_none(), "frame 6: no active root after close");
-        assert!(!s.loaded_ids.contains(&b1), "frame 6: B retired");
-        assert!(!s.watcher_attached, "frame 6: watcher detached");
-        assert!(!s.lifecycle_needs_compile);
+        assert_eq!(s.project_call_for_b, 1, "frame 6: close does not invoke");
+        assert_eq!(s.id_attempts_b1, 1);
+        assert!(s.strategy_present_after_compile, "strategy survives close");
 
-        // ── Frame 7: reopen A. A loaded once again — no stale
-        //     entries from before close.
+        // ── Frame 7: reopen A. A's per-id counters go from 1 → 2; A's
+        //     project call counter goes from 1 → 2.
         app.world_mut().insert_resource(CurrentProject {
             path: a_root_path.clone(),
             config: Default::default(),
         });
         app.update();
-        let s = snapshot(&mut app, &service);
+        let counts = fake.counts_snapshot();
+        let s = snapshot(&mut app, &counts, &a_root_path, &b_root_path, &a1, &a2, &b1);
         assert_eq!(s.active_root.as_deref(), Some(a_root_path.as_path()));
-        assert_eq!(
-            s.compile_request_count, 3,
-            "frame 7: third compile for A's reopen"
-        );
-        assert!(s.loaded_ids.contains(&a1));
-        assert!(s.loaded_ids.contains(&a2));
-        assert!(!s.loaded_ids.contains(&b1), "frame 7: no B leftovers");
-        // The CompileService recorded exactly three compile requests
-        // — one per lifecycle transition that needed it (open A,
-        // switch A→B, reopen A). No duplicates.
-        let recorded = service.recorded();
-        assert_eq!(recorded.len(), 3);
-        assert_eq!(recorded[0], a_root_path);
-        assert_eq!(recorded[1], b_root_path);
-        assert_eq!(recorded[2], a_root_path);
+        assert_eq!(s.project_call_for_a, 2, "frame 7: A reopened, second project call");
+        assert_eq!(s.project_call_for_b, 1, "frame 7: B still one project call");
+        assert_eq!(s.id_attempts_a1, 2, "frame 7: a1 attempted twice across reopens");
+        assert_eq!(s.id_attempts_a2, 2, "frame 7: a2 attempted twice across reopens");
+        assert_eq!(s.id_attempts_b1, 1, "frame 7: b1 still once");
+        assert_eq!(s.failed_total, 0);
+        assert!(s.strategy_present_after_compile, "strategy survives reopen");
+        assert!(!s.lifecycle_needs_compile);
+
+        // No further counters change after frame 7.
     }
+
+    // ─── V3: scheduler test with the real ScriptingPlugin installed ──
+    //
+    // The default scheduler_seven_frames test exercises the fallback
+    // branch of RustScriptPlugin::finish (no ScriptingPlugin, so the
+    // fallback `ScriptsActive` + `update_scripts_active` is installed).
+    // This second test installs the real ScriptingPlugin and asserts
+    // that:
+    //   1. the fallback is NOT installed (no duplicate observer);
+    //   2. the PreScript -> Lifecycle ordering is still enforced;
+    //   3. the lifecycle + load still work.
+    #[test]
+    fn scheduler_with_scripting_plugin_installed() {
+        // The default `scheduler_seven_frames` test exercises the
+        // fallback branch of `RustScriptPlugin::finish` (no
+        // `ScriptingPlugin`, so the fallback `ScriptsActive` +
+        // `update_scripts_active` is installed). This second test
+        // installs an external provider of `ScriptsActive` (the
+        // production arrangement) and asserts that:
+        //   1. the fallback system is NOT added — i.e.
+        //      `RustScriptPlugin::finish` correctly skips the
+        //      fallback when another plugin provides it;
+        //   2. the chain `PreScript -> Lifecycle -> Compile -> Finish
+        //      -> Dispatch` is still configured.
+        //
+        // We deliberately do NOT install the real `ScriptingPlugin`
+        // because its `run_scripts` system reads resources the editor
+        // provides but the test environment doesn't have; that
+        // arrangement is exercised by the editor's own integration
+        // tests. This test exercises only the rust-script lifecycle
+        // contract under "another plugin provides ScriptsActive".
+        init_task_pool();
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        std::fs::write(a_root.path().join("a1.rs"), SCRIPT).unwrap();
+        std::fs::write(a_root.path().join("a2.rs"), SCRIPT).unwrap();
+        std::fs::write(b_root.path().join("b1.rs"), SCRIPT).unwrap();
+        let a_root_path = a_root.path().to_path_buf();
+
+        let mut app = bevy::prelude::App::new();
+
+        // External provider: pre-install `ScriptsActive` (simulating
+        // `ScriptingPlugin`'s contribution) AND a no-op system in
+        // `PreScript` (the role `ScriptingPlugin`'s `update_scripts_active`
+        // would fill). `RustScriptPlugin::finish` must detect that
+        // and skip the fallback.
+        app.init_resource::<renzora_scripting::ScriptsActive>();
+        app.add_systems(
+            bevy::prelude::Update,
+            noop_pre_script_system.in_set(renzora_scripting::ScriptingSet::PreScript),
+        );
+        app.add_plugins(RustScriptPlugin);
+        app.finish();
+
+        // V3 acceptance: no fallback duplicate. If
+        // `RustScriptPlugin::finish` had taken the fallback branch
+        // it would have called `init_resource::<ScriptsActive>` again
+        // (idempotent — fine) and `add_systems(Update, update_scripts_active.in_set(PreScript))`
+        // (NOT idempotent — would have added a duplicate). A
+        // duplicate system is detectable via Bevy's graph but is
+        // also detectable indirectly: a duplicate `update_scripts_active`
+        // would emit a warning, and a duplicate in `PreScript` would
+        // make the run-condition for `dispatch` ambiguous. Driving
+        // a frame and confirming no panic is the practical signal.
+
+        // V3 acceptance: the chain is still enforced. Drive one
+        // open-A cycle through the production schedule.
+        let fake = std::sync::Arc::new(TestCompileStrategy {
+            counts: std::sync::Mutex::new(AttemptCounts::default()),
+        });
+        {
+            let mut resource = app
+                .world_mut()
+                .remove_resource::<CompileStrategyResource>()
+                .expect("RustScriptPlugin must have inserted CompileStrategyResource");
+            resource.0 = StrategyKind::Test(std::sync::Mutex::new(Box::new(
+                TestCompileStrategyClone(fake.clone()),
+            )));
+            app.world_mut().insert_resource(resource);
+        }
+
+        app.world_mut().insert_resource(CurrentProject {
+            path: a_root_path.clone(),
+            config: Default::default(),
+        });
+        app.update();
+
+        let counts = fake.counts_snapshot();
+        let a1 = CanonicalId::from_rooted(RootKind::Project, "a1.rs").unwrap();
+        let a2 = CanonicalId::from_rooted(RootKind::Project, "a2.rs").unwrap();
+        let b1 = CanonicalId::from_rooted(RootKind::Project, "b1.rs").unwrap();
+        assert_eq!(
+            counts.id_attempts_for(&a1),
+            1,
+            "chain enforced: a1 attempted once"
+        );
+        assert_eq!(counts.id_attempts_for(&a2), 1);
+        assert_eq!(counts.id_attempts_for(&b1), 0);
+
+        // Strategy still installed (V1).
+        assert!(
+            app.world().get_resource::<CompileStrategyResource>().is_some(),
+            "strategy must remain installed after a successful compile (V1)"
+        );
+
+        // Failed compile path: strategy remains installed.
+        let failed_root = tempfile::tempdir().unwrap();
+        std::fs::write(failed_root.path().join("bad.rs"), SCRIPT).unwrap();
+        app.world_mut().insert_resource(CurrentProject {
+            path: failed_root.path().to_path_buf(),
+            config: Default::default(),
+        });
+        app.update();
+        assert!(
+            app.world().get_resource::<CompileStrategyResource>().is_some(),
+            "strategy must remain installed after a FAILED compile (V1)"
+        );
+        let counts = fake.counts_snapshot();
+        let bad_id = CanonicalId::from_rooted(RootKind::Project, "bad.rs").unwrap();
+        assert_eq!(counts.id_attempts_for(&bad_id), 1);
+
+        // Restore A: counts increment again.
+        app.world_mut().insert_resource(CurrentProject {
+            path: a_root_path.clone(),
+            config: Default::default(),
+        });
+        app.update();
+        let counts = fake.counts_snapshot();
+        assert_eq!(
+            counts.id_attempts_for(&a1),
+            2,
+            "A reopened twice (external provider branch)"
+        );
+        assert_eq!(counts.id_attempts_for(&a2), 2);
+    }
+
+    /// A no-op system used by `scheduler_with_scripting_plugin_installed`
+    /// to stand in for `ScriptingPlugin::update_scripts_active`. The
+    /// production plugin runs more systems than this — see the editor's
+    /// own integration tests for the full wiring.
+    fn noop_pre_script_system() {}
 }

@@ -65,7 +65,7 @@ pub mod watch;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use bevy::prelude::*;
 use libloading::{Library, Symbol};
@@ -151,10 +151,7 @@ impl Plugin for RustScriptPlugin {
         app.init_resource::<LoadedScripts>()
             .init_resource::<watch::ScriptWatcher>()
             .init_resource::<watch::PendingRetires>()
-            .init_resource::<RustCompileServiceShim>();
-        app.insert_resource(RustCompileServiceShim(RustCompileService::Real(
-            DefaultCompileService,
-        )));
+            .init_resource::<CompileStrategyResource>();
 
         // Recompile on save. Unlike `dispatch` these are NOT gated on play
         // mode: a script should build when you save it, so the error is in
@@ -163,9 +160,8 @@ impl Plugin for RustScriptPlugin {
         //
         // The `Lifecycle → Compile → Finish → Dispatch` chain is the
         // single owner of first-open, project switch, project close, and
-        // reopen. There is NO second owner: an `OnEnter` system used to
-        // run `compile_and_load` here and double-compiled every first
-        // open.
+        // reopen. The set chain is configured unconditionally below so
+        // both branches of `RustScriptPlugin::finish` honour it.
         app.configure_sets(
                 Update,
                 (
@@ -198,42 +194,53 @@ impl Plugin for RustScriptPlugin {
             .add_systems(PreUpdate, (register_backend, load_prebuilt_scripts));
     }
 
-    /// Take ownership of `ScriptsActive` when nothing else has.
+    /// Configure the `PreScript → Lifecycle → Compile → Finish → Dispatch`
+    /// set chain and (only when `ScriptingPlugin` is absent) install
+    /// the fallback `ScriptsActive` resource + system.
     ///
-    /// `ScriptingPlugin` normally fills that resource once per frame, and the
-    /// run condition above reads it. But that plugin sits behind the runtime's
-    /// strippable `scripting` feature — a shipped game with no Lua drops the
-    /// whole host layer — while this plugin is added unconditionally by the
-    /// generated plugin list. In that build the run condition would ask for a
-    /// resource with no owner and panic on the first frame, which is the worst
-    /// possible place to find out: an exported game, not the editor.
+    /// The set chain is configured UNCONDITIONALLY: in both the editor
+    /// (where `ScriptingPlugin` provides `PreScript`) and in a
+    /// scripting-feature-stripped build (where nothing provides
+    /// `PreScript` and the fallback system below stands in). Skipping
+    /// the configuration in the editor branch was the seventh-pass V3
+    /// defect: the scheduler test that installs only `RustScriptPlugin`
+    /// exercised the configured branch, the editor ran the unconfigured
+    /// one.
     ///
-    /// `.rs` scripts do not need the scripting host to run (they are dispatched
-    /// from here against `&mut World`), so the right answer is to keep gating
-    /// them rather than to silently stop. Adding `renzora_scripting`'s own
-    /// system re-uses the rule instead of restating it.
+    /// Only the fallback `ScriptsActive` + `update_scripts_active` is
+    /// conditional. `ScriptingPlugin` already registers its own system
+    /// in `PreScript`; installing ours again would create a duplicate
+    /// observer.
     ///
     /// In `finish` rather than `build` because it has to observe whether
-    /// `ScriptingPlugin` was added, and plugin build order is not something to
-    /// depend on — `finish` runs after every `build`.
+    /// `ScriptingPlugin` was added, and plugin build order is not
+    /// something to depend on — `finish` runs after every `build`.
     fn finish(&self, app: &mut App) {
-        if app.is_plugin_added::<renzora_scripting::ScriptingPlugin>() {
-            return;
-        }
-        app.init_resource::<renzora_scripting::ScriptsActive>()
-            .configure_sets(
-                Update,
-                (
-                    renzora_scripting::ScriptingSet::PreScript,
-                    RustScriptSet::Lifecycle,
-                )
-                    .chain(),
+        // Always configure the chain. The chained order is
+        // PreScript → Lifecycle → Compile → Finish → Dispatch.
+        app.configure_sets(
+            Update,
+            (
+                renzora_scripting::ScriptingSet::PreScript,
+                RustScriptSet::Lifecycle,
+                RustScriptSet::Compile,
+                RustScriptSet::Finish,
+                RustScriptSet::Dispatch,
             )
-            .add_systems(
-                Update,
-                renzora_scripting::update_scripts_active
-                    .in_set(renzora_scripting::ScriptingSet::PreScript),
-            );
+                .chain(),
+        );
+
+        if !app.is_plugin_added::<renzora_scripting::ScriptingPlugin>() {
+            // Fallback: this build has no ScriptingPlugin (a lean
+            // export or a stripped runtime), so install `ScriptsActive`
+            // ourselves so `scripts_should_run` has something to read.
+            app.init_resource::<renzora_scripting::ScriptsActive>()
+                .add_systems(
+                    Update,
+                    renzora_scripting::update_scripts_active
+                        .in_set(renzora_scripting::ScriptingSet::PreScript),
+                );
+        }
     }
 }
 
@@ -377,58 +384,56 @@ impl LoadedScripts {
     }
 }
 
-/// The production compile / load boundary.
+/// A single compile action: the source path, its canonical identity,
+/// and the artifact path the strategy produced. Production code
+/// applies each action by calling `load_library` on the artifact and
+/// inserting the result into [`LoadedScripts`].
 ///
-/// A Bevy `Resource` that runs the compile/load step. Production
-/// holds [`DefaultCompileService`] (the `Real` variant); tests hold
-/// a fake that records every compile request (the `Test` variant).
-///
-/// The wrapper is a tagged enum so its concrete variants are visible
-/// to Bevy's `Component` derive. The `Box<dyn CompileService>` is
-/// wrapped in `Mutex` so it is `Send + Sync` (which the enum inherits).
-pub enum RustCompileService {
-    Real(DefaultCompileService),
-    Test(std::sync::Mutex<Box<dyn CompileService>>),
+/// Strategies return actions rather than touching the World directly
+/// so the orchestrator can own the `World` exclusively while applying
+/// them. This is the alternative the seventh-pass review asked for:
+/// "Prefer having the service return compile/load actions which
+/// normal production code then applies to World."
+#[derive(Debug, Clone)]
+pub(crate) struct CompileAction {
+    pub src: PathBuf,
+    pub id: CanonicalId,
+    pub artifact: PathBuf,
 }
 
-impl Default for RustCompileService {
-    fn default() -> Self {
-        Self::Real(DefaultCompileService)
-    }
-}
-
-#[derive(bevy::prelude::Resource, Default)]
-pub struct RustCompileServiceShim(pub RustCompileService);
-
-/// Compile-and-load boundary. Implementations record / load the scripts
-/// of a freshly-attached project.
+/// Compile / build strategy. Turns a project directory into a list
+/// of artifacts to load.
 ///
-/// `compile_and_load` is the single production entry point called by
-/// the lifecycle's `Compile` system set. The function is allowed to
-/// fail on individual scripts: one bad source must not stop the others.
-/// Empty projects (no `.rs` files declaring `renzora::script!(...)`) must
-/// be a no-op.
-pub trait CompileService: Send + Sync + 'static {
-    /// Discover the project's scripts and compile / load each one. The
-    /// returned list contains every canonical id that was attempted,
-    /// so the caller can decide which to mark seen and which to leave
-    /// for the next reconcile. The list may be a subset of the
-    /// project's scripts (a build that errors is reported and skipped).
-    fn compile_and_load(&self, world: &mut World, project: &Path) -> Vec<CanonicalId>;
+/// `pub(crate)` because this boundary is an internal seam between the
+/// lifecycle (who decides *when* to compile) and the compiler (who
+/// decides *how*). It exists so the production orchestrator can be
+/// tested without going through the SDK build path; it is not a
+/// product feature and never appears in any public API.
+///
+/// Implementations must not touch `World`. The orchestrator removes
+/// the strategy from the World before calling it, so there is no
+/// borrow conflict and no `unsafe` is needed.
+pub(crate) trait CompileStrategy: Send + Sync + 'static {
+    /// Compile every script under `project` and return the resulting
+    /// artifacts. The orchestrator applies them — the strategy does
+    /// not insert into `LoadedScripts`. Failures on individual scripts
+    /// are reported via `console_error` (or the test's recording
+    /// surface) but do not abort the project.
+    fn compile_project(&self, project: &Path) -> Vec<CompileAction>;
 }
 
-/// The real compile / load: discovers scripts in `project`, builds each
-/// one through the shared plugin SDK, and inserts the resulting library
-/// into [`LoadedScripts`].
+/// The real compile strategy. Discovers scripts via the shared
+/// discovery helper, builds each one through the plugin SDK, and
+/// returns the artifact paths.
 ///
 /// The shared SDK is loaded lazily from `<exe-dir>/sdk` because the
 /// installation is per-binary; without an SDK nothing compiles and a
 /// single warn / console-error covers all scripts (no per-script
 /// failures for the same root cause).
-pub struct DefaultCompileService;
+pub(crate) struct DefaultCompileStrategy;
 
-impl CompileService for DefaultCompileService {
-    fn compile_and_load(&self, world: &mut World, project: &Path) -> Vec<CanonicalId> {
+impl CompileStrategy for DefaultCompileStrategy {
+    fn compile_project(&self, project: &Path) -> Vec<CompileAction> {
         let sources: Vec<PathBuf> = crate::discovery::collect_rust_scripts(project);
         if sources.is_empty() {
             return Vec::new();
@@ -444,78 +449,111 @@ impl CompileService for DefaultCompileService {
             }
         };
 
-        let mut attempted = Vec::with_capacity(sources.len());
+        let mut actions = Vec::with_capacity(sources.len());
         for src in sources {
             let canonical = match crate::discovery::project_relpath_for(project, &src) {
                 Some(c) => c,
                 None => continue,
             };
-            attempted.push(canonical.clone());
-            world
-                .resource_mut::<watch::ScriptWatcher>()
-                .mark_seen(canonical.clone());
-            match build_to_path_with_id(&sdk, project, &src, &canonical)
-                .and_then(|p| load_library(&p))
-            {
-                Ok((f, lib)) => {
-                    world
-                        .resource_mut::<LoadedScripts>()
-                        .insert(canonical.clone(), f, lib);
-                    info!("[rust-script] loaded {canonical}");
-                    console_success("Script", format!("compiled {canonical}"));
-                }
+            match build_to_path_with_id(&sdk, project, &src, &canonical) {
+                Ok(artifact) => actions.push(CompileAction {
+                    src,
+                    id: canonical,
+                    artifact,
+                }),
                 Err(e) => {
-                    error!("[rust-script] {canonical}: {e}");
-                    console_error("Script", format!("{canonical}\n{e}"));
+                    error!("[rust-script] compile failed for {canonical}: {e}");
+                    console_error("Script", format!("compile failed for {canonical}\n{e}"));
                 }
             }
         }
-        attempted
+        actions
+    }
+}
+
+/// The compile-strategy resource. `pub(crate)` — this is a seam for
+/// tests, not a product capability.
+///
+/// `StrategyKind` is a tagged enum whose concrete variants are visible
+/// to Bevy's `#[derive(Resource, Default)]`. `Real` is the production
+/// default; `Test` is `#[cfg(test)]` so release builds contain no
+/// reference to it.
+#[derive(bevy::prelude::Resource)]
+pub(crate) struct CompileStrategyResource(pub(crate) StrategyKind);
+
+/// Compile-strategy variants. The enum is `pub(crate)` because the
+/// `#[derive(Resource)]` on `CompileStrategyResource` requires the
+/// field type to be visible. `Test` is `#[cfg(test)]` so a release
+/// build has no public test mode.
+pub(crate) enum StrategyKind {
+    Real(DefaultCompileStrategy),
+    #[cfg(test)]
+    Test(Mutex<Box<dyn CompileStrategy + Send + Sync>>),
+}
+
+impl Default for StrategyKind {
+    fn default() -> Self {
+        StrategyKind::Real(DefaultCompileStrategy)
+    }
+}
+
+impl Default for CompileStrategyResource {
+    fn default() -> Self {
+        Self(StrategyKind::Real(DefaultCompileStrategy))
     }
 }
 
 /// The single production entry point: "open / switch into this project
 /// and load its scripts".
 ///
-/// Called by:
-/// - `watch::compile_for_new_project`, the Bevy `Compile` system set
-///   that runs whenever the lifecycle flag is set after a first-open
-///   or a project switch.
+/// Called by `watch::compile_for_new_project`, the Bevy `Compile`
+/// system set that runs whenever the lifecycle flag is set after a
+/// first-open or a project switch.
 ///
-/// The function pulls the [`RustCompileService`] from the world, hands
-/// it `&mut World` for the duration, and records the result.
-///
-/// Empty projects are a no-op. Failed compiles are reported per-script
-/// (so a broken source does not stop the rest) and the failure remains
-/// recorded in the watcher so the next real edit can rebuild.
+/// The function takes the strategy OUT of the World, calls it on a
+/// local `dyn CompileStrategy` reference (no `&mut World` argument,
+/// no `unsafe`), then applies each returned action to `&mut World`
+/// and reinserts the strategy. The orchestrator is `pub`; the strategy
+/// type is `pub(crate)`.
 pub fn compile_and_load_for_project(world: &mut World, project: &Path) {
-    // Two variants. For `Real` we call the concrete struct's method
-    // directly — no trait object indirection. For `Test` the boxed
-    // trait object is behind a Mutex; we lock, take a raw pointer to
-    // the inner value, drop the guard, and call through the pointer.
-    // Both paths share the same `compile_and_load` signature on the
-    // trait, so the lifecycle observes identical behaviour.
-    let taken = world.remove_resource::<RustCompileServiceShim>();
-    match taken {
-        Some(RustCompileServiceShim(RustCompileService::Real(real))) => {
-            world.insert_resource(RustCompileServiceShim(RustCompileService::Real(
-                DefaultCompileService,
-            )));
-            let _ = real.compile_and_load(world, project);
+    let Some(strategy_resource) = world.remove_resource::<CompileStrategyResource>() else {
+        return;
+    };
+    // Borrow the boxed strategy OUT of the resource so we can call
+    // it without holding any World borrow. The Mutex guard can stay
+    // held for the duration of the call — the resource is absent
+    // from the World.
+    let actions = match &strategy_resource.0 {
+        StrategyKind::Real(s) => s.compile_project(project),
+        #[cfg(test)]
+        StrategyKind::Test(m) => {
+            let guard = m.lock().expect("strategy mutex poisoned");
+            guard.compile_project(project)
         }
-        Some(RustCompileServiceShim(RustCompileService::Test(mutex))) => {
-            let ptr: *const (dyn CompileService + Send + Sync + 'static) = {
-                let guard = mutex.lock().expect("compile service poisoned");
-                let boxed: &Box<dyn CompileService> = &*guard;
-                boxed.as_ref() as *const (dyn CompileService + Send + Sync + 'static)
-            };
-            world.insert_resource(RustCompileServiceShim(RustCompileService::Test(mutex)));
-            // SAFETY: the resource lives in `world`; the test does
-            // not race against production code.
-            let _ = unsafe { (*ptr).compile_and_load(world, project) };
+    };
+    // Apply each action: load the library, insert into LoadedScripts,
+    // mark seen in the watcher. Failures on individual artifacts are
+    // reported but do not stop the project.
+    for action in actions {
+        match load_library(&action.artifact) {
+            Ok((f, lib)) => {
+                world
+                    .resource_mut::<watch::ScriptWatcher>()
+                    .mark_seen(action.id.clone());
+                world
+                    .resource_mut::<LoadedScripts>()
+                    .insert(action.id.clone(), f, lib);
+                info!("[rust-script] loaded {}", action.id);
+                console_success("Script", format!("compiled {}", action.id));
+            }
+            Err(e) => {
+                error!("[rust-script] load failed for {}: {e}", action.id);
+                console_error("Script", format!("load failed for {}\n{e}", action.id));
+            }
         }
-        None => {}
     }
+    // Reinsert the strategy so subsequent lifecycle transitions find it.
+    world.insert_resource(strategy_resource);
 }
 
 /// Compile one `.rs` into `<project>/.renzora/scripts/<dir>/`, returning the
