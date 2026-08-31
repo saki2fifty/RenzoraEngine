@@ -8434,6 +8434,7 @@ dependencies = [
  "renzora_plugin_build",
  "renzora_scripting",
  "renzora_static_scripts",
+ "sha2",
  "tempfile",
 ]
 

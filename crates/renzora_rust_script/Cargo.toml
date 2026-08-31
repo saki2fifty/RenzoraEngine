@@ -55,6 +55,10 @@ renzora_identity = { path = "../renzora_identity", features = ["discovery", "rus
 # `notify_debouncer_full`, matching the C-ABI plugin hot-reload path's
 # mechanism. `0.7` matches the version used by `renzora_plugin::host::dev`.
 notify-debouncer-full = "0.7"
+# Explicitly-specified stable hash for the build directory key. Phase 1
+# correction 14 swaps `DefaultHasher` (not specified stable across Rust
+# releases) for `sha2::Sha256` truncated to 16 hex characters.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Tests in `src/discovery.rs` build synthetic project trees under a tempdir.

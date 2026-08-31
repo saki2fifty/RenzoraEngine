@@ -78,18 +78,58 @@ fn canonical_for_path(rel: &Path) -> Option<CanonicalId> {
     CanonicalId::from_rooted(RootKind::Project, &s).ok()
 }
 
-/// Build directory hashed off the canonical identity. Two identical
-/// canonical identities always pick the same build dir; distinct
-/// identities never collide. Used by `build_to_path_with_id` in
-/// `lib.rs` to keep generated output keyed to the identity that
-/// produced it. See correction 14 for the contract on this hash.
+/// Build directory hashed off the canonical identity. Phase 1
+/// correction 14 mandates an explicitly-specified stable hash
+/// algorithm; this implementation uses `sha2::Sha256` truncated to 16
+/// hex characters. The function does NOT claim collisions are
+/// impossible — a 64-bit hash of a 256-bit space has a non-zero
+/// collision probability over large sets. Collision detection lives in
+/// [`build_dir_marker_path`]: each build directory contains a marker
+/// file holding the canonical id it was generated for; consumers
+/// (editor and exporter) verify the marker matches before accepting
+/// the directory's contents.
 pub fn build_dir_name(id: &CanonicalId) -> String {
-    use std::hash::Hasher;
+    use sha2::{Digest, Sha256};
     let s = id.to_scheme_path();
-    let mut h = std::collections::hash_map::DefaultHasher::default();
-    h.write(s.as_bytes());
-    let digest = h.finish();
-    format!("{:016x}", digest)
+    let digest = Sha256::digest(s.as_bytes());
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use core::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Path to the marker file inside a build directory. The marker holds
+/// the canonical id the directory was generated for, so the editor can
+/// detect a hash collision or a stale directory before trusting its
+/// contents.
+pub fn build_dir_marker_path(project_root: &Path, id: &CanonicalId) -> PathBuf {
+    project_root
+        .join(".renzora")
+        .join("scripts")
+        .join(build_dir_name(id))
+        .join(".renzora_script_id")
+}
+
+/// Write or read the marker file in a build directory. The marker file
+/// is `.renzora_script_id` inside the directory; its contents are the
+/// canonical id's scheme-path. Consumers can verify the directory
+/// matches the expected identity before relying on its artifact.
+pub fn write_build_dir_marker(project_root: &Path, id: &CanonicalId) -> std::io::Result<()> {
+    let path = build_dir_marker_path(project_root, id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, id.to_scheme_path())
+}
+
+pub fn read_build_dir_marker(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Convenience: produce a build artifact path under the project's

@@ -454,6 +454,11 @@ pub fn build_to_path_with_id(
         sdk.manifest().lib_ext
     ));
 
+    // Write the canonical-id marker so the editor and exporter can
+    // detect collisions and stale directories before trusting
+    // their contents (Phase 1 correction 14).
+    let _ = script_resolve::write_build_dir_marker(project, id);
+
     sdk.compile(&build, &out).map_err(|e| {
         // Point at the file the author edits, not the staged copy they have never
         // seen — a diagnostic naming `.renzora/scripts/spin/src/lib.rs` sends
