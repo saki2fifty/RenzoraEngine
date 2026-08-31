@@ -69,6 +69,8 @@ Every reload leaks its old image, roughly 200 KB. It has to: components the scri
 
 The watcher keeps a per-id build state: each in-flight build is one entry holding its `Task`. A Rust compilation can take many editor frames to finish; while it is in flight, edits to the same script set a dirty flag rather than starting a parallel build. When the old task completes with the dirty flag set, its result is discarded and a single replacement build is spawned immediately — no wait for another save. Deletions retire the script straight away, even when no SDK is installed — retirement is independent of building.
 
+Switching to a different project retires the previous project's scripts and clears any in-flight builds belonging to it; a project with no scripts leaves no script ids behind. A project that contains the same relative filename as the previous one resolves the leaf to the new project's id only.
+
 ## Requirements
 
 A Rust script is a [native plugin](../extending/native-plugins.md) with a per-entity convention on top — same compiler driver, same SDK, same loading. So the requirements are the plugin requirements:
