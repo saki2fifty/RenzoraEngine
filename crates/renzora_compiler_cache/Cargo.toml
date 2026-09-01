@@ -1,0 +1,66 @@
+[package]
+name = "renzora_compiler_cache"
+version = "0.1.0"
+edition = "2021"
+description = "Bevy-independent cached compiler service for the A27 tiered Rust extension migration. Phase 2."
+
+[features]
+# Default features kept minimal: no Bevy, no script crate, no old loaders.
+# The compiler_cache crate is consumed by the Bevy adapter in
+# renzora_rust_script, but must compile and test independently.
+default = []
+
+[dependencies]
+# Identity: `CanonicalId` is the per-script key for the cache. The
+# fingerprint and the desired-revision store both key off it.
+renzora_identity = { path = "../renzora_identity", features = ["std"] }
+# Hashing for `BuildKey` (Blake3) and lockfile content hash (SHA-256).
+blake3 = "1"
+sha2 = "0.10"
+# Serialization for `ActivePointer`, `ServiceToken`, status.bin (length-delimited
+# binary, NOT JSON) and the inactive-generation `index.bin` (BTreeMap
+# serialization). Serde with `derive` only — no JSON in this crate except the
+# `pins.json` reader, which is a tiny inline parser, not a JSON dep.
+serde = { version = "1", features = ["derive"] }
+# JSON parser for cargo's machine-readable messages (R6-5: dependency-
+# reuse evidence). Only used by `compiler::parse_cargo_json_messages`.
+serde_json = "1"
+# Process identifiers for stage and abandoned directories.
+uuid = { version = "1", features = ["v4"] }
+# Fast mutex for in-process synchronisation (no poisoning).
+parking_lot = "0.12"
+# Async runtime primitives for the worker pool. The Bevy adapter does not
+# assume a particular runtime; the worker uses std::thread for the supervisor
+# (Cargo children are blocking processes) and `std::sync::mpsc` channels for
+# inter-thread hand-off.
+crossbeam-channel = "0.5"
+# Real Tier-1 library loader (dlopen / LoadLibraryW). Bevy-independent
+# boundary; the Bevy adapter consumes the safe handle. See
+# `phase2-cached-compiler-design.md` §6.6 / §10.2.
+libloading = "0.8"
+# Platform FFI for the Windows process-tree ownership path
+# (`Job Object` + `CREATE_SUSPENDED` + `ReplaceFileW`). Only the windows
+# target needs this; the `target.os = "windows"` cfg keeps it off Linux/macOS.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+    "Win32_Security",
+] }
+# Platform FFI for the POSIX process-group ownership path
+# (`setpgid` + `kill(-pgid, …)`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Tests use a temp-dir cache root.
+tempfile = "3"
+# `pretty_assertions` for nicer diff output in test failures.
+pretty_assertions = "1"
+
+[lints]
+workspace = true
