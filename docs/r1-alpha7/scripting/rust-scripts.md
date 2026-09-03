@@ -105,13 +105,11 @@ Scripts may live anywhere in the project, not only in `scripts/`. Where two fold
 - **No REPL.** Evaluating a Rust expression would mean invoking the compiler and mapping a library per expression.
 - **One file.** A script is a single `.rs`; a plugin is the answer when you need modules.
 
-## Phase 3 vs Phase 4
+## Rust scripts and loose plugins
 
-Phase 3 (loose Tier-1 plugins) adds `<plugin-root>/<name>.rs` files,
-which compile and load via the small `renzora_plugin` C ABI through
-the Phase 2 cached compiler service. Phase 3 does NOT migrate editor
-Rust scripts (the `.rs` files this page describes) onto the same path.
-Those remain on the accepted Phase 1 `renzora_rust_script` build path
-until Phase 4. Phase 4 will introduce the small Tier-1 script ABI
-that lets editor Rust scripts compile against the same `BuildService`
-the loose plugins use.
+A loose `<plugin-root>/<name>.rs` plugin and an editor Rust script are
+different features. Loose plugins use the small `renzora_plugin` interface
+and the shared compiler cache. Editor Rust scripts—the files described on
+this page—continue to use the Rust-script compiler and have full Bevy access.
+They will share the cached build service after the script interface migration
+is complete.

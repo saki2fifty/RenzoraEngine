@@ -3,6 +3,15 @@
 This page gives a plain-English overview of changes made on this fork. The
 newest changes are always listed first. Times are recorded in UTC.
 
+## September 3, 2026 — 13:12 UTC
+
+### Clearer plugin documentation
+
+- Replaced internal development-phase labels with user-facing descriptions.
+- Clarified the difference between loose plugins, native plugins, and editor
+  Rust scripts.
+- Corrected outdated editor run-mode guidance in the contributing guide.
+
 ## September 3, 2026 — 12:34 UTC
 
 ### Faster, safer live Rust plugins
@@ -38,4 +47,3 @@ newest changes are always listed first. Times are recorded in UTC.
 - Kept editor builds and exported projects in agreement about which script is
   which.
 - Improved protection against invalid paths and accidental identity conflicts.
-

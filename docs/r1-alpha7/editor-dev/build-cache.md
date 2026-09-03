@@ -1,6 +1,6 @@
 # Build cache & retention
 
-> **Phase 2 scope.** `crates/renzora_compiler_cache` provides an internal Tier-1 compiler/cache foundation. It is **not yet used by current editor-authored Rust scripts** — those continue to run on the unchanged Phase 1 build path (`crates/renzora_rust_script`). Phase 4 (after the Tier-1 script ABI exists) will migrate the script path to this cache. Today, this page documents the foundation and its production-path validation; the editor integration is deferred.
+`crates/renzora_compiler_cache` provides the shared compiler and cache used by loose single-file plugins. Editor-authored Rust scripts still use `crates/renzora_rust_script`; they will move to this cache after their smaller interface is complete.
 
 > **Validation status (rev-7-final).** The Linux paths (cargo invocation, fingerprint verification, `rename`-based atomic pointer replacement, A→B→A reactivation, real `dlopen`/symbol resolution, partition locking, bounded shutdown, identity-specific cancellation, parallel cache roots, two-distinct-partition concurrent compilation, active-child shutdown kills descendants, resistant-child shutdown honours the absolute deadline, descendant-with-retained-pipe-writer bounded shutdown, complete reader-thread diagnostics, complete build-input / fingerprint agreement, one-time authoritative toolchain + SDK discovery captured once per service generation, real `--locked` drift rejection without regenerating the lockfile, single canonical renderer for manifest bytes + wrapper hash, render emission of EXACTLY ONE `resolver = "2"` plus `renzora_plugin = { workspace = true, default-features = false, features = [...] }` inline in the dep table, direct dependency-reuse proof via cargo `--message-format=json-render-diagnostics` `compiler-artifact` events, A→B→C rapid-edit completion routing with exact `request_id` + immediate `Superseded` on submit) are validated by the acceptance tests under `crates/renzora_compiler_cache/tests/acceptance.rs` running under `--profile dist` in parallel (no `--test-threads=1` requirement). **R7-1 (rev-7)** — the build transaction is genuinely atomic: `render_workspace_and_package` is completely pure (no `create_dir_all`, no source writes, no manifest writes); one stable wrapper package per partition (no workspace-member growth when a new script identity appears); one partition-lock acquisition owns the entire cache-miss transaction (write manifests + selected source, bootstrap or read the lockfile, hash it, drift-check, cache lookup, cargo with `--locked`, stage artifact, release the lock). **R7-2 (rev-7)** — every rapid-edit receiver resolves exactly once within bounded time: A and B receive `BuildOutcome::Superseded { superseded_revision: <A|B>, by_revision: <B|C> }` deterministically at submit time; C receives `Published`/`CacheHit` for revision 3; the pending-request map is empty after all three resolve. **R7-3 (rev-7)** — the rapid-edit and same-partition tests use strict `recv_timeout(...).expect(...)` with no permissive branches (no `terminal >= 1`, no `< 2` lifecycle skip); the acceptance suite includes `prod_non_empty_capability_real_cargo_build` which runs a real Cargo build with the `static_plugins` capability and asserts the on-disk wrapper `Cargo.toml` encodes the capability INSIDE the `renzora_plugin = { workspace = true, default-features = false, features = ["static_plugins"] }` dep (no standalone `[dependencies]` table entry). **R7-final (rev-7-final)** — the first-build bypass is removed: every cargo build — including the very first build of a fresh partition — uses `--locked` with the authoritative `effective` whose `lock_resolution` and `lockfile_path` were derived from the lockfile bytes `ensure_lockfile` just bootstrapped. `prod_first_build_uses_locked_after_lockfile_bootstrap` starts from an empty partition, asserts `Cargo.lock` was bootstrapped, asserts the first cargo build was invoked with `--locked` (via a PATH-shadowing wrapper that records argv), asserts the build succeeds, asserts the post-build Cargo.lock bytes and SHA-256 equal the bytes that `cargo generate-lockfile` produces on a parallel mirror (cargo did not modify the lockfile), and asserts the published fingerprint's `lock_resolution` equals that exact hash. 49 acceptance tests + 13 lib tests pass. Phase 1 tests remain 36/36 (the editor Rust-script path is unchanged). Strict Clippy (`-D warnings -A clippy::too_many_arguments -A clippy::type_complexity`) is clean. **The Windows-only paths** (`CreatePipe` + inheritable handles + `CreateProcessW` with `CREATE_SUSPENDED` + Job Object + `ResumeThread`; `SetHandleInformation` return codes; `GetExitCodeProcess` for non-blocking exit; environment block built with case-insensitive sort; command-line quoted per `CommandLineToArgvW`; `TerminateJobObject` for shutdown) compile cleanly under `cargo check --target x86_64-pc-windows-msvc` (validated in this session via the `renzora-50f2cb55-windows` Docker container). **No Windows binary was built and no Windows host executed any test in this session.** A Windows validation pass is required before claiming the Windows contract is met on a Windows host.
 
@@ -112,7 +112,7 @@ The selector ignores the SDK's own `renzora_plugin` artefacts (both `librenzora_
 
 ## Lifecycle integration
 
-The Phase 1 lifecycle (`LifecycleAction::Idle/OpenFirst/Keep/Switch/Close/RetryAttach`, `compile_for_new_project`, `ScriptWatcher::building`) drives the compiler service through a thin Bevy adapter (`CompileServiceResource` in `crates/renzora_rust_script/src/compile_service.rs`). Phase 2 does **not** redesign that lifecycle and does **not** change `LoadedScripts::insert/resolve/remove`. The new cache layer is consumed by the adapter; the lifecycle is unchanged. The Phase 1 acceptance tests (`watch::tests::scheduler_seven_frames`, `watch::tests::scheduler_with_external_pre_script_provider`) continue to pass with the adapter in place.
+The existing Rust-script lifecycle (`LifecycleAction::Idle/OpenFirst/Keep/Switch/Close/RetryAttach`, `compile_for_new_project`, and `ScriptWatcher::building`) remains separate. The cache service does not change `LoadedScripts::insert/resolve/remove`; integration with that lifecycle belongs to the later Rust-script migration.
 
 ## Edge cases
 
@@ -164,9 +164,9 @@ not have that feature`. The acceptance test `prod_real_source_compiles_publishes
 proves the first-compile network gate works end-to-end with the
 real `BuildService` and a real SDK path.
 
-## Phase 3 integration (Tier-1 loose plugins)
+## Loose-plugin integration
 
-> **Phase 3 scope.** The Tier-1 hot-plugin path uses the same
+> The loose hot-plugin path uses the same
 > `renzora_compiler_cache` service. A loose `plugins/<name>.rs` file is
 > discovered by the editor-only `LoosePluginHost` watcher (root-level
 > `notify-debouncer-full`, 300 ms debounce, non-recursive), parsed for
@@ -268,9 +268,8 @@ editor-only shadow copy directory is `stable_path.parent()/.reload/`,
 named `<stem>-<generation>.<ext>`. A shipped game maps the stable
 file directly without a shadow copy.
 
-**Phase 1 paths remain on `renzora_rust_script`.** Editor Rust
-scripts are not migrated to the cache service in Phase 3 — that is
-Phase 4's work, gated on the Tier-1 script ABI. The
+**Editor Rust scripts remain on `renzora_rust_script`.** They are not
+yet migrated to the cache service. The
 `renzora_loose_plugins` crate does not depend on `renzora_rust_script`.
 
 **Settings, trust, and reload.** Loose plugin cards on the Settings

@@ -52,7 +52,7 @@ renzora test                     # the full suite, exactly as CI runs it (contai
 
 > **Always pass `--profile dist`.** A bare cargo command defaults to the `dev` profile and creates a *second* full set of artefacts under `target/debug/`; this workspace is far too large for two of them, and a full disk surfaces as bogus compile errors in crates you never touched rather than as a disk error.
 
-> You do not need Docker to develop on Renzora. Docker is a **cross-compiler** — it builds export templates for platforms you don't own — and a way to reproduce CI exactly. It is not the install path. Nothing is `dlopen`'d against Bevy any more: in-workspace plugins are statically linked `rlib`s wired in by a build-time generator, and [standalone plugins](/docs/r1-alpha7/extending/standalone-plugins) are C-ABI cdylibs that link no Bevy at all, so neither needs a canonical build environment. The editor is the removable `renzora_editor` cdylib bundle that the binary dlopens from beside itself; there is **no `editor` compile-time feature** — the only build features on the `renzora` binary are `runtime` (default) and `wasm`.
+> You do not need Docker to develop on Renzora. Docker is a **cross-compiler** — it builds export templates for platforms you don't own — and a way to reproduce CI exactly. It is not the install path. In-workspace plugins are statically linked `rlib`s wired in by a build-time generator, while [standalone plugins](/docs/r1-alpha7/extending/standalone-plugins) are C-ABI cdylibs that link no Bevy. The current native editor build still uses the removable `renzora_editor` bundle beside the runtime executable; this is separate from the standalone-plugin ABI. There is **no `editor` compile-time feature** on the runtime binary.
 
 ### Toolchain
 
@@ -195,7 +195,7 @@ Search existing issues first to avoid duplicates. For a bug report, include:
 
 - **Steps to reproduce**, expected vs actual behavior.
 - **Environment** — OS, GPU, and `rustc --version`.
-- **Run mode** — editor (`renzora-editor`), shipped game (`renzora`), or the runtime launched with `--server` (headless), `--host` (listen server), or `--vr`. There is no `--no-editor` flag any more: the runtime binary can never become the editor. Note also that the only build features are `runtime` (default) and `wasm`; there is no `editor` feature to report.
+- **Run mode** — editor, shipped game, or the runtime launched with `--server` (headless), `--host` (listen server), `--vr`, or `--no-editor`.
 - **Crash logs** — the editor writes `~/.renzora/crashes/last_crash.txt` (plus a native dialog); the shipped game silently appends `crash.log` beside the executable. Attach the relevant one.
 
 ## License
@@ -206,14 +206,14 @@ The engine is dual-licensed under **MIT OR Apache-2.0** (`LICENSE-MIT` and `LICE
 
 - [AI Policy](ai-policy.md) — using AI assistants, auditing, testing, and disclosure
 - [Building from Source](/docs/r1-alpha7/setup/building-from-source) — the full build, aliases, and Docker cross-compile flow
-- [Architecture](/docs/r1-alpha7/setup/architecture) — the one-binary, editor-as-removable-cdylib model
+- [Architecture](/docs/r1-alpha7/setup/architecture) — how the editor, runtime, and plugins fit together
 - [Building Plugins](/docs/r1-alpha7/extending/plugins) — extend the engine with `renzora::add!`
 
-## Phase 3 plugin authoring
+## Loose single-file plugin authoring
 
-Loose Tier-1 plugins (`plugins/<name>.rs`) follow the contract in
-[extending/plugins.md](../extending/plugins.md#loose-single-file-plugins-phase-3).
+Loose plugins (`plugins/<name>.rs`) follow the contract in
+[extending/plugins.md](../extending/plugins.md#loose-single-file-plugins).
 The author writes ordinary `renzora_plugin` source plus one
 `renzora_plugin::add!(P, Runtime|Editor)` declaration. The editor
-compiles, stages, loads, and hot-reloads the file through the Phase 2
-cached compiler service.
+compiles, stages, loads, and hot-reloads the file through the shared
+compiler cache.

@@ -195,10 +195,9 @@ A few things that live outside this workspace, or that older docs got wrong:
 - [Building Plugins](/docs/r1-alpha7/extending/plugins) — extend the engine with `renzora::add!`
 - [Building Export Templates](/docs/r1-alpha7/packaging/export-templates) — produce shippable game builds
 
-## Phase 3 loose plugins
+## Building loose single-file plugins
 
-The workspace member `renzora_loose_plugins` builds alongside the rest
-of the engine and depends on `renzora_compiler_cache` (Phase 2),
-`renzora_plugin` (host feature), `renzora_identity`, and Bevy. It does
-not depend on `renzora_rust_script` (Phase 1) — Phase 3 leaves editor
-Rust scripts on their accepted Phase 1 path.
+Loose `plugins/<name>.rs` files are compiled automatically by the editor
+through the shared compiler cache. They use the small `renzora_plugin`
+interface and do not require a full Bevy-linked plugin build. Editor Rust
+scripts continue to use their separate Rust-script compiler.

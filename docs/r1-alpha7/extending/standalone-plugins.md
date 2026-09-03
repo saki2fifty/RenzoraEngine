@@ -1558,13 +1558,13 @@ runtime, and plugin image creation is init-only. Both are [native plugins](nativ
 now, which is the right answer to that shape of limit — a native plugin links the real Bevy, so
 neither constraint applies to it.
 
-## Loose Tier-1 plugins (Phase 3)
+## Loose single-file plugins
 
 The directory-based C-ABI path (one `plugins/<name>/Cargo.toml` per
-plugin) is one way to author a standalone plugin. Phase 3 adds a
-second: a loose `plugins/<name>.rs` file with the same `renzora_plugin`
+plugin) is one way to author a standalone plugin. You can also use a
+loose `plugins/<name>.rs` file with the same `renzora_plugin`
 ergonomic API and an explicit `Runtime` or `Editor` scope. The editor
-compiles the file through the Phase 2 cached compiler service and
+compiles the file through the shared compiler cache and
 loads it through the same C-ABI mechanism this page documents. See
-[plugins.md § Loose single-file plugins](./plugins.md#loose-single-file-plugins-phase-3)
+[plugins.md § Loose single-file plugins](./plugins.md#loose-single-file-plugins)
 for the authoring contract and the supported scopes.

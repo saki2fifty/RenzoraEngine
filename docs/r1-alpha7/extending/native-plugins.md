@@ -289,22 +289,22 @@ That leaves the engine's own crates as the reference, and they are a good one: a
 
 Start from the skeleton at the top of this page rather than from a copied example — it is four lines plus a `Cargo.toml`, and `renzora add <name>` scaffolds it.
 
-## Loose Tier-1 plugins (Phase 3)
+## Loose single-file plugins
 
-Loose Tier-1 plugins share the **same discovery root** as native
+Loose plugins share the **same discovery root** as native
 plugins (`<exe-dir>/../../plugins`, `<cwd>/plugins`, or
 `RENZORA_PLUGIN_SRC`) but are NOT compiled as a Rust workspace crate.
-A loose Tier-1 plugin is a single `.rs` file in that root, compiled
+A loose plugin is a single `.rs` file in that root, compiled
 against the small `renzora_plugin` C ABI by the editor at runtime.
-See [plugins.md](plugins.md#loose-single-file-plugins-phase-3) for
+See [plugins.md](plugins.md#loose-single-file-plugins) for
 the authoring contract.
 
-Loose Tier-1 plugins are independent of native plugins:
+Loose plugins are independent of native plugins:
 
 - A directory under `plugins/` with a `Cargo.toml` keeps the existing
   native-plugin build path.
-- A loose `.rs` file under `plugins/` follows the Phase 3 loose
-  Tier-1 plugin path.
+- A loose `.rs` file under `plugins/` follows the single-file plugin
+  path.
 
 The two do not interact. A loose file does NOT trigger the native
 plugin SDK unpack or full-Bevy toolchain probe.

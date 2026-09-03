@@ -6,9 +6,9 @@ Almost every feature in Renzora is its own Bevy plugin; this page shows how to w
 
 A Renzora plugin is just a Bevy `Plugin` (anything that implements `bevy::app::Plugin`). You declare it once with `renzora::add!(...)` and the engine wires it in automatically — there is no central list of plugins to edit and no `app.add_plugins(...)` call to make by hand.
 
-> **There are now three kinds of plugin.** This page covers the two that existed first — the workspace plugin compiled into the binary, and the standalone C-ABI plugin. The third, a **[native plugin](native-plugins.md)**, is an ordinary Bevy plugin shipped as *source* and compiled on the machine that installs it: it gets full `&mut World`, can add [editor panels](panels.md), and needs no engine source edits. That is the one to reach for when extending the **editor**. A C-ABI plugin is still the only kind that ships inside a **game**.
+> Renzora supports several authoring forms. Workspace plugins are compiled into the engine. A **[native plugin](native-plugins.md)** is shipped as source and gets full Bevy access after it is built. **[Standalone plugins](standalone-plugins.md)** use the smaller C-ABI interface and can be distributed as directory-based projects or as loose single `.rs` files. Choose by capability and distribution needs, not by file layout alone.
 
-There are exactly two kinds of plugin, and the difference is purely how the crate is compiled and linked:
+The two Bevy-linked plugin forms covered first on this page differ in how they are compiled and linked:
 
 | Kind | Crate type | Linked | Registers via | Ships in |
 |------|-----------|--------|---------------|----------|
@@ -302,14 +302,14 @@ This exists because `renzora_viewport` can't depend on the crates that want to m
 
 See **Script API Bindings** for exposing functions to scripts, **[Post-Processing Effects](./post-processing.md)** for camera effects (which are [standalone plugins](./standalone-plugins.md) now, not distribution plugins), and **Custom Blueprint Nodes** / **Custom Material Nodes** for those subsystems — each has its own registration path layered on the same `add!` model described here.
 
-## Loose single-file plugins (Phase 3)
+## Loose single-file plugins
 
 A loose plugin is a single `.rs` file placed at `<plugin-root>/<name>.rs`
 — the root of the same `plugins/` directory the directory-based C-ABI
 plugins already use. The author writes the same source as a
 directory-based plugin (using `renzora_plugin`'s ergonomic API) and
 declares an explicit scope; the editor compiles, stages and reloads
-the result through the Phase 2 cached compiler service and a
+the result through the shared compiler cache and a
 transactional activation gate.
 
 **Authoring contract.** A loose plugin source file contains exactly
@@ -358,8 +358,8 @@ plugin is recorded as `Disabled` and likewise not submitted.
 to the shared `renzora_compiler_cache::BuildService` as a
 `BuildRequest { artifact_kind: Tier1Plugin, source_snapshot, … }`.
 The BuildService runs `cargo build` against a wrapper crate generated
-under the cache root, partitions the artifact with the existing
-Phase 2 fingerprint inputs, and reports `Published` or `CacheHit` on
+under the cache root, partitions the artifact with the build
+fingerprint inputs, and reports `Published` or `CacheHit` on
 the per-revision receiver. Older receivers for the same identity
 receive `Superseded`.
 
