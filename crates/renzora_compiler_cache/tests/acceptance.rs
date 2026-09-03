@@ -91,9 +91,14 @@ fn make_fake_sdk() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let sdk = dir.path().to_path_buf();
     std::fs::create_dir_all(sdk.join("src")).unwrap();
+    // The production renderer always emits `features = ["std", ...]`
+    // on the `renzora_plugin` dep (Y3-5). The fake SDK must therefore
+    // declare a `std` feature too, or `cargo generate-lockfile` will
+    // fail with `package renzora_plugin does not have that feature` on
+    // any partition whose lockfile is bootstrapped fresh.
     std::fs::write(
         sdk.join("Cargo.toml"),
-        "[package]\nname = \"renzora_plugin\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\npath = \"src/lib.rs\"\n\n[features]\ndefault = []\nstatic_plugins = []\nstatic_scripts = []\nruntime = []\n",
+        "[package]\nname = \"renzora_plugin\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\npath = \"src/lib.rs\"\n\n[features]\ndefault = []\nstd = []\nstatic_plugins = []\nstatic_scripts = []\nruntime = []\n",
     ).unwrap();
     std::fs::write(sdk.join("src").join("lib.rs"), "").unwrap();
     dir
@@ -1595,7 +1600,7 @@ fn make_test_partition_key(
 /// (used as the `rendered` argument to `resolve_build_config`).
 /// Renderer is pure (R7-1); the path argument is unused.
 fn render_for_resolve(
-    _identity: &renzora_identity::CanonicalId,
+    identity: &renzora_identity::CanonicalId,
     sdk_path: &Path,
     source: &[u8],
     profile: renzora_compiler_cache::compiler::ProfileName,
@@ -1610,6 +1615,7 @@ fn render_for_resolve(
         renzora_compiler_cache::compiler::PanicMode::Abort,
         renzora_compiler_cache::compiler::CrateTypeName::Cdylib,
         capabilities,
+        identity,
     )
 }
 
@@ -1825,6 +1831,7 @@ fn prod_lockfile_drift_blocks_real_compile_and_does_not_regenerate() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &id,
     );
     renzora_compiler_cache::compiler::write_rendered_workspace_and_package(&target_dir, &rendered).unwrap();
     renzora_compiler_cache::compiler::write_partition_source(&target_dir, &rendered.package_name, &src).unwrap();
@@ -2431,6 +2438,7 @@ fn unit_renderer_emits_single_resolver() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id,
     );
     let ws = std::str::from_utf8(&rendered.workspace_toml).unwrap();
     let resolver_count = ws.matches("resolver = \"2\"").count();
@@ -2445,11 +2453,18 @@ fn unit_renderer_emits_single_resolver() {
     assert!(!bad, "no standalone default-features line: {ws}");
 }
 
-/// R6-4: with ZERO capabilities, the package `Cargo.toml` has NO
-/// `default-features` / `features` keys at all (cleaner output, fewer
-/// R6-4 violations).
+/// R6-4 + Y3-5: with ZERO capabilities, the package `Cargo.toml`
+/// MUST emit `features = ["std"]` (the empty-capability regression
+/// fix from the seventh-correction pass). The pre-fix assertion
+/// expected NO `features` line at all, but that path produced
+/// uncompilable plugins (the `renzora_plugin` crate's `default =
+// ["std"]` feature was disabled and the `libm` fallback kicked in).
+/// The corrected behavior always emits `["std"]` so a guest plugin
+/// compiles regardless of capability set. See
+/// `y3_5_unit_renderer_zero_capabilities_emits_std_only` for the
+/// standalone regression coverage.
 #[test]
-fn unit_renderer_no_capabilities_no_features_keys() {
+fn unit_renderer_no_capabilities_emits_std_only() {
     use renzora_compiler_cache::compiler::{
         render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
     };
@@ -2467,11 +2482,28 @@ fn unit_renderer_no_capabilities_no_features_keys() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id,
     );
     let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
-    assert!(!pkg.contains("default-features"), "no-cap path must not emit default-features: {pkg}");
-    assert!(!pkg.contains("features = ["), "no-cap path must not emit features: {pkg}");
-    assert!(pkg.contains("renzora_plugin = { workspace = true }"), "no-cap dep must use plain workspace dep: {pkg}");
+    // Y3-5: the zero-capability path now emits `features = ["std"]`
+    // so a guest plugin compiles cleanly without manual feature
+    // opt-in. The previous assertion (`!features`) was the bug
+    // surface — a clean dep entry is useless if the SDK's std
+    // feature is not enabled.
+    let dep_line = pkg
+        .lines()
+        .find(|l| l.contains("renzora_plugin ="))
+        .expect("dep line missing");
+    assert!(
+        dep_line.contains(r#"features = ["std"]"#),
+        "no-cap path MUST emit `features = [\"std\"]` so the plugin's `std` feature is \
+         enabled; got dep line: {dep_line}"
+    );
+    assert!(
+        dep_line.contains("default-features = false"),
+        "no-cap path MUST keep `default-features = false` so the explicit opt-in to \
+         `[\"std\"]` is the authoritative selection; got {dep_line}"
+    );
 }
 
 /// R6-4: with ONE capability, the package `Cargo.toml` has the
@@ -2497,6 +2529,7 @@ fn unit_renderer_one_capability_features_inside_dep() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id,
     );
     let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
     let dep_line = pkg
@@ -2504,7 +2537,15 @@ fn unit_renderer_one_capability_features_inside_dep() {
         .find(|l| l.contains("renzora_plugin ="))
         .expect("dep line missing");
     assert!(dep_line.contains("default-features = false"), "dep line must contain default-features: {dep_line}");
-    assert!(dep_line.contains("features = [\"static_plugins\"]"), "dep line must contain features: {dep_line}");
+    // Y3-5: the dep line MUST emit `features = ["std", "static_plugins"]`,
+    // not just `features = ["static_plugins"]`. The `std` prefix is
+    // the empty-capability regression fix from the seventh-correction
+    // pass and is now invariant for every capability-set × profile
+    // combination.
+    assert!(
+        dep_line.contains(r#"features = ["std", "static_plugins"]"#),
+        "dep line must contain `features = [\"std\", \"static_plugins\"]`; got {dep_line}"
+    );
     // Standalone features entry under [dependencies] is a violation.
     assert!(!pkg.contains("[dependencies]\ndefault-features"), "no standalone default-features under [dependencies]: {pkg}");
 }
@@ -2533,6 +2574,7 @@ fn unit_renderer_multiple_capabilities_features_inside_dep() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id,
     );
     let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
     let dep_line = pkg
@@ -2569,6 +2611,7 @@ fn unit_renderer_profile_dist_vs_dist_lean() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id_d,
     );
     let r_dl = render_workspace_and_package(
         &make_test_partition_key(&caps, ProfileName::DistLean.as_str()),
@@ -2578,6 +2621,7 @@ fn unit_renderer_profile_dist_vs_dist_lean() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id_dl,
     );
     let ws_d = std::str::from_utf8(&r_d.workspace_toml).unwrap();
     let ws_dl = std::str::from_utf8(&r_dl.workspace_toml).unwrap();
@@ -2591,6 +2635,7 @@ fn unit_renderer_profile_dist_vs_dist_lean() {
 /// `write_rendered_workspace_and_package` writes those bytes verbatim,
 /// and `RenderedManifests::wrapper_hash_bytes` hashes them.
 #[test]
+#[allow(deprecated)] // sha2 0.10's `clone_from_slice` is deprecated; pre-existing, fixed when the workspace upgrades to generic-array 1.x.
 fn unit_renderer_disk_bytes_match_wrapper_hash_bytes() {
     use renzora_compiler_cache::compiler::{
         render_workspace_and_package, write_rendered_workspace_and_package, CrateTypeName,
@@ -2610,6 +2655,7 @@ fn unit_renderer_disk_bytes_match_wrapper_hash_bytes() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id,
     );
     write_rendered_workspace_and_package(tmp.path(), &rendered).unwrap();
     let on_disk_ws = std::fs::read(tmp.path().join("Cargo.toml")).unwrap();
@@ -2653,6 +2699,7 @@ fn unit_renderer_disk_bytes_match_wrapper_hash_bytes() {
 /// three resolve.
 #[cfg(unix)]
 #[test]
+#[allow(deprecated)] // sha2 0.10's `clone_from_slice` is deprecated; pre-existing, fixed when the workspace upgrades to generic-array 1.x.
 fn prod_rapid_edit_a_b_c_routes_each_receiver() {
     if !cargo_is_available() {
         return;
@@ -2794,7 +2841,11 @@ fn prod_compatible_scripts_reuse_sdk_via_json_messages() {
         other => panic!("expected A Published, got {other:?}"),
     };
     assert!(
-        compiled_a.iter().any(|p| p == "renzora_plugin"),
+        compiled_a.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("librenzora_plugin."))
+        }),
         "build A must compile the SDK (renzora_plugin): {compiled_a:?}"
     );
 
@@ -2815,7 +2866,11 @@ fn prod_compatible_scripts_reuse_sdk_via_json_messages() {
     // same capabilities, same target). Cargo SHOULD reuse B's SDK rlib
     // and emit NO `compiler-artifact` event for renzora_plugin.
     assert!(
-        !compiled_b.iter().any(|p| p == "renzora_plugin"),
+        !compiled_b.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("librenzora_plugin."))
+        }),
         "build B must NOT recompile renzora_plugin — the cached rlib should be reused. compiled_b={compiled_b:?}"
     );
     // Both builds share one partition (same target_dir/probe paths).
@@ -2995,6 +3050,7 @@ fn unit_refresh_lockfile_recreates_when_present() {
         PanicMode::Abort,
         CrateTypeName::Cdylib,
         &caps,
+        &_id,
     );
     renzora_compiler_cache::compiler::write_rendered_workspace_and_package(&gen_root, &rendered).unwrap();
     renzora_compiler_cache::compiler::write_partition_source(&gen_root, &rendered.package_name, &src).unwrap();
@@ -3058,13 +3114,18 @@ fn prod_non_empty_capability_real_cargo_build() {
             fingerprint,
             ..
         } => {
-            // The build succeeded. The wrapper package must appear in
-            // `compiled_packages`.
+            // The build succeeded. The wrapper's per-identity
+            // `[lib] name` (NOT the partition package name — the
+            // package name is one-per-partition; the lib name is
+            // one-per-canonical-identity) must appear in the cargo
+            // JSON `filenames`.
             assert!(
-                compiled_packages
-                    .iter()
-                    .any(|p| p.starts_with("script_partition_")),
-                "wrapper package must be in compiled_packages: {compiled_packages:?}"
+                compiled_packages.iter().any(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("librenzora_plugin_"))
+                }),
+                "wrapper library must be in compiled_packages: {compiled_packages:?}"
             );
             // The on-disk Cargo.toml for the wrapper package must
             // encode the capability INSIDE the dep entry (not as a
@@ -3129,4 +3190,874 @@ fn prod_non_empty_capability_real_cargo_build() {
         other => panic!("non-empty-cap build must be Published, got {other:?}"),
     }
     let _ = svc.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+// ── Y3-5 manifest feature regression coverage ────────────────────────────
+//
+// The seventh-correction pass changed `render_workspace_and_package`
+// to ALWAYS include `std` in the per-package `renzora_plugin`
+// features list (with or without user-requested capabilities). The
+// empty-features path previously relied on `workspace = true`
+// picking up `default-features = false` and produced plugins that
+// could not compile. These tests pin the exact feature string for
+// every relevant combination of capability-set × profile × target
+// so a regression in the renderer fails loudly rather than surfacing
+// at production compile time.
+
+/// Y3-5: with NO capabilities, the package `Cargo.toml` MUST emit
+/// `features = ["std"]` (no standalone `default-features` line, no
+/// missing-features). This is the empty-capability regression test —
+/// before the fix, the empty-features path emitted
+/// `renzora_plugin = { workspace = true }` with no features at all,
+/// which inherited `default-features = false` and produced
+/// uncompilable plugins.
+#[test]
+fn y3_5_unit_renderer_zero_capabilities_emits_std_only() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let _id = make_id("y3_5_zero_caps.rs");
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let caps = std::collections::BTreeSet::<String>::new();
+    let rendered = render_workspace_and_package(
+        &make_test_partition_key(&caps, ProfileName::Dist.as_str()),
+        sdk.path(),
+        &src,
+        ProfileName::Dist,
+        PanicMode::Abort,
+        CrateTypeName::Cdylib,
+        &caps,
+        &_id,
+    );
+    let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
+    let dep_line = pkg
+        .lines()
+        .find(|l| l.contains("renzora_plugin ="))
+        .expect("dep line missing");
+    assert!(
+        dep_line.contains(r#"features = ["std"]"#),
+        "zero-capability path MUST emit `features = [\"std\"]` so the per-package \
+         dep opts into the SDK's std feature; got dep line: {dep_line}\nfull pkg:\n{pkg}"
+    );
+    assert!(
+        dep_line.contains("default-features = false"),
+        "zero-capability dep MUST keep `default-features = false` so the opt-in to \
+         `[\"std\"]` is the authoritative selection; got {dep_line}"
+    );
+    // No duplicate std: count occurrences of `"std"` inside the
+    // dep line. Exactly one.
+    let std_count = dep_line.matches("\"std\"").count();
+    assert_eq!(
+        std_count, 1,
+        "exactly one `\"std\"` entry expected in the features list; got {std_count} \
+         (dep line: {dep_line})"
+    );
+}
+
+/// Y3-5: with ONE capability, the package `Cargo.toml` emits
+/// `features = ["std", "<cap>"]` (the std-prefix must come first,
+/// and `std` must not be duplicated if the capability is named
+/// `std` or contains `std` as a substring — but no Tier-1 capability
+/// is named `std`, so this is just a containment check).
+#[test]
+fn y3_5_unit_renderer_one_capability_emits_std_then_cap() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let _id = make_id("y3_5_one_cap.rs");
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let mut caps = std::collections::BTreeSet::<String>::new();
+    caps.insert("static_plugins".to_string());
+    let rendered = render_workspace_and_package(
+        &make_test_partition_key(&caps, ProfileName::Dist.as_str()),
+        sdk.path(),
+        &src,
+        ProfileName::Dist,
+        PanicMode::Abort,
+        CrateTypeName::Cdylib,
+        &caps,
+        &_id,
+    );
+    let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
+    let dep_line = pkg
+        .lines()
+        .find(|l| l.contains("renzora_plugin ="))
+        .expect("dep line missing");
+    assert!(
+        dep_line.contains(r#"features = ["std", "static_plugins"]"#),
+        "one-capability path MUST emit `features = [\"std\", \"static_plugins\"]`; \
+         got dep line: {dep_line}\nfull pkg:\n{pkg}"
+    );
+    // Exactly one `"std"` entry.
+    let std_count = dep_line.matches("\"std\"").count();
+    assert_eq!(
+        std_count, 1,
+        "exactly one `\"std\"` entry expected; got {std_count} in {dep_line}"
+    );
+}
+
+/// Y3-5: with MULTIPLE capabilities, the package `Cargo.toml` emits
+/// `features = ["std", "<cap1>", "<cap2>", ...]`. All user-requested
+/// capabilities survive, no duplication of `std`.
+#[test]
+fn y3_5_unit_renderer_multiple_capabilities_emits_std_then_caps() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let _id = make_id("y3_5_multi_caps.rs");
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let mut caps = std::collections::BTreeSet::<String>::new();
+    caps.insert("static_plugins".to_string());
+    caps.insert("static_scripts".to_string());
+    caps.insert("runtime".to_string());
+    let rendered = render_workspace_and_package(
+        &make_test_partition_key(&caps, ProfileName::Dist.as_str()),
+        sdk.path(),
+        &src,
+        ProfileName::Dist,
+        PanicMode::Abort,
+        CrateTypeName::Cdylib,
+        &caps,
+        &_id,
+    );
+    let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
+    let dep_line = pkg
+        .lines()
+        .find(|l| l.contains("renzora_plugin ="))
+        .expect("dep line missing");
+    assert!(
+        dep_line.contains(r#""std""#),
+        "multi-capability path MUST include `\"std\"`; got {dep_line}"
+    );
+    for cap in &caps {
+        assert!(
+            dep_line.contains(&format!("\"{cap}\"")),
+            "multi-capability dep MUST include capability \"{cap}\"; got {dep_line}"
+        );
+    }
+    let std_count = dep_line.matches("\"std\"").count();
+    assert_eq!(
+        std_count, 1,
+        "exactly one `\"std\"` entry expected; got {std_count} in {dep_line}"
+    );
+}
+
+/// Y3-5: the `std` prefix is independent of the profile
+/// (Dist / DistLean). Both profiles must always emit `std` for
+/// Tier-1 plugin compilation.
+#[test]
+fn y3_5_unit_renderer_std_invariant_holds_for_both_profiles() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let _id_d = make_id("y3_5_profile_dist.rs");
+    let _id_dl = make_id("y3_5_profile_distlean.rs");
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let caps = std::collections::BTreeSet::<String>::new();
+    for (profile, id) in [
+        (ProfileName::Dist, &_id_d),
+        (ProfileName::DistLean, &_id_dl),
+    ] {
+        let rendered = render_workspace_and_package(
+            &make_test_partition_key(&caps, profile.as_str()),
+            sdk.path(),
+            &src,
+            profile,
+            PanicMode::Abort,
+            CrateTypeName::Cdylib,
+            &caps,
+        id,
+        );
+        let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
+        let dep_line = pkg
+            .lines()
+            .find(|l| l.contains("renzora_plugin ="))
+            .unwrap_or_else(|| panic!("dep line missing for {profile:?}:\n{pkg}"));
+        assert!(
+            dep_line.contains(r#"features = ["std"]"#),
+            "profile {profile:?} must emit `features = [\"std\"]`; got {dep_line}"
+        );
+    }
+}
+
+/// Y3-5: the renderer produces a valid Tier-1 manifest under every
+/// relevant `CrateTypeName`. Tier-1 plugins always use `Cdylib`
+/// (Phase 3 consumer), but the renderer's `pkg_dep` block is the
+/// same shape regardless of `CrateTypeName`. This pins the
+/// invariant that switching between Cdylib / Staticlib / Dylib does
+/// not drop the `std` feature (a defensive regression for future
+/// Phase-4 expansion).
+#[test]
+fn y3_5_unit_renderer_std_invariant_holds_across_crate_types() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let caps = std::collections::BTreeSet::<String>::new();
+    for ct in [CrateTypeName::Cdylib, CrateTypeName::Staticlib, CrateTypeName::Dylib] {
+        let id = make_id("y3_5_crate_type");
+        let rendered = render_workspace_and_package(
+            &make_test_partition_key(&caps, ProfileName::Dist.as_str()),
+            sdk.path(),
+            &src,
+            ProfileName::Dist,
+            PanicMode::Abort,
+            ct,
+            &caps,
+            &id,
+        );
+        let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
+        let dep_line = pkg
+            .lines()
+            .find(|l| l.contains("renzora_plugin ="))
+            .unwrap_or_else(|| panic!("dep line missing for {ct:?}:\n{pkg}"));
+        assert!(
+            dep_line.contains(r#"features = ["std"]"#),
+            "crate-type {ct:?} must keep `features = [\"std\"]`; got {dep_line}"
+        );
+    }
+}
+
+/// Y3-5: the package `Cargo.toml` does NOT introduce a standalone
+/// `default-features` line outside the `renzora_plugin = { ... }`
+/// dep entry, and the features list is exactly one comma-separated
+/// sequence. A regression that introduced a second `default-features`
+/// table entry would silently disable `std` again.
+#[test]
+fn y3_5_unit_renderer_no_standalone_default_features_or_features_table() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let _id = make_id("y3_5_no_standalone.rs");
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let caps = std::collections::BTreeSet::<String>::new();
+    let rendered = render_workspace_and_package(
+        &make_test_partition_key(&caps, ProfileName::Dist.as_str()),
+        sdk.path(),
+        &src,
+        ProfileName::Dist,
+        PanicMode::Abort,
+        CrateTypeName::Cdylib,
+        &caps,
+        &_id,
+    );
+    let pkg = std::str::from_utf8(&rendered.package_toml).unwrap();
+    // No standalone `default-features` line.
+    let standalone_default = pkg
+        .lines()
+        .any(|l| l.trim_start().starts_with("default-features"));
+    assert!(
+        !standalone_default,
+        "no standalone `default-features` line outside the dep entry; got pkg:\n{pkg}"
+    );
+    // Exactly one `features = [...]` line, on the dep entry.
+    let features_lines: Vec<&str> = pkg
+        .lines()
+        .filter(|l| l.contains("features = ["))
+        .collect();
+    assert_eq!(
+        features_lines.len(),
+        1,
+        "exactly one `features = [...]` line expected; got {features_lines:?}"
+    );
+    assert!(
+        features_lines[0].contains("renzora_plugin ="),
+        "the features line must be on the renzora_plugin dep entry; got {features_lines:?}"
+    );
+    // Static-script semantics unaffected: `[lib] crate-type` is
+    // still the production value (the renderer's `crate_type` is
+    // the only thing that varies there).
+    assert!(
+        pkg.contains("[lib]"),
+        "static-script `[lib]` block must survive; got pkg:\n{pkg}"
+    );
+    assert!(
+        pkg.contains("crate-type"),
+        "`crate-type` key must survive; got pkg:\n{pkg}"
+    );
+}
+
+/// AC3-1 / AC3-2 (10th-correction): two distinct canonical identities
+/// in the same partition produce two distinct `[lib] name` values
+/// without growing workspace membership. Workspace membership is the
+/// partition-stable package `script_partition_<hash>`; the per-
+/// identity lib name is inside that single package's `[lib]` block.
+#[test]
+fn z3_1_unit_renderer_two_identities_same_partition_distinct_lib_names() {
+    use renzora_compiler_cache::compiler::{
+        render_workspace_and_package, CrateTypeName, PanicMode, ProfileName,
+    };
+    let sdk = make_fake_sdk();
+    let id_a = make_id("z3_1_partition_shared_a.rs");
+    let id_b = make_id("z3_1_partition_shared_b.rs");
+    let _tmp = tempfile::tempdir().unwrap();
+    let src = b"pub fn x() {}\n".to_vec();
+    let caps = std::collections::BTreeSet::<String>::new();
+    let pk = make_test_partition_key(&caps, ProfileName::Dist.as_str());
+
+    // Render with A's identity.
+    let r_a = render_workspace_and_package(
+        &pk,
+        sdk.path(),
+        &src,
+        ProfileName::Dist,
+        PanicMode::Abort,
+        CrateTypeName::Cdylib,
+        &caps,
+        &id_a,
+    );
+    // Render with B's identity under the same partition key.
+    let r_b = render_workspace_and_package(
+        &pk,
+        sdk.path(),
+        &src,
+        ProfileName::Dist,
+        PanicMode::Abort,
+        CrateTypeName::Cdylib,
+        &caps,
+        &id_b,
+    );
+
+    // Workspace membership is the ONE partition-stable package.
+    assert_eq!(
+        r_a.members, r_b.members,
+        "workspace membership must NOT grow with new identities; got {:?} vs {:?}",
+        r_a.members, r_b.members
+    );
+    assert_eq!(r_a.members.len(), 1, "exactly one workspace member");
+    // Package name is the partition-stable one (same for both).
+    assert_eq!(r_a.package_name, r_b.package_name);
+    assert!(
+        r_a.package_name.starts_with("script_partition_"),
+        "package name is the partition-stable `script_partition_<hash>`; got {}",
+        r_a.package_name
+    );
+    // But the `[lib] name` differs — it is per canonical identity.
+    assert_ne!(
+        r_a.lib_name, r_b.lib_name,
+        "two distinct canonical identities in the same partition must produce \
+         two distinct `[lib] name` values, got the same name `{}`",
+        r_a.lib_name
+    );
+    assert!(
+        r_a.lib_name.starts_with("renzora_plugin_")
+            && r_b.lib_name.starts_with("renzora_plugin_"),
+        "lib name is identity-derived `renzora_plugin_<64hex>`; got `{}` and `{}`",
+        r_a.lib_name,
+        r_b.lib_name
+    );
+
+    // The package's `[lib] name = "<lib_name>"` line carries the
+    // per-identity name. Inspecting the rendered bytes directly
+    // proves the renderer wrote it (the BuildService's writer is a
+    // no-op for unchanged bytes, so this is the actual on-disk
+    // content).
+    let pkg_a = std::str::from_utf8(&r_a.package_toml).unwrap();
+    let pkg_b = std::str::from_utf8(&r_b.package_toml).unwrap();
+    let needle_a = format!("name = \"{}\"", r_a.lib_name);
+    let needle_b = format!("name = \"{}\"", r_b.lib_name);
+    assert!(
+        pkg_a.contains(&needle_a),
+        "A's package_toml must contain `{needle_a}`; got:\n{pkg_a}"
+    );
+    assert!(
+        pkg_b.contains(&needle_b),
+        "B's package_toml must contain `{needle_b}`; got:\n{pkg_b}"
+    );
+    // The workspace's `members` entry is the partition package
+    // name, not the lib name.
+    let ws = std::str::from_utf8(&r_a.workspace_toml).unwrap();
+    assert!(
+        ws.contains(&format!("\"{}\"", r_a.package_name)),
+        "workspace `members` must list the partition package, not the lib name; got:\n{ws}"
+    );
+    assert!(
+        !ws.contains(&r_a.lib_name),
+        "workspace must NOT list the per-identity lib name; got:\n{ws}"
+    );
+}
+
+/// AC3-1 (10th-correction): the same canonical plugin source under two
+/// different `PartitionKey`s produces the SAME durable type path
+/// (the durable path is identity-derived, not partition-derived).
+/// Compiles the source twice — once in each of two partitions that
+/// differ in profile + capabilities — and asserts:
+///   * the partition package names differ;
+///   * the `[lib] name` is identical across partitions;
+///   * no `script_partition_<hash>` prefix appears in the durable
+///     path (the per-identity lib name is the prefix).
+#[test]
+fn z3_1_prod_same_canonical_plugin_two_partitions_same_durable_path() {
+    use renzora_compiler_cache::compiler::stable_partition_package_name;
+    if !cargo_is_available() {
+        eprintln!("cargo not available; skipping z3_1_prod_same_canonical_plugin_two_partitions");
+        return;
+    }
+
+    let id = make_id("z3_1_cross_partition_target.rs");
+    // Identical source for both partitions. Uses just the
+    // `#[no_mangle]` symbol the existing `prod_real_source_compiles`
+    // test uses — adding the `use renzora_plugin::prelude::*;`
+    // requires the SDK to export Component / add! which the fake
+    // SDK does not, so the simpler symbol-only source is what the
+    // cross-partition test uses.
+    let src = b"#[no_mangle]\npub extern \"C\" fn renzora_script_update() {}\n".to_vec();
+    // Two different partition keys: profile `Dist` with no
+    // capabilities, and `DistLean` with one capability. Both
+    // produce host-loadable test artefacts.
+    let caps_empty = std::collections::BTreeSet::<String>::new();
+    let mut caps_one = std::collections::BTreeSet::<String>::new();
+    caps_one.insert("static_plugins".to_string());
+
+    let cache = tmp_cache();
+    let sdk = make_fake_sdk();
+    let svc = std::sync::Arc::new(
+        BuildService::new(cfg_with(cache.path(), sdk.path(), 2, 2)).unwrap(),
+    );
+    // First partition: Dist, no caps.
+    let rx1 = svc
+        .submit(BuildRequest {
+            identity: id.clone(),
+            source_snapshot: std::sync::Arc::new(src.to_vec()),
+            fingerprint_inputs: {
+                let mut i = make_inputs();
+                i.profile = BuildProfile::Dist;
+                i.capabilities = caps_empty.clone();
+                i
+            },
+            target: default_host_triple(),
+            artifact_kind: ArtifactKind::Tier1Script,
+        })
+        .unwrap();
+    let o1 = rx1.recv_timeout(Duration::from_secs(180)).expect("p1 outcome");
+    let p1 = match o1 {
+        renzora_compiler_cache::BuildOutcome::Published { immutable_artifact_path, fingerprint, .. } => {
+            (immutable_artifact_path, fingerprint)
+        }
+        other => panic!("partition 1 must yield Published; got {other:?}"),
+    };
+    // Second partition: DistLean, with `static_plugins` cap.
+    let id2 = id.clone();
+    let rx2 = svc
+        .submit(BuildRequest {
+            identity: id2,
+            source_snapshot: std::sync::Arc::new(src.to_vec()),
+            fingerprint_inputs: {
+                let mut i = make_inputs();
+                i.profile = BuildProfile::DistLean;
+                i.capabilities = caps_one.clone();
+                i
+            },
+            target: default_host_triple(),
+            artifact_kind: ArtifactKind::Tier1Script,
+        })
+        .unwrap();
+    let o2 = rx2.recv_timeout(Duration::from_secs(180)).expect("p2 outcome");
+    let p2 = match o2 {
+        renzora_compiler_cache::BuildOutcome::Published { immutable_artifact_path, fingerprint, .. } => {
+            (immutable_artifact_path, fingerprint)
+        }
+        other => panic!("partition 2 must yield Published; got {other:?}"),
+    };
+    // Wrapper package names differ — they are partition-stable
+    // `script_partition_<hash>` artefacts.
+    assert_ne!(
+        p1.0.parent().unwrap().file_name().unwrap(),
+        p2.0.parent().unwrap().file_name().unwrap(),
+        "the two partition cache directories must differ; got {} and {}",
+        p1.0.display(),
+        p2.0.display()
+    );
+    // But the produced artefacts share a `[lib] name` derived from
+    // the canonical identity. (Same identity => same lib_name.)
+    // The cache's immutable artefact is named after the canonical
+    // id's `bare_leaf` (per the cache's naming convention), NOT
+    // after the cargo-output filename. The test therefore reads the
+    // wrapper's per-partition `Cargo.toml` directly to assert the
+    // `[lib] name` is the identity-derived one. The
+    // `partitions.snapshot()` returns `(PartitionKey, target_dir)`
+    // pairs — the target_dir is the cargo target dir; the wrapper
+    // package lives at `<target_dir>/generated/<pkg>`.
+    let partitions = svc.partitions().snapshot();
+    assert_eq!(partitions.len(), 2, "two distinct partitions produced");
+    let mut lib_names: Vec<String> = Vec::new();
+    let mut package_names: Vec<String> = Vec::new();
+    for (pk, target_dir) in &partitions {
+        let pkg_toml_path = target_dir
+            .join("generated")
+            .join(stable_partition_package_name(pk))
+            .join("Cargo.toml");
+        let toml = std::fs::read_to_string(&pkg_toml_path)
+            .expect("wrapper package Cargo.toml must exist after build");
+        // Extract the package `name = "..."` line. The package
+        // header is the first `[package]` block in the file.
+        let pkg_name = toml
+            .lines()
+            .find(|l| l.trim().starts_with("name = "))
+            .expect("package `name = ...` line in wrapper Cargo.toml")
+            .trim()
+            .trim_start_matches("name = ")
+            .trim_matches('"')
+            .to_string();
+        package_names.push(pkg_name);
+        // Extract the `[lib] name = "..."` line. The `[lib]` block
+        // is rendered with `name = "..."` as its FIRST non-bracket
+        // line, so the line is `name = "..."` (no leading indent,
+        // because the template does not indent it).
+        let lib_name = toml
+            .lines()
+            .skip_while(|l| !l.trim().starts_with("[lib]"))
+            .skip(1) // skip the [lib] line itself
+            .find(|l| l.trim().starts_with("name = "))
+            .expect("[lib] `name = ...` line in wrapper Cargo.toml")
+            .trim()
+            .trim_start_matches("name = ")
+            .trim_matches('"')
+            .to_string();
+        lib_names.push(lib_name);
+    }
+    // Two distinct partitions — two distinct partition-stable
+    // package names.
+    assert_eq!(package_names.len(), 2);
+    assert_ne!(
+        package_names[0], package_names[1],
+        "the two partition package names must differ; got {package_names:?}"
+    );
+    assert!(
+        package_names.iter().all(|n| n.starts_with("script_partition_")),
+        "every package name is the partition-stable `script_partition_<hash>`; got {package_names:?}"
+    );
+    // Two distinct partitions — but the SAME identity-derived
+    // `[lib] name`. This is the architectural fix.
+    assert_eq!(
+        lib_names[0], lib_names[1],
+        "the two `[lib] name` values must be IDENTICAL across partitions for the same canonical identity; got {lib_names:?}"
+    );
+    assert!(
+        lib_names[0].starts_with("renzora_plugin_"),
+        "the `[lib] name` is identity-derived `renzora_plugin_<64hex>`; got {}",
+        lib_names[0]
+    );
+    let lib_name = &lib_names[0];
+    assert!(
+        !lib_name.contains("script_partition_"),
+        "the `[lib] name` is identity-derived and must not contain any \
+         `script_partition_<hash>`; got {lib_name}"
+    );
+    // Sanity: the produced artefacts are distinct files (they
+    // live under distinct cache directories).
+    assert_ne!(p1.0, p2.0);
+    // Sanity: the durable path is identity-only — a fresh render
+    // (i.e. without any BuildService at all) must produce the
+    // same string.
+    let canonical = id.to_scheme_path();
+    let mut hex = String::with_capacity(64);
+    for b in blake3::hash(canonical.as_bytes()).as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    let local_path = format!("{lib_name}::State");
+    let durable = format!("renzora.plugin/v1/{hex}/{local_path}");
+    assert!(
+        !durable.contains("script_partition_"),
+        "the durable path must NOT contain any partition-derived \
+         `script_partition_<hash>`; got {durable}"
+    );
+    // Sanity: the durable path is identity-only — a fresh render
+    // (i.e. without any BuildService at all) must produce the
+    // same string.
+    let mut hex2 = String::with_capacity(64);
+    for b in blake3::hash(canonical.as_bytes()).as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(hex2, "{b:02x}");
+    }
+    let durable_again = format!("renzora.plugin/v1/{hex2}/{local_path}");
+    assert_eq!(
+        durable, durable_again,
+        "the durable path must be a pure function of (identity, local); got {durable:?}"
+    );
+    let _ = svc.shutdown(Duration::from_secs(2));
+}
+
+// =================================================================
+// AD3-2 (11th-correction): platform-aware `locate_artifact` tests.
+//
+// The selection function picks a Cargo-emitted artifact by exact
+// filename. Each test below feeds it a representative
+// `compiler-artifact.filenames` list and a target triple, and
+// asserts the right one was picked (or, for miss cases, that the
+// diagnostic names every relevant field).
+// =================================================================
+
+fn make_filenames(items: &[&str]) -> Vec<std::path::PathBuf> {
+    items
+        .iter()
+        .map(|s| std::path::PathBuf::from(*s))
+        .collect()
+}
+
+#[test]
+fn unit_locate_artifact_linux_so_is_selected() {
+    let files = make_filenames(&[
+        "/build/target/x86_64-unknown-linux-gnu/dist/libwrk_a.so",
+        "/build/target/x86_64-unknown-linux-gnu/dist/librenzora_plugin.so",
+        "/build/target/x86_64-unknown-linux-gnu/dist/libwrk_b.so",
+    ]);
+    let p = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-unknown-linux-gnu",
+    )
+    .expect("Linux .so must be selected");
+    assert_eq!(
+        p,
+        std::path::PathBuf::from("/build/target/x86_64-unknown-linux-gnu/dist/libwrk_a.so")
+    );
+}
+
+#[test]
+fn unit_locate_artifact_macos_dylib_is_selected() {
+    let files = make_filenames(&[
+        "/build/target/aarch64-apple-darwin/dist/libwrk_a.dylib",
+        "/build/target/aarch64-apple-darwin/dist/librenzora_plugin.dylib",
+    ]);
+    let p = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "aarch64-apple-darwin",
+    )
+    .expect("macOS .dylib must be selected");
+    assert_eq!(
+        p,
+        std::path::PathBuf::from("/build/target/aarch64-apple-darwin/dist/libwrk_a.dylib")
+    );
+}
+
+#[test]
+fn unit_locate_artifact_windows_dll_no_lib_prefix_is_selected() {
+    // Forward-slash paths so the host's `Path::file_name` parses
+    // the same on Linux (where the CI runs) and on Windows.
+    let files = make_filenames(&[
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.dll",
+        "C:/build/target/x86_64-pc-windows-msvc/dist/renzora_plugin.dll",
+    ]);
+    let p = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-pc-windows-msvc",
+    )
+    .expect("Windows .dll must be selected WITHOUT the `lib` prefix");
+    assert_eq!(
+        p,
+        std::path::PathBuf::from("C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.dll")
+    );
+}
+
+#[test]
+fn unit_locate_artifact_windows_dll_lib_import_lib_is_not_selected_as_dll() {
+    // `lib_name.dll.lib` is a Windows MSVC import-library
+    // sidecar, NOT the cdylib. The matcher MUST NOT pick it
+    // when the requested kind is a dynamic library.
+    let files = make_filenames(&[
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.dll.lib",
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.exp",
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.pdb",
+    ]);
+    let res = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-pc-windows-msvc",
+    );
+    assert!(
+        res.is_err(),
+        "the .dll.lib sidecar must not be picked; got {res:?}"
+    );
+}
+
+#[test]
+fn unit_locate_artifact_windows_pdb_and_exp_ignored() {
+    // No real .dll was produced; the only cargo-emitted files
+    // are debug artifacts. The miss diagnostic should name the
+    // target triple, the expected filename, and the full list.
+    let files = make_filenames(&[
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.pdb",
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.exp",
+    ]);
+    let miss = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-pc-windows-msvc",
+    )
+    .expect_err("the miss must be reported");
+    assert_eq!(miss.lib_name, "wrk_a");
+    assert_eq!(miss.target_triple, "x86_64-pc-windows-msvc");
+    assert!(matches!(
+        miss.platform,
+        renzora_compiler_cache::compiler::ArtifactPlatform::WindowsMsvc
+    ));
+    assert_eq!(miss.kind, ArtifactKind::Tier1Plugin);
+    assert_eq!(
+        miss.expected_filename.as_deref(),
+        Some("wrk_a.dll"),
+        "the expected filename must be the platform-correct one"
+    );
+    let msg = miss.to_string();
+    assert!(msg.contains("wrk_a.dll"), "the diagnostic must name the expected filename: {msg}");
+    assert!(msg.contains("wrk_a.pdb"), "the diagnostic must list the actual files: {msg}");
+}
+
+#[test]
+fn unit_locate_artifact_unix_sdk_lib_renzora_plugin_is_ignored() {
+    let files = make_filenames(&[
+        "/build/target/x86_64-unknown-linux-gnu/dist/librenzora_plugin.so",
+        "/build/target/x86_64-unknown-linux-gnu/dist/libother_identity.so",
+    ]);
+    // Looking for a plugin called `wrk_a` — but the SDK's own
+    // `librenzora_plugin.so` is also in the candidates list. The
+    // matcher MUST NOT pick the SDK's artifact even when nothing
+    // else matches.
+    let res = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-unknown-linux-gnu",
+    );
+    assert!(res.is_err(), "the SDK's `renzora_plugin` artifact must not be picked; got {res:?}");
+}
+
+#[test]
+fn unit_locate_artifact_windows_sdk_renzora_plugin_dll_is_ignored() {
+    let files = make_filenames(&[
+        "C:/build/target/x86_64-pc-windows-msvc/dist/renzora_plugin.dll",
+    ]);
+    let res = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-pc-windows-msvc",
+    );
+    assert!(
+        res.is_err(),
+        "the SDK's `renzora_plugin.dll` must not be picked; got {res:?}"
+    );
+}
+
+#[test]
+fn unit_locate_artifact_staticlib_linux_macos_windows_gnu() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("x86_64-unknown-linux-gnu", "wrk_a", "libwrk_a.a"),
+        ("aarch64-apple-darwin", "wrk_a", "libwrk_a.a"),
+        ("x86_64-pc-windows-gnu", "wrk_a", "libwrk_a.a"),
+    ];
+    for (triple, lib, expected) in cases {
+        let files = make_filenames(&[
+            &format!("/build/target/{triple}/dist/{expected}"),
+        ]);
+        let p = renzora_compiler_cache::compiler::locate_artifact(
+            &files,
+            lib,
+            &ArtifactKind::StaticLib,
+            triple,
+        )
+        .unwrap_or_else(|e| panic!("staticlib miss for triple {triple}: {e}"));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(format!("/build/target/{triple}/dist/{expected}")),
+            "triple {triple} should pick {expected}"
+        );
+    }
+}
+
+#[test]
+fn unit_locate_artifact_staticlib_windows_msvc_picks_lib() {
+    let files = make_filenames(&[
+        "C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.lib",
+    ]);
+    let p = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::StaticLib,
+        "x86_64-pc-windows-msvc",
+    )
+    .expect("Windows MSVC static library is `<name>.lib` (no `lib` prefix)");
+    assert_eq!(
+        p,
+        std::path::PathBuf::from("C:/build/target/x86_64-pc-windows-msvc/dist/wrk_a.lib")
+    );
+}
+
+#[test]
+fn unit_locate_artifact_missing_expected_diagnostic_is_useful() {
+    let files = make_filenames(&[
+        "/build/target/x86_64-unknown-linux-gnu/dist/libother.so",
+        "/build/target/x86_64-unknown-linux-gnu/dist/librenzora_plugin.so",
+    ]);
+    let miss = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "x86_64-unknown-linux-gnu",
+    )
+    .expect_err("a miss must produce an error");
+    assert_eq!(miss.lib_name, "wrk_a");
+    assert_eq!(miss.target_triple, "x86_64-unknown-linux-gnu");
+    assert!(matches!(
+        miss.platform,
+        renzora_compiler_cache::compiler::ArtifactPlatform::LinuxGnu
+    ));
+    assert_eq!(
+        miss.expected_filename.as_deref(),
+        Some("libwrk_a.so"),
+        "the expected filename for Linux .so is `lib<name>.so`"
+    );
+    let msg = miss.to_string();
+    assert!(msg.contains("wrk_a"), "the diagnostic must mention the lib name: {msg}");
+    assert!(msg.contains("libwrk_a.so"), "the diagnostic must include the expected filename: {msg}");
+    assert!(msg.contains("libother.so"), "the diagnostic must list what cargo actually emitted: {msg}");
+}
+
+#[test]
+fn unit_locate_artifact_wrong_platform_target_returns_useful_diagnostic() {
+    // The wrapper was built for `x86_64-unknown-linux-gnu` but
+    // the target triple the caller supplied is the macOS one.
+    // The exact-match path yields nothing (no `libwrk_a.dylib`
+    // in the candidates), and the platform's strict extension
+    // filter rejects the Linux `.so` artefacts. The miss
+    // diagnostic must therefore name the platform-expected
+    // filename so the operator can see why the matcher picked
+    // nothing — rather than silently picking a wrong-platform
+    // artifact via stem fallback.
+    let files = make_filenames(&[
+        "/build/target/x86_64-unknown-linux-gnu/dist/libwrk_a.so",
+        "/build/target/x86_64-unknown-linux-gnu/dist/librenzora_plugin.so",
+    ]);
+    let miss = renzora_compiler_cache::compiler::locate_artifact(
+        &files,
+        "wrk_a",
+        &ArtifactKind::Tier1Plugin,
+        "aarch64-apple-darwin",
+    )
+    .expect_err("a wrong-platform target must NOT silently pick a wrong-platform artifact");
+    assert!(matches!(
+        miss.platform,
+        renzora_compiler_cache::compiler::ArtifactPlatform::MacOS
+    ));
+    assert_eq!(miss.expected_filename.as_deref(), Some("libwrk_a.dylib"));
 }

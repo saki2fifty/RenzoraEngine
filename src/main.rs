@@ -258,6 +258,24 @@ fn main() {
     // C-ABI plugins from `<exe-dir>/plugins/`, after both.
     load_global_plugins(&mut app, is_editor);
 
+    // Phase 3 loose-plugin activation in shipped builds. The runtime
+    // doesn't watch source (no toolchain available), but it does activate
+    // any loose plugins already compiled by the editor and dropped into
+    // `plugins/.loose-staged/`.
+    if is_editor {
+        let plugins_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("plugins")))
+            .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+        app.add_plugins(
+            renzora_loose_plugins::LoosePluginHost::editor_with_trust(
+                &plugins_dir,
+                renzora_runtime::renzora::load_disabled_plugins(),
+                renzora_runtime::renzora::load_trusted_loose_plugins(),
+            ),
+        );
+    }
+
     app.run();
 }
 

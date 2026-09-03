@@ -21,6 +21,10 @@ renzora_native_plugin = { path = "../renzora_native_plugin" }
 # identity agreement + bare-alias ambiguity reporting). Discovery-enabled
 # since this crate's signature is filesystem-aware.
 renzora_identity = { path = "../renzora_identity", features = ["discovery"] }
+# Phase 3 Tier-1 loose plugins. Read-only consumer: the export overlay
+# pulls `LoosePluginInventory::export_candidates()` to expose the
+# selected loose cdylibs alongside the directory-style plugins.
+renzora_loose_plugins = { path = "../renzora_loose_plugins" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Edit the export copy's Cargo.toml (strip Bevy features) while preserving the

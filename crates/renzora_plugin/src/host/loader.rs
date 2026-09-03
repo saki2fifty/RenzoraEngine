@@ -13,6 +13,263 @@ use libloading::{Library, Symbol};
 use wasm_dl::{Library, Symbol};
 use crate::static_link::StaticPlugin;
 use crate::sys;
+use renzora_identity::CanonicalId;
+
+/// Derive a stable canonical identity for a directory-plugin
+/// (a C-ABI plugin discovered by path under a configured
+/// `discovery_root`).
+///
+/// The identity encodes:
+///   * all relative PARENT directories preserved verbatim (so
+///     `plugins/a/State.so` and `plugins/b/State.so` produce
+///     different identities), and
+///   * the LOGICAL plugin name — the final filename's stem with
+///     the load-prefix convention applied per extension —
+///     so the same logical plugin produces the same `CanonicalId`
+///     on Linux, macOS and Windows:
+///
+///     | on-disk filename       | logical name           |
+///     | ---                    | ---                    |
+///     | `foo.dll`              | `foo`                  |
+///     | `libfoo.so`            | `foo`                  |
+///     | `libfoo.dylib`         | `foo`                  |
+///     | `libfoo.dll`           | `libfoo`               |
+///     | `liblibfoo.so`         | `libfoo`               |
+///     | `liblibfoo.dylib`      | `libfoo`               |
+///     | `effects/libweather.so`| `effects/weather`      |
+///     | `effects/weather.dll`  | `effects/weather`      |
+///     | `effects/libfoo.dll`   | `effects/libfoo`       |
+///
+/// The cross-platform normalisation rule is the single source of
+/// truth in [`logical_plugin_name_for_filename`] — this function
+/// only adds the discovery-root-relative path prefix on top.
+///
+/// Returns an error if the path is not under `discovery_root`,
+/// contains `..` / empty segments, has a non-UTF-8 component,
+/// or its final filename is not a supported dynamic-library
+/// extension with a non-empty logical name. Callers MUST
+/// propagate the error — silently falling back to a basename-only
+/// identity would re-introduce a collision class.
+pub fn canonical_id_for_path(
+    path: &Path,
+    discovery_root: &Path,
+) -> Result<CanonicalId, String> {
+    let rel = path.strip_prefix(discovery_root).map_err(|e| {
+        format!(
+            "plugin path `{}` is not under discovery root `{}`: {e}",
+            path.display(),
+            discovery_root.display()
+        )
+    })?;
+    if rel.is_absolute() {
+        return Err(format!(
+            "plugin path `{}` is not under discovery root `{}`: the relative path is absolute",
+            path.display(),
+            discovery_root.display()
+        ));
+    }
+    // Walk every parent component and the final stem. The final
+    // stem is the only place that gets cross-platform-normalized.
+    let mut logical_components: Vec<String> = Vec::new();
+    let mut iter = rel.components();
+    let last = iter.next_back().ok_or_else(|| {
+        format!(
+            "plugin path `{}` (relative to `{}`) has no final component",
+            path.display(),
+            discovery_root.display()
+        )
+    })?;
+    for component in iter {
+        if component == std::path::Component::CurDir {
+            continue;
+        }
+        let seg = component
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| format!("plugin path `{}` has a non-UTF-8 segment", path.display()))?;
+        if seg.is_empty() || seg == ".." {
+            return Err(format!(
+                "plugin path `{}` (relative `{}`) is not a valid canonical identity path",
+                path.display(),
+                rel.display()
+            ));
+        }
+        logical_components.push(seg.to_string());
+    }
+    // Final component: this is the dynamic-library filename. The
+    // cross-platform normalisation rule is centralised in
+    // [`logical_plugin_name_for_filename`] so the extension-aware
+    // `lib`-strip logic lives in exactly one place.
+    let last_os = last.as_os_str();
+    let last_str = last_os
+        .to_str()
+        .ok_or_else(|| format!("plugin path `{}` has a non-UTF-8 final segment", path.display()))?;
+    if last_str.is_empty() {
+        return Err(format!(
+            "plugin path `{}` (relative `{}`) has an empty final segment",
+            path.display(),
+            rel.display()
+        ));
+    }
+    let last_path = Path::new(last_str);
+    let last_logical = logical_plugin_name_for_filename(last_path).map_err(|e| {
+        format!(
+            "plugin path `{}` (relative `{}`) is not a valid plugin filename: {e}",
+            path.display(),
+            rel.display()
+        )
+    })?;
+    logical_components.push(last_logical);
+    let logical = logical_components.join("/");
+    let id_str = format!("engine://{logical}");
+    CanonicalId::parse(&id_str).map_err(|e| {
+        format!(
+            "plugin path `{}` produced an invalid canonical identity `{id_str}`: {e:?}",
+            path.display()
+        )
+    })
+}
+
+/// Extension-aware logical-name extraction for a dynamic-library
+/// filename. The single source of truth for the cross-platform
+/// `lib`-strip rule.
+///
+/// Rules (applied in order):
+///
+///   1. The extension is one of `so` (Linux), `dylib` (macOS),
+///      `dll` (Windows MSVC + Windows GNU). Any other extension
+///      returns `Err` so the caller does not silently fall back
+///      to a guess.
+///   2. The stem (the file name without the extension) MUST be
+///      non-empty. A filename like `.dll` has an empty stem and
+///      is rejected with `Err`.
+///   3. For `.so` and `.dylib`, strip EXACTLY ONE leading `lib`
+///      prefix (the Unix load-prefix convention). The remaining
+///      characters are preserved verbatim, including any
+///      subsequent `lib` characters.
+///   4. For `.dll`, do NOT strip a `lib` prefix — Windows does
+///      not add one, so a `libfoo.dll` is genuinely a crate
+///      named `libfoo`.
+///   5. The resulting logical name MUST be non-empty. A
+///      `lib.so` filename has stem `lib` and would be stripped to
+///      an empty string; that is rejected with `Err`.
+///
+/// The error message names both the rejected filename and the
+/// specific rule that fired so the caller can surface a useful
+/// diagnostic.
+///
+/// Examples:
+///
+///   | filename            | logical name   | notes                       |
+///   | ---                 | ---            | ---                         |
+///   | `foo.dll`           | `foo`          | ordinary Windows crate      |
+///   | `libfoo.so`         | `foo`          | ordinary Linux crate        |
+///   | `libfoo.dylib`      | `foo`          | ordinary macOS crate        |
+///   | `liblibfoo.so`      | `libfoo`       | crate genuinely named `libfoo` (Linux) |
+///   | `liblibfoo.dylib`   | `libfoo`       | crate genuinely named `libfoo` (macOS) |
+///   | `libfoo.dll`        | `libfoo`       | crate genuinely named `libfoo` (Windows) |
+///   | `library.dll`       | `library`      | ordinary Windows crate (starts with `lib`) |
+///   | `lib.so`            | (rejected)     | stem `lib` would strip to empty |
+///   | `.dll`              | (rejected)     | stem is empty               |
+///   | `foo.txt`           | (rejected)     | unsupported extension       |
+pub fn logical_plugin_name_for_filename(filename: &Path) -> Result<String, String> {
+    let stem = filename
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("filename `{}` has a non-UTF-8 stem", filename.display()))?;
+    let ext = filename
+        .extension()
+        .and_then(|e| e.to_str())
+        .ok_or_else(|| {
+            // Catches `lib.so` (which has an empty stem AND
+            // `Path::extension()` returning `Some("so")` on
+            // Windows but `None` on some platforms where the
+            // basename is a single component) and bare `foo` (no
+            // extension). The empty-stem check below catches the
+            // `.dll` case where `file_stem` returns `Some("")`.
+            format!(
+                "filename `{}` has no extension; expected one of `so`, `dylib`, `dll`",
+                filename.display()
+            )
+        })?;
+    if stem.is_empty() {
+        // `.dll` has `Path::extension() == Some("dll")` on
+        // Windows and `file_stem() == Some("")` on every host.
+        // The empty-stem check is the right place to reject it
+        // — the `dll` arm of the match below has no other
+        // strip-prefix logic, so an empty stem would otherwise
+        // produce an empty logical name and be persisted.
+        return Err(format!(
+            "filename `{}` has an empty logical name; a plugin crate \
+             cannot be empty",
+            filename.display()
+        ));
+    }
+    match ext {
+        "so" | "dylib" => {
+            // Strip exactly one leading `lib`. A second `lib`
+            // (e.g. `liblibfoo.so`) is preserved verbatim — the
+            // crate is genuinely named `libfoo`.
+            let stripped = stem.strip_prefix("lib").unwrap_or(stem);
+            if stripped.is_empty() {
+                return Err(format!(
+                    "filename `{}` strips the Unix load prefix to an empty \
+                     logical name; a plugin crate cannot be named `lib`",
+                    filename.display()
+                ));
+            }
+            Ok(stripped.to_string())
+        }
+        "dll" => {
+            // Windows does NOT add a `lib` prefix to a cdylib's
+            // output filename. The stem is the logical crate
+            // name as-is. The empty-stem check above has already
+            // rejected `.dll` (which has stem `""`).
+            Ok(stem.to_string())
+        }
+        other => Err(format!(
+            "filename `{}` has unsupported extension `.{other}`; \
+             expected one of `so`, `dylib`, `dll`",
+            filename.display()
+        )),
+    }
+}
+
+/// Backward-compatible wrapper for callers that lack a configured
+/// discovery root. The resulting identity is a sanitised bare
+/// filename stem — unstable across restarts that change the
+/// installation directory and unstable across nested plugins with
+/// the same name. Used ONLY by the non-`load_dir` paths that load a
+/// single plugin from a caller-supplied path (e.g. tests, the
+/// scene-stream loader). DO NOT use this from `load_dir` — use
+/// `canonical_id_for_path(path, discovery_root)` instead — and DO
+/// NOT use it from the hot-reload path (the watcher looks up the
+/// initial identity from the stored slot, so this fallback never
+/// runs there either).
+pub fn canonical_id_for_legacy_path(path: &Path) -> CanonicalId {
+    // The legacy entry point falls back to a sanitised bare
+    // filename. The legacy callers (unit tests, the scene-stream
+    // loader) already control their input filenames; if a caller's
+    // path is malformed, the helper returns `Err` and we fall back
+    // to the basename-only legacy identity.
+    let safe = match logical_plugin_name_for_filename(path) {
+        Ok(name) => name,
+        Err(_) => path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("legacy")
+            .to_string(),
+    };
+    CanonicalId::parse(&format!("engine://{safe}"))
+        .unwrap_or_else(|_| {
+            CanonicalId::from_rooted(
+                renzora_identity::RootKind::Engine,
+                &format!("legacy://{safe}"),
+            )
+            .expect("synthetic identity is well-formed")
+        })
+}
+
 use std::path::{Path, PathBuf};
 
 /// `libloading`'s shape, for a platform that has no dynamic loading at all.
@@ -76,6 +333,18 @@ mod wasm_dl {
 /// component schemas refer to.
 pub struct PluginSlot {
     pub path: PathBuf,
+    /// The canonical identity the directory loader derived for
+    /// this path at initial load time. The hot-reload watcher
+    /// consults this instead of re-deriving the identity from the
+    /// file stem, so a Linux plugin (`libfoo.so`) and a Windows
+    /// plugin (`foo.dll`) at the same logical location receive the
+    /// same identity both at boot and on reload.
+    ///
+    /// `None` for slots created by the legacy `load_one` /
+    /// scene-stream / unit-test paths that supply their own
+    /// identity up front; those callers already know the identity
+    /// they want and never re-derive it from the filename.
+    pub directory_identity: Option<CanonicalId>,
     /// The scope this path reported, once anything has read it. `None` until a
     /// load got far enough to ask.
     ///
@@ -107,6 +376,19 @@ pub struct PluginSlot {
     /// session is a fair price for never unmapping code that something might
     /// still call, and a restart reclaims all of it.
     ///
+    /// **Every** library ever loaded for this path, and none of them is ever
+    /// dropped.
+    ///
+    /// Deliberate. Every function pointer a plugin registered — system entries,
+    /// panel action thunks, render callbacks — points into its library, and a
+    /// retired system is still *in* the schedule, merely returning early. Freeing
+    /// the library would turn those into dangling pointers. Dropping a
+    /// `libloading::Library` has also deadlocked in `FreeLibrary` here before.
+    ///
+    /// So a reload leaks one library image. A few MB per reload across a dev
+    /// session is a fair price for never unmapping code that something might
+    /// still call, and a restart reclaims all of it.
+    ///
     /// `ManuallyDrop`, and not merely "we never call `remove`": [`LoadedPlugins`]
     /// is an ECS resource, so a plain `Vec<Library>` is dropped when the World
     /// is — which is every clean shutdown. That ran `FreeLibrary` on every
@@ -116,7 +398,35 @@ pub struct PluginSlot {
     /// so it happened to skip the drop; the runtime unwinds properly and paid
     /// for it. "Never dropped" has to include the last moment of the process,
     /// which is the one moment a `Vec` field does not give you for free.
+    ///
+    /// This holds libraries from **successful** loads. A failed load
+    /// (rolled-back transaction, missing symbol, wrong scope, ABI mismatch,
+    /// layout conflict) also opens the image and never closes it — see
+    /// `load_one_transactional`, which pushes failed images into
+    /// `failed_libraries` so they share the same process-lifetime safety.
     _libraries: Vec<std::mem::ManuallyDrop<Library>>,
+    /// Libraries opened by a failed load. Same never-dropped safety as
+    /// `_libraries`. Holds every `Library` the loader produced but did not
+    /// keep in `_libraries` because the activation did not commit.
+    failed_libraries: Vec<std::mem::ManuallyDrop<Library>>,
+}
+
+impl PluginSlot {
+    /// Construct a fresh slot for `path`. `failed_libraries` starts empty;
+    /// `load_one_transactional` populates it for every library it opens but
+    /// does not commit.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            directory_identity: None,
+            scope: None,
+            generation: super::PluginGeneration::default(),
+            loaded_at: 0,
+            images: 0,
+            _libraries: Vec::new(),
+            failed_libraries: Vec::new(),
+        }
+    }
 }
 
 /// Every plugin path the loader has seen, indexed by slot.
@@ -129,14 +439,7 @@ impl LoadedPlugins {
         if let Some(i) = self.0.iter().position(|s| s.path.as_path() == path) {
             return i;
         }
-        self.0.push(PluginSlot {
-            path: path.to_path_buf(),
-            scope: None,
-            generation: super::PluginGeneration::default(),
-            loaded_at: 0,
-            images: 0,
-            _libraries: Vec::new(),
-        });
+        self.0.push(PluginSlot::new(path.to_path_buf()));
         self.0.len() - 1
     }
 
@@ -188,6 +491,7 @@ pub enum LoadOutcome {
 pub fn load_dir(
     world: &mut World,
     dir: &Path,
+    discovery_root: &Path,
     is_editor: bool,
     linked: &[&str],
     disabled: &[String],
@@ -197,6 +501,15 @@ pub fn load_dir(
     };
     let ext = std::env::consts::DLL_EXTENSION;
     let mut results = Vec::new();
+    // Track identities already accepted by THIS pass so two
+    // platform-mismatched copies of the same logical plugin
+    // (`libfoo.so` AND `foo.so` under the same discovery root)
+    // do not both load. The watcher consults the stored slot's
+    // identity, and re-running `load_one` with two different
+    // paths that map to the same identity would re-allocate the
+    // durable namespace.
+    let mut accepted_identities: std::collections::HashSet<CanonicalId> =
+        std::collections::HashSet::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -224,12 +537,52 @@ pub fn load_dir(
         // that was never a plugin still gets a row in the report. Listing
         // something the user can turn back on is the harmless direction to be
         // wrong in.
-        let outcome = if disabled.iter().any(|d| d == name) {
+        if disabled.iter().any(|d| d == name) {
             info!("[plugin] {name} is disabled — Settings → Editor → Plugins");
-            LoadOutcome::Disabled
-        } else {
-            load_one(world, &path, is_editor)
+            results.push((path.clone(), LoadOutcome::Disabled));
+            continue;
+        }
+        // Derive the canonical identity from the discovery-root-
+        // relative path. This is the only point in the loader that
+        // does so, so a basename-only fallback cannot sneak in.
+        let identity = match canonical_id_for_path(&path, discovery_root) {
+            Ok(id) => id,
+            Err(reason) => {
+                error!("{reason}");
+                results.push((path.clone(), LoadOutcome::Failed(reason)));
+                continue;
+            }
         };
+        // Duplicate detection: two platform-mismatched artefacts
+        // for the same logical plugin (e.g. a stale `libfoo.so`
+        // left in the folder after upgrading from Linux to
+        // Windows, or vice versa) would both normalise to the
+        // same identity. Reject the second one — the OS's loader
+        // wouldn't be able to load it anyway, and the duplicate
+        // would split the slot's storage in a way the watcher
+        // cannot reconcile.
+        if !accepted_identities.insert(identity.clone()) {
+            let why = format!(
+                "duplicate logical plugin `{identity}` — another file under `{}` \
+                 normalises to the same canonical identity. Remove one of them so the \
+                 slot has a single on-disk source.",
+                discovery_root.display()
+            );
+            error!("{why}");
+            results.push((path.clone(), LoadOutcome::Failed(why)));
+            continue;
+        }
+        // Pin the identity on the slot BEFORE the load runs.
+        // `load_one_with_identity` calls `slot_for`, which
+        // allocates the slot on first sight; stamping the
+        // identity here means the watcher's reload path can
+        // re-use it without re-deriving from the file stem.
+        {
+            let mut loaded = world.get_resource_or_insert_with(LoadedPlugins::default);
+            let slot = loaded.slot_for(&path);
+            loaded.0[slot].directory_identity = Some(identity.clone());
+        }
+        let outcome = load_one_with_identity(world, &path, identity, is_editor);
         // Recorded here rather than by the caller so every exit from this loop
         // reaches the report — including the disabled one, which never produces
         // anything for the caller to log.
@@ -355,7 +708,21 @@ fn clear_shadow_dir(dir: &Path) {
     }
 }
 
-fn load_one(world: &mut World, path: &Path, is_editor: bool) -> LoadOutcome {
+fn load_one_with_identity(
+    world: &mut World,
+    path: &Path,
+    identity: CanonicalId,
+    is_editor: bool,
+) -> LoadOutcome {
+    load_one(world, path, identity, is_editor)
+}
+
+fn load_one(
+    world: &mut World,
+    path: &Path,
+    identity: CanonicalId,
+    is_editor: bool,
+) -> LoadOutcome {
     if is_proc_macro_dylib(path) {
         return LoadOutcome::NotAPlugin;
     }
@@ -453,12 +820,21 @@ fn load_one(world: &mut World, path: &Path, is_editor: bool) -> LoadOutcome {
     // own, so a panel or a render pass is replaced rather than duplicated. Systems
     // are NOT in here — they retire themselves via the generation counter, because
     // Bevy cannot remove one from a schedule.
+    let prior_loaded_at = world.resource::<LoadedPlugins>().0[slot].loaded_at;
     if generation > 0 {
-        super::retire_slot(world, slot);
+        super::retire_slot(world, slot, prior_loaded_at);
     }
 
-    match super::init_plugin_gen(world, init, counter.clone(), generation, slot) {
-        sys::InitResult::Ok => {
+    match super::init_plugin_gen_with_non_persistable(
+        world,
+        init,
+        counter.clone(),
+        generation,
+        slot,
+        identity,
+        false,
+    ) {
+        super::InitOutcome::Ok => {
             counter.store(generation, std::sync::atomic::Ordering::Relaxed);
             let mut loaded = world.resource_mut::<LoadedPlugins>();
             let s = &mut loaded.0[slot];
@@ -472,15 +848,15 @@ fn load_one(world: &mut World, path: &Path, is_editor: bool) -> LoadOutcome {
             s._libraries.push(library);
             LoadOutcome::Loaded
         }
-        sys::InitResult::VersionTooOld => LoadOutcome::VersionTooOld,
-        sys::InitResult::Failed => {
+        super::InitOutcome::VersionTooOld => LoadOutcome::VersionTooOld,
+        super::InitOutcome::Failed => {
             LoadOutcome::Failed("plugin init returned Failed".to_string())
         }
         // The version matched and the shape did not, so the two were built from
         // headers that disagree about field order. Say that, rather than leaving
         // an author to wonder why a plugin with the right version number is
         // refused — the fix is a rebuild, not an engine update.
-        sys::InitResult::AbiMismatch => LoadOutcome::Failed(
+        super::InitOutcome::AbiMismatch => LoadOutcome::Failed(
             "plugin was built against a differently-shaped interface table — its version \
              matches but a field was inserted, reordered or retyped. Rebuild the plugin \
              against this engine's `renzora_plugin`"
@@ -494,9 +870,9 @@ fn load_one(world: &mut World, path: &Path, is_editor: bool) -> LoadOutcome {
         // Refused rather than assumed successful — a plugin that reports a result
         // this build has no name for has not told us it loaded.
         other => LoadOutcome::Failed(format!(
-            "plugin init returned status {} which this engine does not know — it was built \
+            "plugin init returned status {:?} which this engine does not know — it was built \
              against a newer ABI. Rebuild it against this engine's `renzora_plugin`",
-            other.0
+            other
         )),
     }
 }
@@ -519,7 +895,12 @@ fn load_one(world: &mut World, path: &Path, is_editor: bool) -> LoadOutcome {
 ///
 /// Generation stays 0 forever: linked code cannot be swapped, so nothing retires
 /// and no system ever goes stale.
-pub fn load_static(world: &mut World, plugin: &StaticPlugin, is_editor: bool) -> LoadOutcome {
+pub fn load_static(
+    world: &mut World,
+    plugin: &StaticPlugin,
+    identity: CanonicalId,
+    is_editor: bool,
+) -> LoadOutcome {
     if !plugin.scope.is_known() {
         return LoadOutcome::Failed(format!(
             "declares scope {} which this build does not have",
@@ -539,29 +920,534 @@ pub fn load_static(world: &mut World, plugin: &StaticPlugin, is_editor: bool) ->
         (slot, counter)
     };
 
-    match super::init_plugin_gen(world, plugin.init, counter, 0, slot) {
-        sys::InitResult::Ok => {
+    match super::init_plugin_gen_with_non_persistable(
+        world,
+        plugin.init,
+        counter,
+        0,
+        slot,
+        identity,
+        false,
+    ) {
+        super::InitOutcome::Ok => {
             let mut loaded = world.resource_mut::<LoadedPlugins>();
             loaded.0[slot].images += 1;
             LoadOutcome::Loaded
         }
-        sys::InitResult::VersionTooOld => LoadOutcome::VersionTooOld,
-        sys::InitResult::Failed => {
+        super::InitOutcome::VersionTooOld => LoadOutcome::VersionTooOld,
+        super::InitOutcome::Failed => {
             LoadOutcome::Failed("plugin init returned Failed".to_string())
         }
         // Unreachable in practice, and deliberately still handled: a linked
         // plugin was compiled against the very `renzora_plugin` in this build, so
         // its idea of the table's shape cannot differ. If it somehow does, saying
         // so beats reporting success.
-        sys::InitResult::AbiMismatch => LoadOutcome::Failed(
+        super::InitOutcome::AbiMismatch => LoadOutcome::Failed(
             "plugin was built against a differently-shaped interface table, which should be \
              impossible for a linked-in plugin — the export workspace is out of sync"
                 .to_string(),
         ),
         other => LoadOutcome::Failed(format!(
-            "plugin init returned status {} which this engine does not know",
-            other.0
+            "plugin init returned status {:?} which this engine does not know",
+            other
         )),
+    }
+}
+
+/// What an integration crate sees after a transactional activation attempt.
+///
+/// The caller (`renzora_loose_plugins`) supplies the library handle, init
+/// symbol and the candidate generation; this function performs every
+/// mutation reversibly, and reports exactly one of the two outcomes. On
+/// rollback the candidate's mutations are undone and the slot's prior
+/// `loaded_at` and counter are restored — the previous generation is the
+/// one that stays live.
+#[derive(Debug, Clone)]
+pub enum TransactionalActivationOutcome {
+    Committed {
+        slot: usize,
+        generation: u32,
+        committed_entries: Vec<crate::host::JournalEntry>,
+    },
+    RolledBack {
+        slot: usize,
+        proposed_generation: u32,
+        failure: ActivationFailure,
+        rolled_back_entries: Vec<crate::host::JournalEntry>,
+    },
+}
+
+/// Why an activation failed to commit. Used by integration crates to set
+/// the inventory status kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationFailure {
+    /// Library could not be opened, or the required init symbol was missing.
+    OpenFailed(String),
+    /// The plugin's init returned `InitResult::Failed`.
+    InitFailed,
+    /// The plugin's init returned `InitResult::VersionTooOld`.
+    VersionTooOld,
+    /// The plugin's init returned `InitResult::AbiMismatch`.
+    AbiMismatch,
+    /// The plugin's init returned a status from a newer ABI.
+    UnknownInitStatus(u32),
+    /// A component or resource registered by the candidate changed
+    /// layout relative to the existing live registration. Refused, the
+    /// old generation stays active.
+    LayoutConflict(String),
+}
+
+/// Run a plugin's init under a transactional activation gate.
+///
+/// The candidate registers systems with `at = proposed_generation`, while
+/// the slot's `Generation` counter remains at `loaded_at`. Every system
+/// the candidate registers therefore observes `at != counter` on its
+/// `GenGate` and is inert for the duration of the transaction. On
+/// `Commited` the counter is bumped to `proposed_generation`, which
+/// flips the candidate's systems live and retires the prior build's.
+/// On `RolledBack` the counter is restored to `loaded_at`, the candidate
+/// systems stay permanently stale, and every registry mutation is
+/// reversed via the journal.
+///
+/// `init` is the `ExtensionInit` symbol resolved from the library. `scope`
+/// must already have been validated against the binary's `is_editor` flag
+/// by the caller (this function performs no scope validation).
+///
+/// # Safety
+///
+/// `init` must be a valid `ExtensionInit` exported by the plugin. The
+/// caller must keep `library` mapped for the duration of this call (it
+/// does not consume the library — the caller still owns it after this
+/// returns).
+pub unsafe fn activate_with_transaction(
+    world: &mut World,
+    slot: usize,
+    _library: &libloading::Library,
+    init: sys::ExtensionInit,
+    proposed_generation: u32,
+    identity: CanonicalId,
+) -> TransactionalActivationOutcome {
+    use crate::host::{snapshot_registrations, diff_registrations, apply_journal_rollback};
+
+    let (counter_clone, prior_loaded_at) = {
+        let loaded = world.get_resource_or_insert_with(LoadedPlugins::default);
+        let s = &loaded.0[slot];
+        (s.generation.clone(), s.loaded_at)
+    };
+
+    // ── Snapshot restorable state BEFORE init ────────────────────────────
+    //
+    // The snapshot must be taken before `init_plugin_gen` because a
+    // candidate that overwrites an existing resource (or a component
+    // whose layout is byte-compatible) commits the candidate's bytes
+    // before we ever get a chance to read the prior. Snapshotting post-
+    // init would capture the candidate's value rather than the prior
+    // value, and a rollback would "restore" the wrong bytes.
+    let before = snapshot_registrations(world);
+    let mut prior_resource_bytes: std::collections::HashMap<
+        bevy::ecs::component::ComponentId,
+        Vec<u8>,
+    > = std::collections::HashMap::new();
+    if let Some(resources) = world.get_resource::<super::PluginResources>() {
+        for cid in &resources.0 {
+            if let Some(bytes) = super::read_resource_bytes_safe(world, *cid) {
+                prior_resource_bytes.insert(*cid, bytes);
+            }
+        }
+    }
+    let mut prior_component_schemas: std::collections::HashMap<
+        bevy::ecs::component::ComponentId,
+        super::PluginComponentInfo,
+    > = std::collections::HashMap::new();
+    if let Some(schemas) = world.get_resource::<super::PluginComponentSchemas>() {
+        for info in &schemas.0 {
+            prior_component_schemas.insert(info.id, info.clone());
+        }
+    }
+
+    // ── Run init ─────────────────────────────────────────────────────────
+    //
+    // The candidate registers systems with `at = proposed_generation`,
+    // while the slot's counter remains at `loaded_at`. Every system the
+    // candidate registers therefore observes `at != counter` and is
+    // inert for the duration of the transaction. No schedule runs
+    // between now and the commit/rollback decision below — this all
+    // happens inside one Bevy system — so the candidate's systems never
+    // actually execute.
+    //
+    // `init_plugin_gen` now returns the host-side `InitOutcome` so a
+    // layout-conflict reason from `verify_same_layout` reaches us as
+    // `InitOutcome::LayoutConflict(reason)` instead of being collapsed
+    // to generic `Failed`. The prior review (P3V-3) found that the
+    // post-init `detect_layout_conflict` compared the post-init schema
+    // to itself (a no-op) because the incompatible candidate returned
+    // before installing a replacement schema, leaving the prior's schema
+    // visible to it; that has been removed here.
+    let result = super::init_plugin_gen_with_non_persistable(
+        world,
+        init,
+        counter_clone.clone(),
+        proposed_generation,
+        slot,
+        identity,
+        false,
+    );
+
+    // ── Diff after init ──────────────────────────────────────────────────
+    //
+    // `diff_registrations` filters by `(slot, proposed_generation)` so the
+    // journal contains ONLY the candidate's newly-added entries. Older
+    // entries at the same slot but `loaded_at` are not in the journal and
+    // are not touched by `apply_journal_rollback`.
+    let mut journal = diff_registrations(world, &before, slot, proposed_generation);
+
+    // Annotate ResourceRegistered entries that existed pre-init with the
+    // prior bytes so rollback restores them. F3-1: do NOT replace the
+    // ResourceRegistered entry — registration cleanup and byte restoration
+    // are separate operations. Emit a companion `ResourceInserted` entry
+    // alongside the original so rollback restores prior bytes AND removes
+    // the candidate's ownership/metadata claim.
+    //
+    // Candidates that introduced a brand-new resource have no pre-init
+    // bytes; their ResourceRegistered journal entry's rollback branch
+    // (in `apply_journal_rollback`) drops the candidate's claim AND the
+    // public metadata entry. The `ResourceInserted` companion is only
+    // emitted when prior bytes existed.
+    let mut companions: std::collections::HashMap<
+        bevy::ecs::component::ComponentId,
+        usize,
+    > = std::collections::HashMap::new();
+    for entry in journal.entries() {
+        if let crate::host::JournalEntry::ResourceRegistered { id, .. } = entry {
+            if prior_resource_bytes.contains_key(id) {
+                companions.insert(*id, journal.entries().len());
+            }
+        }
+    }
+    let mut to_append = Vec::new();
+    for (id, _pos) in &companions {
+        if let Some(b) = prior_resource_bytes.get(id) {
+            to_append.push(crate::host::JournalEntry::ResourceInserted {
+                id: *id,
+                prior_bytes: Some(b.clone()),
+            });
+        }
+    }
+    for entry in to_append {
+        journal.entries_mut().push(entry);
+    }
+
+    match result {
+        super::InitOutcome::Ok => {
+            // Commit: bump counter, retire ONLY the prior generation's
+            // slot-owned registrations. The candidate's entries (at
+            // `proposed_generation`) survive untouched. `_libraries` is
+            // appended by the caller via `load_one_transactional`.
+            {
+                let mut loaded = world.get_resource_or_insert_with(LoadedPlugins::default);
+                let s = &mut loaded.0[slot];
+                counter_clone.store(proposed_generation, std::sync::atomic::Ordering::Relaxed);
+                s.loaded_at = proposed_generation;
+                s.images += 1;
+            }
+            super::retire_slot(world, slot, prior_loaded_at);
+            // Refresh schemas for any byte-compatible re-registrations
+            // (the candidate may have re-registered an existing
+            // component with the same layout). Without this the
+            // post-init schema would replace the prior's, and live
+            // entity instances that were stored under the prior's
+            // layout would render against the candidate's (which
+            // matches in size + fields — that's the whole point of
+            // `refresh_compatible_schemas`).
+            refresh_compatible_schemas(world, &prior_component_schemas);
+
+            let committed = journal.entries().to_vec();
+            TransactionalActivationOutcome::Committed {
+                slot,
+                generation: proposed_generation,
+                committed_entries: committed,
+            }
+        }
+        super::InitOutcome::LayoutConflict(reason) => {
+            apply_journal_rollback(world, &mut journal, slot, proposed_generation);
+            restore_slot_after_rollback(world, slot, prior_loaded_at);
+            TransactionalActivationOutcome::RolledBack {
+                slot,
+                proposed_generation,
+                failure: ActivationFailure::LayoutConflict(reason),
+                rolled_back_entries: journal.entries().to_vec(),
+            }
+        }
+        super::InitOutcome::Failed => {
+            apply_journal_rollback(world, &mut journal, slot, proposed_generation);
+            restore_slot_after_rollback(world, slot, prior_loaded_at);
+            TransactionalActivationOutcome::RolledBack {
+                slot,
+                proposed_generation,
+                failure: ActivationFailure::InitFailed,
+                rolled_back_entries: journal.entries().to_vec(),
+            }
+        }
+        super::InitOutcome::VersionTooOld => {
+            apply_journal_rollback(world, &mut journal, slot, proposed_generation);
+            restore_slot_after_rollback(world, slot, prior_loaded_at);
+            TransactionalActivationOutcome::RolledBack {
+                slot,
+                proposed_generation,
+                failure: ActivationFailure::VersionTooOld,
+                rolled_back_entries: journal.entries().to_vec(),
+            }
+        }
+        super::InitOutcome::AbiMismatch => {
+            apply_journal_rollback(world, &mut journal, slot, proposed_generation);
+            restore_slot_after_rollback(world, slot, prior_loaded_at);
+            TransactionalActivationOutcome::RolledBack {
+                slot,
+                proposed_generation,
+                failure: ActivationFailure::AbiMismatch,
+                rolled_back_entries: journal.entries().to_vec(),
+            }
+        }
+        super::InitOutcome::UnknownStatus(s) => {
+            apply_journal_rollback(world, &mut journal, slot, proposed_generation);
+            restore_slot_after_rollback(world, slot, prior_loaded_at);
+            TransactionalActivationOutcome::RolledBack {
+                slot,
+                proposed_generation,
+                failure: ActivationFailure::UnknownInitStatus(s as u32),
+                rolled_back_entries: journal.entries().to_vec(),
+            }
+        }
+    }
+}
+
+/// Restore the slot's counter and `loaded_at` after a rolled-back
+/// activation. The candidate's systems remain registered with
+/// `at = proposed_generation` and are permanently stale because the
+/// counter still reads `prior_loaded_at`. They never run, so they cannot
+/// disturb the running build.
+fn restore_slot_after_rollback(world: &mut World, slot: usize, prior_loaded_at: u32) {
+    if let Some(mut loaded) = world.get_resource_mut::<LoadedPlugins>() {
+        if let Some(s) = loaded.0.get_mut(slot) {
+            s.generation
+                .store(prior_loaded_at, std::sync::atomic::Ordering::Relaxed);
+            s.loaded_at = prior_loaded_at;
+        }
+    }
+}
+
+/// Re-apply byte-compatible schema refresh for any component the
+/// candidate re-registered. The pre-init schema for every component
+/// the candidate touched is in `prior_component_schemas`; the post-init
+/// schema is in `PluginComponentSchemas`. We replace the post-init
+/// entry with a clone that keeps the pre-init per-field layout
+/// information, so downstream consumers (inspector, scene writer,
+/// scripting bindings) see the stable layout that all existing entity
+/// instances were stored under.
+///
+/// P3V-4 + the P3V-3 review required the comparison to be done before
+/// any rollback. The comparison now happens inside `register_component`
+/// / `register_resource` via `verify_same_layout`, which sets
+/// `HostCtx::layout_conflict_reason` and causes `init_plugin_gen` to
+/// return `InitOutcome::LayoutConflict(reason)`. This function only
+/// handles the SUCCESSFUL same-layout case.
+fn refresh_compatible_schemas(
+    world: &mut World,
+    prior_component_schemas: &std::collections::HashMap<
+        bevy::ecs::component::ComponentId,
+        super::PluginComponentInfo,
+    >,
+) {
+    let Some(mut schemas) = world.get_resource_mut::<super::PluginComponentSchemas>() else {
+        return;
+    };
+    for info in schemas.0.iter_mut() {
+        if let Some(prior) = prior_component_schemas.get(&info.id) {
+            // Keep the candidate's identity (type_path, display_name) but
+            // restore the prior's fields + size so the inspector and
+            // other consumers read the layout existing entity instances
+            // were stored under.
+            info.size = prior.size;
+            info.fields = prior.fields.clone();
+            info.default_value = prior.default_value.clone();
+        }
+    }
+}
+
+/// Load a freshly-staged plugin library through the transactional
+/// activation path. Used by Phase 3 `renzora_loose_plugins` to feed the
+/// stable staged library through the same dlopen/symbol/ABI checks as
+/// the existing `load_one`, but with the snapshot/diff/commit/rollback
+/// transaction layered on top.
+///
+/// **Every** opened library image is retained for the life of the
+/// process: committed ones go to `PluginSlot::_libraries`, and every
+/// failed one (open succeeded but symbol/scope/ABI/init/layout refused
+/// it) goes to `PluginSlot::failed_libraries`. Dropping a `Library`
+/// would free the loaded code and turn every function pointer the
+/// plugin already registered into a dangling reference, and
+/// `FreeLibrary` itself has deadlocked on this platform before. The
+/// invariant is therefore: once `Library::new` returns `Ok`, the image
+/// stays mapped. See `PluginSlot::_libraries` for the same rule in the
+/// non-transactional path.
+pub fn load_one_transactional(
+    world: &mut World,
+    path: &Path,
+    is_editor: bool,
+    linked: &[&str],
+    disabled: &[String],
+    identity: CanonicalId,
+) -> Result<TransactionalActivationOutcome, LoadOutcome> {
+    if is_proc_macro_dylib(path) {
+        return Err(LoadOutcome::NotAPlugin);
+    }
+    if !exports_plugin_init(path) {
+        return Err(LoadOutcome::NotAPlugin);
+    }
+
+    let slot = {
+        let mut loaded = world.get_resource_or_insert_with(LoadedPlugins::default);
+        loaded.slot_for(path)
+    };
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let id = stem.strip_prefix("lib").unwrap_or(&stem);
+    if disabled.iter().any(|d| d == id) {
+        return Err(LoadOutcome::Disabled);
+    }
+    if linked.contains(&id) {
+        return Err(LoadOutcome::Failed(
+            "statically linked into this binary".to_string(),
+        ));
+    }
+
+    let prior_loaded_at = {
+        let loaded = world.get_resource::<LoadedPlugins>().unwrap();
+        loaded.0[slot].loaded_at
+    };
+    let proposed_generation = prior_loaded_at.saturating_add(1);
+
+    let image = if is_editor {
+        match shadow_copy(path, proposed_generation) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(LoadOutcome::Failed(format!(
+                    "could not stage a copy to load: {e}"
+                )))
+            }
+        }
+    } else {
+        path.to_path_buf()
+    };
+
+    let library = match unsafe { Library::new(&image) } {
+        Ok(l) => l,
+        Err(e) => return Err(LoadOutcome::Failed(format!("could not open: {e}"))),
+    };
+    let library = std::mem::ManuallyDrop::new(library);
+
+    let init: Symbol<sys::ExtensionInit> = match unsafe { library.get(sys::INIT_SYMBOL.as_bytes()) } {
+        Ok(s) => s,
+        Err(_) => {
+            retain_failed_library(world, slot, &library);
+            return Err(LoadOutcome::NotAPlugin);
+        }
+    };
+    let init = *init;
+
+    let scope = match unsafe { library.get::<sys::ScopeEntry>(sys::SCOPE_SYMBOL.as_bytes()) } {
+        Ok(f) => unsafe { f() },
+        Err(_) => sys::PluginScope::Runtime,
+    };
+    if !scope.is_known() {
+        retain_failed_library(world, slot, &library);
+        return Err(LoadOutcome::Failed(format!(
+            "declares scope {} which this build does not have",
+            scope.0
+        )));
+    }
+    if scope == sys::PluginScope::Editor && !is_editor {
+        retain_failed_library(world, slot, &library);
+        return Err(LoadOutcome::WrongScope(scope));
+    }
+    if let Some(mut loaded) = world.get_resource_mut::<LoadedPlugins>() {
+        loaded.0[slot].scope = Some(scope);
+    }
+
+    let outcome = unsafe {
+        activate_with_transaction(
+            world,
+            slot,
+            &*library,
+            init,
+            proposed_generation,
+            identity,
+        )
+    };
+
+    match &outcome {
+        TransactionalActivationOutcome::Committed { slot, .. } => {
+            if let Some(mut loaded) = world.get_resource_mut::<LoadedPlugins>() {
+                // SAFETY: `library` is `ManuallyDrop::new`'d above; reading
+                // its inner pointer back moves the `Library` into the
+                // slot's never-freed pool. `_libraries` retains it for
+                // the life of the process.
+                let raw = unsafe { std::ptr::read(&*library) };
+                loaded.0[*slot]._libraries.push(std::mem::ManuallyDrop::new(raw));
+            }
+        }
+        TransactionalActivationOutcome::RolledBack { .. } => {
+            // P3V-3: a failed candidate's opened image MUST remain
+            // mapped for the process lifetime. Freeing it would call
+            // `FreeLibrary`, which has deadlocked on this platform, and
+            // any function pointer the candidate already registered
+            // (against the prior generation's GenGate) would point at
+            // freed memory. We move the `Library` into the slot's
+            // `failed_libraries` pool, where it sits in `ManuallyDrop`
+            // for the rest of the process.
+            retain_failed_library(world, slot, &library);
+        }
+    }
+
+    let _ = id;
+    match &outcome {
+        TransactionalActivationOutcome::Committed { .. } => Ok(outcome),
+        TransactionalActivationOutcome::RolledBack { failure, .. } => Err(match failure {
+            ActivationFailure::InitFailed => {
+                LoadOutcome::Failed("plugin init returned Failed".to_string())
+            }
+            ActivationFailure::VersionTooOld => LoadOutcome::VersionTooOld,
+            ActivationFailure::AbiMismatch => LoadOutcome::Failed(
+                "plugin was built against a differently-shaped interface table — \
+                 its version matches but a field was inserted, reordered or retyped. \
+                 Rebuild the plugin against this engine's `renzora_plugin`"
+                    .to_string(),
+            ),
+            ActivationFailure::UnknownInitStatus(s) => LoadOutcome::Failed(format!(
+                "plugin init returned status {s} which this engine does not know — \
+                 it was built against a newer ABI. Rebuild it against this engine's \
+                 `renzora_plugin`"
+            )),
+            ActivationFailure::LayoutConflict(why) => {
+                LoadOutcome::Failed(format!("layout conflict: {why}"))
+            }
+            ActivationFailure::OpenFailed(s) => LoadOutcome::Failed(s.clone()),
+        }),
+    }
+}
+
+/// Append a `ManuallyDrop`-wrapped copy of `library` to the slot's
+/// `failed_libraries` pool. See `PluginSlot::_libraries` for the
+/// never-dropped safety invariant.
+fn retain_failed_library(
+    world: &mut World,
+    slot: usize,
+    library: &std::mem::ManuallyDrop<libloading::Library>,
+) {
+    if let Some(mut loaded) = world.get_resource_mut::<LoadedPlugins>() {
+        let raw = unsafe { std::ptr::read(&**library) };
+        loaded.0[slot]
+            .failed_libraries
+            .push(std::mem::ManuallyDrop::new(raw));
     }
 }
 
@@ -633,7 +1519,41 @@ fn apply_reload_requests(world: &mut World) {
             debug!("[plugin] ignoring rebuilt {name} — disabled in Settings → Editor → Plugins");
             continue;
         }
-        match load_one(world, &path, is_editor) {
+        // Look the identity up from the slot stamped at initial
+        // load. The initial `load_dir` derives the canonical
+        // identity from the discovery-root-relative logical
+        // filename (`libfoo.so` and `foo.dll` at the same logical
+        // location produce the same `engine://foo`), then writes
+        // it on the slot; the reload reuses the SAME identity, so
+        // a Linux rebuild that lands as `libfoo.so` and a Windows
+        // rebuild that lands as `foo.dll` would still share the
+        // slot's `ComponentId`s. Falling back to deriving here
+        // would silently change identity and re-allocate every
+        // durable schema — which is the bug this branch fixes.
+        let stored_identity = world
+            .get_resource::<LoadedPlugins>()
+            .and_then(|l| {
+                l.0.iter()
+                    .find(|s| s.path.as_path() == path.as_path())
+                    .and_then(|s| s.directory_identity.clone())
+            });
+        let identity = match stored_identity {
+            Some(id) => id,
+            None => {
+                // The slot has no stored identity: either this is
+                // a plugin dropped in mid-session (the watcher
+                // path that runs in the editor), or it is a
+                // legacy `load_one` call. Derive a fresh one
+                // using the legacy basename fallback — the slot
+                // gets stamped next load_dir pass.
+                warn!(
+                    "[plugin] reload of {name} has no stored identity; \
+                     deriving a fresh one (initial load bypassed load_dir?)"
+                );
+                canonical_id_for_legacy_path(&path)
+            }
+        };
+        match load_one(world, &path, identity, is_editor) {
             LoadOutcome::Loaded => {
                 let generation = world
                     .get_resource::<LoadedPlugins>()
@@ -681,13 +1601,34 @@ fn apply_reload_requests(world: &mut World) {
 /// that publishes to crates.io from gaining a dependency to stat eight files.
 #[derive(Resource)]
 pub struct PluginWatcher {
-    dir: PathBuf,
-    /// Last-seen `(mtime, size)` per file.
-    seen: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64)>,
+    /// Directory the watcher polls. `pub` so test harnesses can
+    /// override the `RenzoraPluginHostPlugin`-chosen default.
+    pub dir: PathBuf,
+    /// Last-seen `(mtime, size)` per file. `pub` for tests.
+    pub seen: std::collections::HashMap<PathBuf, (std::time::SystemTime, u64)>,
     /// Files whose stamp moved on the previous poll, waiting to stop moving.
-    settling: std::collections::HashSet<PathBuf>,
-    /// Seconds until the next poll.
-    countdown: f32,
+    /// `pub` for tests.
+    pub settling: std::collections::HashSet<PathBuf>,
+    /// Seconds until the next poll. `pub` for tests; production sets
+    /// it to `POLL_INTERVAL` so the next `poll_plugin_dir` tick fires.
+    pub countdown: f32,
+}
+
+impl PluginWatcher {
+    /// Test-only constructor that builds a watcher pointing at `dir`
+    /// with an initial poll cycle primed so the next `Last` schedule
+    /// run will stat the directory. `countdown` is initialised to
+    /// `0.0` so the watcher fires immediately rather than waiting
+    /// `POLL_INTERVAL` seconds after install.
+    pub fn for_tests(dir: PathBuf) -> Self {
+        let seen = stamp_dir(&dir);
+        Self {
+            dir,
+            seen,
+            settling: Default::default(),
+            countdown: 0.0,
+        }
+    }
 }
 
 /// How often to stat the plugin directory. Two polls are needed to settle a file,
@@ -885,6 +1826,14 @@ impl Plugin for RenzoraPluginHostPlugin {
             // the artifact here — where the watcher above then picks it up. Only
             // this ordering works, so the two are installed together.
             super::dev::install(app, dir.clone());
+
+            // Phase 3 loose-plugin host is installed by the editor / runtime
+            // binary directly (see `crates/renzora_editor_app/src/main.rs` and
+            // `src/main.rs`). Installing it here would create a cyclic
+            // dependency: this crate depends on `renzora_loose_plugins`, which
+            // depends on this crate's `host` feature. The install order
+            // (RenzoraPluginHostPlugin first, then LoosePluginHost) is
+            // documented at both call sites.
         }
 
         // Linked-in plugins first, and their names then suppress any loose copy
@@ -892,7 +1841,15 @@ impl Plugin for RenzoraPluginHostPlugin {
         // both is considerably worse than loading either.
         for plugin in &self.statics {
             let id = plugin.id;
-            match load_static(app.world_mut(), plugin, self.is_editor) {
+            // A linked plugin's canonical identity is supplied by
+            // the aggregator. The aggregator's own per-plugin
+            // registration is the durable source here.
+            let id_str = format!("linked://{id}");
+            let identity = CanonicalId::parse(&id_str).unwrap_or_else(|_| {
+                CanonicalId::from_rooted(renzora_identity::RootKind::Engine, &id_str)
+                    .expect("linked plugin id is well-formed")
+            });
+            match load_static(app.world_mut(), plugin, identity, self.is_editor) {
                 LoadOutcome::Loaded => info!("[plugin] linked {id}"),
                 LoadOutcome::WrongScope(scope) => {
                     debug!("[plugin] skipping linked {id} — {scope:?} scope")
@@ -913,7 +1870,7 @@ impl Plugin for RenzoraPluginHostPlugin {
 
         let linked: Vec<&str> = self.statics.iter().map(|p| p.id).collect();
         for (path, outcome) in
-            load_dir(app.world_mut(), &dir, self.is_editor, &linked, &self.disabled)
+            load_dir(app.world_mut(), &dir, &dir, self.is_editor, &linked, &self.disabled)
         {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             match outcome {

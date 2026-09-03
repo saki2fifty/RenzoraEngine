@@ -410,6 +410,14 @@ struct EditorPrefFile {
     /// skipping.
     #[serde(default)]
     tutorial_chapters: Vec<String>,
+    /// Loose-plugin canonical ids the user has consented to compile (Phase 3).
+    /// A loose plugin's source is compiled through `BuildService` only if its
+    /// canonical id is in this set; absent consent, the watcher records the
+    /// row as `AwaitingTrustConsent` and the host will not submit a build.
+    /// Persisted so consent survives editor restart — without it, the user
+    /// would have to re-grant every trusted plugin on every launch.
+    #[serde(default)]
+    trusted_loose_plugins: Vec<String>,
 }
 
 fn default_language() -> String {
@@ -446,6 +454,77 @@ fn default_true() -> bool {
     true
 }
 
+/// Plugins the user has consented to compile. Phase 3 loose plugins only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_trusted_loose_plugins() -> Vec<String> {
+    editor_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| toml::from_str::<EditorPrefFile>(&t).ok())
+        .map(|f| f.trusted_loose_plugins)
+        .unwrap_or_default()
+}
+
+/// F3-10: load the trusted-plugin list from an explicit path. Production
+/// wrapper still calls the real `editor_pref_path()`; tests pass a
+/// tempdir-backed path so they do not mutate process-global HOME and
+/// run safely under Cargo's default parallel test runner.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_trusted_loose_plugins_at(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str::<EditorPrefFile>(&t).ok())
+        .map(|f| f.trusted_loose_plugins)
+        .unwrap_or_default()
+}
+
+/// Persist the trusted-plugin list (read-modify-write, so other prefs survive).
+/// Sorted and de-duplicated on the way in — same rationale as
+/// `save_disabled_plugins`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_trusted_loose_plugins(trusted: &[String]) -> std::io::Result<()> {
+    let Some(path) = editor_pref_path() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not resolve home directory for editor preferences",
+        ));
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut prefs = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| toml::from_str::<EditorPrefFile>(&t).ok())
+        .unwrap_or_default();
+    let mut list: Vec<String> = trusted.to_vec();
+    list.sort();
+    list.dedup();
+    prefs.trusted_loose_plugins = list;
+    let text = toml::to_string_pretty(&prefs).map_err(std::io::Error::other)?;
+    std::fs::write(&path, text)
+}
+
+/// F3-10: persist the trusted-plugin list at an explicit path. See
+/// [`load_trusted_loose_plugins_at`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_trusted_loose_plugins_at(
+    path: &std::path::Path,
+    trusted: &[String],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut prefs = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str::<EditorPrefFile>(&t).ok())
+        .unwrap_or_default();
+    let mut list: Vec<String> = trusted.to_vec();
+    list.sort();
+    list.dedup();
+    prefs.trusted_loose_plugins = list;
+    let text = toml::to_string_pretty(&prefs).map_err(std::io::Error::other)?;
+    std::fs::write(path, text)
+}
+
 impl Default for EditorPrefFile {
     fn default() -> Self {
         Self {
@@ -473,6 +552,7 @@ impl Default for EditorPrefFile {
             skipped_update: String::new(),
             tutorial_completed: false,
             tutorial_chapters: Vec::new(),
+            trusted_loose_plugins: Vec::new(),
         }
     }
 }
@@ -982,6 +1062,17 @@ pub fn load_disabled_plugins() -> Vec<String> {
     }
 }
 
+/// F3-10: load the disabled-plugin list from an explicit path. See
+/// [`load_trusted_loose_plugins_at`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_disabled_plugins_at(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str::<EditorPrefFile>(&t).ok())
+        .map(|f| f.disabled_plugins)
+        .unwrap_or_default()
+}
+
 /// Persist the disabled-plugin list (read-modify-write, so other prefs survive).
 ///
 /// Sorted and de-duplicated on the way in. Not tidiness: this file is
@@ -1009,6 +1100,27 @@ pub fn save_disabled_plugins(disabled: &[String]) -> std::io::Result<()> {
     prefs.disabled_plugins = list;
     let text = toml::to_string_pretty(&prefs).map_err(std::io::Error::other)?;
     std::fs::write(&path, text)
+}
+
+/// F3-10: persist the disabled-plugin list at an explicit path.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_disabled_plugins_at(
+    path: &std::path::Path,
+    disabled: &[String],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut prefs = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str::<EditorPrefFile>(&t).ok())
+        .unwrap_or_default();
+    let mut list: Vec<String> = disabled.to_vec();
+    list.sort();
+    list.dedup();
+    prefs.disabled_plugins = list;
+    let text = toml::to_string_pretty(&prefs).map_err(std::io::Error::other)?;
+    std::fs::write(path, text)
 }
 
 /// Load the persisted Play-button target (default `false` = in-viewport play).

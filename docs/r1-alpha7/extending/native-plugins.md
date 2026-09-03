@@ -288,3 +288,23 @@ That leaves the engine's own crates as the reference, and they are a good one: a
 - `crates/renzora_rust_script` is the same loading mechanism used a second way, if you want to see the host side.
 
 Start from the skeleton at the top of this page rather than from a copied example — it is four lines plus a `Cargo.toml`, and `renzora add <name>` scaffolds it.
+
+## Loose Tier-1 plugins (Phase 3)
+
+Loose Tier-1 plugins share the **same discovery root** as native
+plugins (`<exe-dir>/../../plugins`, `<cwd>/plugins`, or
+`RENZORA_PLUGIN_SRC`) but are NOT compiled as a Rust workspace crate.
+A loose Tier-1 plugin is a single `.rs` file in that root, compiled
+against the small `renzora_plugin` C ABI by the editor at runtime.
+See [plugins.md](plugins.md#loose-single-file-plugins-phase-3) for
+the authoring contract.
+
+Loose Tier-1 plugins are independent of native plugins:
+
+- A directory under `plugins/` with a `Cargo.toml` keeps the existing
+  native-plugin build path.
+- A loose `.rs` file under `plugins/` follows the Phase 3 loose
+  Tier-1 plugin path.
+
+The two do not interact. A loose file does NOT trigger the native
+plugin SDK unpack or full-Bevy toolchain probe.

@@ -38,6 +38,10 @@ pub enum PluginKind {
     /// A `cdylib` that links no Bevy and reaches the engine through a function
     /// table. Runs in a shipped game.
     Standalone,
+    /// A single `.rs` file under `plugins/<name>.rs`, compiled through the
+    /// Phase 2 cached compiler service and activated through the
+    /// `renzora_loose_plugins` host. Phase 3.
+    LooseTier1,
 }
 
 impl PluginKind {
@@ -45,6 +49,7 @@ impl PluginKind {
         match self {
             PluginKind::Native => "Native",
             PluginKind::Standalone => "Standalone",
+            PluginKind::LooseTier1 => "Loose (Tier 1)",
         }
     }
 }

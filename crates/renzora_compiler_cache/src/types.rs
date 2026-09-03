@@ -287,6 +287,7 @@ impl BuildRequest {
     }
 }
 
+
 /// A successful build's result. The artifact is immutable on disk under
 /// `<cache_root>/<id>/gen-<N>/lib<id>.<ext>`.
 #[derive(Clone, Debug)]
@@ -356,10 +357,14 @@ pub enum BuildOutcome {
         fingerprint: BuildFingerprint,
         /// Published generation number.
         generation: PublishedGeneration,
+        /// Absolute path to the immutable artifact on disk under the
+        /// service's `cache_root`. Phase 3 consumes this directly
+        /// instead of guessing the cache layout.
+        immutable_artifact_path: PathBuf,
         /// R6-5: packages Cargo actually compiled for this build. The
         /// package list is direct, machine-readable evidence of which
         /// crates were rebuilt vs reused.
-        compiled_packages: Vec<String>,
+        compiled_packages: Vec<PathBuf>,
     },
     /// A previously-published generation matched the request fingerprint.
     /// Caller should call `BuildService::load_published(id, &fingerprint)`.
@@ -370,9 +375,12 @@ pub enum BuildOutcome {
         fingerprint: BuildFingerprint,
         /// Generation that matched.
         generation: PublishedGeneration,
+        /// Absolute path to the immutable artifact on disk. Phase 3
+        /// consumes this directly instead of guessing the cache layout.
+        immutable_artifact_path: PathBuf,
         /// R6-5: empty for cache hits (no compilation occurred this
         /// build).
-        compiled_packages: Vec<String>,
+        compiled_packages: Vec<PathBuf>,
     },
     /// The request was superseded by a newer revision before it could
     /// start. Caller may re-submit at the newer revision.

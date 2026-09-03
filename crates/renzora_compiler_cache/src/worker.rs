@@ -59,7 +59,7 @@ pub struct AttemptCompletion {
     pub artifact_path: Option<PathBuf>,
     #[allow(dead_code)]
     pub stderr: Vec<String>,
-    pub compiled_packages: Vec<String>,
+    pub compiled_packages: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +231,7 @@ pub fn preview_resolve(
             }
         },
         &choices.capabilities,
+        id,
     );
 
     let effective = resolve_build_config(
@@ -304,7 +305,7 @@ fn send_completion(
     generation: Option<PublishedGeneration>,
     artifact_path: Option<PathBuf>,
     stderr: Vec<String>,
-    compiled_packages: Vec<String>,
+    compiled_packages: Vec<PathBuf>,
 ) {
     let _ = tx.send(AttemptCompletion {
         request_id,

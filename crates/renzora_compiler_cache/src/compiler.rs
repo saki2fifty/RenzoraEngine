@@ -64,6 +64,16 @@ pub struct RenderedManifests {
     /// in the cache key and the staged-artifact path, but the Cargo
     /// package is shared.
     pub package_name: String,
+    /// Identity-derived library crate name. This is the `[lib] name` in
+    /// the per-package `Cargo.toml`, the prefix that `module_path!()`
+    /// emits at the start of every plugin-supplied type, and the
+    /// filename cargo produces for the produced artefact. Derived from
+    /// the canonical identity's BLAKE3 so it is the SAME across every
+    /// partition (target, profile, capabilities, toolchain, ABI,
+    /// compiler-service schema) for a given plugin — and so the
+    /// `module_path!()`-derived plugin-local type paths are partition-
+    /// independent. A valid Rust identifier; no truncation.
+    pub lib_name: String,
     /// Bytes of the workspace `Cargo.toml`. Includes the (single)
     /// `resolver = "2"` entry, the `[profile.<name>]` block, and the
     /// `[workspace.dependencies] renzora_plugin = { path = "..." }` line.
@@ -269,7 +279,7 @@ pub enum TransactionResult {
     CacheHit {
         fingerprint: BuildFingerprint,
         generation: PublishedGeneration,
-        compiled_packages: Vec<String>,
+        compiled_packages: Vec<PathBuf>,
     },
     /// A fresh build succeeded. `staged_artifact` carries the exact
     /// path the transaction wrote the compiled binary to. The caller
@@ -279,7 +289,7 @@ pub enum TransactionResult {
     Published {
         fingerprint: BuildFingerprint,
         generation_placeholder: PublishedGeneration,
-        compiled_packages: Vec<String>,
+        compiled_packages: Vec<PathBuf>,
         json_events: Vec<String>,
         stderr: Vec<String>,
         staged_artifact: PathBuf,
@@ -302,7 +312,7 @@ pub struct CompileOutcome {
     pub kind: CompileKind,
     pub stderr: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
-    pub compiled_packages: Vec<String>,
+    pub compiled_packages: Vec<PathBuf>,
     pub json_events: Vec<String>,
 }
 
@@ -410,6 +420,13 @@ impl Tier1Compiler {
                 json_events: Vec::new(),
             };
         }
+        // Step 3b: write the user's source verbatim to the wrapper
+        // package's `src/lib.rs`. The compiler does NOT transform
+        // user source — `crate::` references, crate-level attributes
+        // and macros must work as if the file had been written by the
+        // author. Durable identity is constructed later at the host's
+        // registration boundary from the canonical identity; see
+        // `renzora_plugin::host::durable_type_path`.
         if let Err(e) = write_partition_source(
             &generated_root,
             &req.rendered.package_name,
@@ -557,44 +574,53 @@ impl Tier1Compiler {
                 let (compiled, json_events) = parse_cargo_json_messages(&rec.stdout);
                 match rec.exit_status {
                     Some(0) => {
+                        // Locate the actual artefact using the cargo JSON
+                        // `filenames` field — the cargo-emitted, target-
+                        // relative paths are authoritative, so the
+                        // per-identity `[lib] name` never has to be
+                        // guessed. The selection is platform-aware
+                        // (`lib<name>.so` / `lib<name>.dylib` /
+                        // `<name>.dll`) so the same code path handles
+                        // Linux, macOS, and Windows targets. A miss
+                        // produces a diagnostic naming the target
+                        // triple, the expected filename, and the full
+                        // cargo-emitted filename list.
                         let actual_artifact = locate_artifact(
-                            &entry.target_dir,
-                            &req.rendered.package_name,
+                            &compiled,
+                            &req.rendered.lib_name,
                             &req.artifact_kind,
                             &effective.target_triple,
-                            effective.profile,
                         );
-                        if let Some(real_path) = actual_artifact {
-                            if let Err(e) = copy_to_staged(&real_path, &req.staged_artifact) {
-                                return TransactionResult::Transient {
-                                    stderr: vec![format!("stage artifact: {e}")],
-                                    diagnostics: vec![Diagnostic::error(format!(
-                                        "stage artifact: {e}"
-                                    ))],
+                        let real_path = match actual_artifact {
+                            Ok(p) => p,
+                            Err(miss) => {
+                                return TransactionResult::CompileError {
+                                    stderr: vec![miss.to_string()],
+                                    diagnostics: vec![Diagnostic::error(miss.to_string())],
                                     json_events,
                                 };
                             }
-                            // _partition_guard drops here, releasing the
-                            // partition lock.
-                            drop(_partition_guard);
-                            return TransactionResult::Published {
-                                fingerprint,
-                                generation_placeholder: PublishedGeneration(0),
-                                compiled_packages: compiled,
-                                json_events,
-                                stderr,
-                                staged_artifact: req.staged_artifact.clone(),
-                            };
-                        } else {
+                        };
+                        if let Err(e) = copy_to_staged(&real_path, &req.staged_artifact) {
                             return TransactionResult::Transient {
-                                stderr,
+                                stderr: vec![format!("stage artifact: {e}")],
                                 diagnostics: vec![Diagnostic::error(format!(
-                                    "cargo exit 0 but artifact not found under {}",
-                                    entry.target_dir.display()
+                                    "stage artifact: {e}"
                                 ))],
                                 json_events,
                             };
                         }
+                        // _partition_guard drops here, releasing the
+                        // partition lock.
+                        drop(_partition_guard);
+                        return TransactionResult::Published {
+                            fingerprint,
+                            generation_placeholder: PublishedGeneration(0),
+                            compiled_packages: compiled,
+                            json_events,
+                            stderr,
+                            staged_artifact: req.staged_artifact.clone(),
+                        };
                     }
                     Some(_code) => {
                         let diagnostics = parse_cargo_diagnostics(&stderr);
@@ -736,8 +762,10 @@ pub fn render_workspace_and_package(
     panic: PanicMode,
     crate_type: CrateTypeName,
     capabilities: &BTreeSet<String>,
+    identity: &CanonicalId,
 ) -> RenderedManifests {
     let package_name = stable_partition_package_name(partition_key);
+    let lib_name = lib_name_for_identity(identity);
     let lib_ext = crate_type.as_cargo_str();
     let cargo_features: Vec<&str> = capabilities.iter().map(|s| s.as_str()).collect();
 
@@ -772,19 +800,36 @@ pub fn render_workspace_and_package(
 
     // ONE package Cargo.toml: SDK features as FIELDS of the
     // renzora_plugin dependency, never as standalone entries.
+    //
+    // The workspace dep declares `default-features = false`. The
+    // `renzora_plugin` crate requires `std` for a guest plugin (the
+    // `add!` macro, the Bevy integration glue, `libm` fallback when
+    // `std` is off). Always enable `std` on the per-package side; the
+    // empty-features path previously relied on `workspace = true`
+    // picking up `default-features = false` and produced plugins that
+    // could not compile.
     let pkg_dep = if cargo_features.is_empty() {
-        "renzora_plugin = { workspace = true }".to_string()
+        "renzora_plugin = { workspace = true, default-features = false, features = [\"std\"] }"
+            .to_string()
     } else {
-        let feats_csv = cargo_features
-            .iter()
-            .map(|f| format!("\"{}\"", f))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut feats: Vec<String> = vec!["\"std\"".to_string()];
+        for f in cargo_features {
+            feats.push(format!("\"{}\"", f));
+        }
+        let feats_csv = feats.join(", ");
         format!(
-            "renzora_plugin = {{ workspace = true, default-features = false, features = [{feats}] }}",
-            feats = feats_csv,
+            "renzora_plugin = {{ workspace = true, default-features = false, features = [{feats_csv}] }}",
         )
     };
+    // The `[lib] name` is the per-canonical-identity crate name.
+    // It is what `module_path!()` returns at the start of every
+    // plugin-supplied type, and what cargo uses to name the produced
+    // artefact. It is derived from the canonical identity (NOT from
+    // `partition_key`) so the same canonical plugin produces the
+    // SAME prefix in every partition — the saved-scene durability
+    // invariant. The Cargo package name above stays per-partition
+    // so workspace membership does not grow when a new identity
+    // appears.
     let package_toml = format!(
         "[package]\n\
          name = \"{pkg}\"\n\
@@ -792,21 +837,43 @@ pub fn render_workspace_and_package(
          edition = \"2021\"\n\
          \n\
          [lib]\n\
+         name = \"{lib_name}\"\n\
          crate-type = [\"{lib_ext}\"]\n\
          \n\
          [dependencies]\n\
          {pkg_dep}\n",
         pkg = package_name,
+        lib_name = lib_name,
         lib_ext = lib_ext,
         pkg_dep = pkg_dep,
     );
 
     RenderedManifests {
         package_name,
+        lib_name,
         workspace_toml: workspace_toml.into_bytes(),
         package_toml: package_toml.into_bytes(),
         members,
     }
+}
+
+/// Compute the per-canonical-identity `[lib] name` used in the
+/// generated wrapper's `Cargo.toml`. The output is a valid Rust
+/// identifier: `renzora_plugin_<full-blake3>`. The full 256-bit
+/// BLAKE3 (rendered as 64 hex characters) is used so collisions
+/// with other identities have a cryptographic likelihood. The
+/// identifier does not depend on `PartitionKey`, so a plugin
+/// compiled for one target / profile / capability set
+/// produces the SAME `module_path!()` prefix as the same plugin
+/// compiled for another.
+pub fn lib_name_for_identity(identity: &CanonicalId) -> String {
+    use std::fmt::Write as _;
+    let canonical = identity.to_scheme_path();
+    let mut hex = String::with_capacity(64);
+    for b in blake3::hash(canonical.as_bytes()).as_bytes() {
+        let _ = write!(hex, "{b:02x}");
+    }
+    format!("renzora_plugin_{hex}")
 }
 
 /// Write the canonical workspace + package `Cargo.toml` bytes to disk.
@@ -932,40 +999,250 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-/// Locate the actual compiled artifact under `<target_dir>/<profile>/`
-/// or `<target_dir>/<target_triple>/<profile>/`.
-pub fn locate_artifact(
-    target_dir: &Path,
-    name: &str,
-    kind: &ArtifactKind,
-    target_triple: &str,
-    profile: ProfileName,
-) -> Option<PathBuf> {
-    let profile_dir_name = profile.as_str();
-    let dist_dir = target_dir.join(profile_dir_name);
-    let target_dist_dir = target_dir.join(target_triple).join(profile_dir_name);
-    let candidates: &[PathBuf] = if target_dist_dir.exists() {
-        &[target_dist_dir, dist_dir]
-    } else {
-        &[dist_dir, target_dist_dir]
-    };
+/// Platform-specific filename conventions for Rust cdylib / staticlib
+/// outputs. The cross-platform selection table below is the
+/// authoritative reference — see also
+/// `docs/r1-alpha7/extending/standalone-plugins.md` for the user-
+/// facing description.
+///
+/// Dynamic libraries:
+///
+/// | target triple         | filename         |
+/// | ---                   | ---              |
+/// | `*-linux-*`           | `lib<name>.so`   |
+/// | `*-apple-darwin`      | `lib<name>.dylib`|
+/// | `*-windows-msvc`      | `<name>.dll`     |
+/// | `*-windows-gnu`       | `<name>.dll`     |
+///
+/// Static libraries:
+///
+/// | target triple         | filename         |
+/// | ---                   | ---              |
+/// | `*-linux-*`           | `lib<name>.a`    |
+/// | `*-apple-darwin`      | `lib<name>.a`    |
+/// | `*-windows-msvc`      | `<name>.lib`     |
+/// | `*-windows-gnu`       | `lib<name>.a`    |  (rustc's GNU target emits the Unix `lib` prefix)
+///
+/// Distractor filenames we MUST NOT pick:
+///
+///   - the SDK's own cdylib (`librenzora_plugin.so`,
+///     `librenzora_plugin.dylib`, `renzora_plugin.dll`);
+///   - Windows MSVC import libraries (`<name>.dll.lib`);
+///   - Windows export sidecars (`<name>.exp`, `<name>.pdb`);
+///   - rustc intermediates (`*.d`, `*.rlib`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactPlatform {
+    LinuxGnu,
+    LinuxMusl,
+    MacOS,
+    WindowsMsvc,
+    WindowsGnu,
+    /// Anything else (e.g. wasm32, illumos). Used as a last-resort
+    /// branch that picks the most-likely correct filename for the
+    /// target's documented Rust output.
+    Other,
+}
 
-    let exts: &[&str] = match kind {
-        ArtifactKind::StaticLib | ArtifactKind::Tier1Plugin | ArtifactKind::Tier1Script => {
-            &["so", "dll", "dylib", "a", "lib"]
-        }
-        ArtifactKind::DynamicLib { .. } => &["so", "dll", "dylib"],
-    };
-
-    for dir in candidates {
-        for ext in exts {
-            let candidate = dir.join(format!("lib{name}.{ext}"));
-            if candidate.exists() {
-                return Some(candidate);
-            }
+impl ArtifactPlatform {
+    /// Derive the platform from a target triple. The token right
+    /// before the vendor (e.g. `linux-gnu`, `apple-darwin`,
+    /// `windows-msvc`) drives the choice.
+    pub fn from_target_triple(target: &str) -> Self {
+        if target.contains("apple-darwin") {
+            ArtifactPlatform::MacOS
+        } else if target.contains("windows-msvc") {
+            ArtifactPlatform::WindowsMsvc
+        } else if target.contains("windows-gnu") {
+            ArtifactPlatform::WindowsGnu
+        } else if target.contains("linux-gnu") {
+            ArtifactPlatform::LinuxGnu
+        } else if target.contains("linux-musl") {
+            ArtifactPlatform::LinuxMusl
+        } else {
+            ArtifactPlatform::Other
         }
     }
-    None
+
+    /// Expected on-disk filename for the supplied `kind` and
+    /// `lib_name`. Used to drive the artefact selection. Returns
+    /// `None` for combinations the platform does not produce (only
+    /// happens for the `Other` fallback).
+    pub fn expected_filename(&self, kind: &ArtifactKind, lib_name: &str) -> Option<String> {
+        match kind {
+            ArtifactKind::StaticLib => match self {
+                ArtifactPlatform::LinuxGnu
+                | ArtifactPlatform::LinuxMusl
+                | ArtifactPlatform::MacOS
+                | ArtifactPlatform::WindowsGnu => Some(format!("lib{lib_name}.a")),
+                ArtifactPlatform::WindowsMsvc => Some(format!("{lib_name}.lib")),
+                ArtifactPlatform::Other => None,
+            },
+            ArtifactKind::DynamicLib { .. }
+            | ArtifactKind::Tier1Plugin
+            | ArtifactKind::Tier1Script => match self {
+                ArtifactPlatform::LinuxGnu | ArtifactPlatform::LinuxMusl => {
+                    Some(format!("lib{lib_name}.so"))
+                }
+                ArtifactPlatform::MacOS => Some(format!("lib{lib_name}.dylib")),
+                ArtifactPlatform::WindowsMsvc | ArtifactPlatform::WindowsGnu => {
+                    Some(format!("{lib_name}.dll"))
+                }
+                ArtifactPlatform::Other => None,
+            },
+        }
+    }
+
+    /// Suffixes the cargo `filenames` array might list for this
+    /// kind and platform. Used by the distractor / fallback scan:
+    /// we ignore any entry whose extension is not in this set, so
+    /// `*.pdb`, `*.exp`, `*.d`, `*.dll.lib`, `*.rlib` and
+    /// `*.rmeta` never reach the equality check.
+    pub fn allowed_extensions(&self, kind: &ArtifactKind) -> &'static [&'static str] {
+        match kind {
+            ArtifactKind::StaticLib => match self {
+                ArtifactPlatform::WindowsMsvc => &["lib"],
+                _ => &["a"],
+            },
+            ArtifactKind::DynamicLib { .. }
+            | ArtifactKind::Tier1Plugin
+            | ArtifactKind::Tier1Script => match self {
+                ArtifactPlatform::MacOS => &["dylib"],
+                ArtifactPlatform::LinuxGnu | ArtifactPlatform::LinuxMusl => &["so"],
+                ArtifactPlatform::WindowsMsvc | ArtifactPlatform::WindowsGnu => &["dll"],
+                ArtifactPlatform::Other => &["so", "dll", "dylib", "a", "lib"],
+            },
+        }
+    }
+}
+
+/// Diagnostic returned to the caller when no candidate matched.
+/// The full Cargo-emitted filename list is included so a human
+/// (or a higher-level caller) can see WHY the matcher picked
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocateArtifactMiss {
+    pub lib_name: String,
+    pub target_triple: String,
+    pub platform: ArtifactPlatform,
+    pub kind: ArtifactKind,
+    pub expected_filename: Option<String>,
+    /// Boxed so the struct stays small (the miss is otherwise
+    /// bounded by Cargo's full filenames array, which can be
+    /// hundreds of entries on a real build).
+    pub filenames: Box<Vec<String>>,
+}
+
+impl std::fmt::Display for LocateArtifactMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no cargo artifact matches lib_name=`{}` for target triple `{}` \
+             (platform={:?}, kind={:?}); expected `{}`; cargo emitted: [{}]",
+            self.lib_name,
+            self.target_triple,
+            self.platform,
+            self.kind,
+            self.expected_filename.as_deref().unwrap_or("<no expected filename>"),
+            self.filenames.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for LocateArtifactMiss {}
+
+/// Locate the actual compiled artifact under `<target_dir>/<profile>/`
+/// or `<target_dir>/<target_triple>/<profile>/`.
+///
+/// Selection is platform-aware: the on-disk filename convention is
+/// derived from `target_triple`. The wrapper's cdylib is
+/// `lib<lib_name>.so` / `lib<lib_name>.dylib` / `<lib_name>.dll`
+/// depending on the target; this function picks the one matching
+/// the platform. Selection is exact — `lib_name` is matched against
+/// the wrapper's own `[lib] name` (per-canonical-identity), so the
+/// SDK's `librenzora_plugin.so` cannot be picked when `lib_name` is
+/// anything else.
+///
+/// Distractors ignored:
+///
+///   - the SDK's `renzora_plugin` artifacts (cdylib or import lib);
+///   - Windows MSVC `<name>.dll.lib` import libraries (these are
+///     paired with `<name>.dll` but are themselves link inputs, not
+///     load targets);
+///   - Windows `<name>.exp` export tables and `<name>.pdb` debug
+///     symbols;
+///   - rustc intermediates (`*.d`, `*.rlib`, `*.rmeta`);
+///   - another identity's cdylib (`lib_other_<hash>.so` etc.).
+///
+/// On a miss the function returns `Err(LocateArtifactMiss)` so the
+/// caller can surface a diagnostic that names the platform, the
+/// expected filename, and the full Cargo-emitted list.
+pub fn locate_artifact(
+    cargo_filenames: &[PathBuf],
+    lib_name: &str,
+    kind: &ArtifactKind,
+    target_triple: &str,
+) -> Result<PathBuf, LocateArtifactMiss> {
+    let platform = ArtifactPlatform::from_target_triple(target_triple);
+    let expected = platform.expected_filename(kind, lib_name);
+    let allowed_exts = platform.allowed_extensions(kind);
+    let filename_list: Vec<String> = cargo_filenames
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+        .collect();
+    let candidates: Vec<&PathBuf> = cargo_filenames
+        .iter()
+        .filter(|p| {
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                return false;
+            };
+            // The SDK's own artifact must NEVER be picked. Both the
+            // `lib<lib_name>.so` form and the no-prefix
+            // `<lib_name>.dll` form are excluded.
+            if name.starts_with("librenzora_plugin.") || name.starts_with("renzora_plugin.") {
+                return false;
+            }
+            // Extension gate: only the platform-allowed set.
+            let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+            if !allowed_exts.contains(&ext) {
+                return false;
+            }
+            // The Windows MSVC import-library sidecar
+            // `<name>.dll.lib` ends in `lib` (allowed for static
+            // libs) but its stem contains `<name>.dll`, not
+            // `<name>`. Reject anything where the stem is itself a
+            // library with an extension.
+            if name.ends_with(".dll.lib") {
+                return false;
+            }
+            true
+        })
+        .collect();
+    // Exact-match primary path: pick the candidate whose file name
+    // equals the platform-expected name verbatim. This is the
+    // production-typical case.
+    if let Some(expected_name) = &expected {
+        if let Some(p) = candidates
+            .iter()
+            .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(expected_name.as_str()))
+        {
+            return Ok((*p).clone());
+        }
+    }
+    // No exact match. The platform's strict extension filter has
+    // already removed the wrong-platform artefacts; the only
+    // remaining candidates are target-appropriate and don't carry
+    // the expected name. Report a miss so the operator can see
+    // the platform-expected filename and the actual Cargo-emitted
+    // list rather than silently picking an oddly-named but
+    // extension-compatible artifact.
+    Err(LocateArtifactMiss {
+        lib_name: lib_name.to_string(),
+        target_triple: target_triple.to_string(),
+        platform,
+        kind: *kind,
+        expected_filename: expected,
+        filenames: Box::new(filename_list),
+    })
 }
 
 fn copy_to_staged(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -1058,7 +1335,16 @@ fn parse_cargo_diagnostics(stderr: &[String]) -> Vec<Diagnostic> {
 /// Extracts `compiler-artifact` events with `fresh: false` (cargo
 /// actually recompiled the package). Cached artefacts re-emitted as
 /// `compiler-artifact` with `fresh: true` are SKIPPED.
-pub fn parse_cargo_json_messages(stdout_lines: &[String]) -> (Vec<String>, Vec<String>) {
+///
+/// Returns a list of produced artefact file paths (read from
+/// `compiler-artifact.filenames` — the cargo-emitted, target-
+/// relative `filenames` field, which is the authoritative source
+/// for what the build produced). The list is the union across all
+/// non-cached artefacts; a `compiler-artifact.fresh: true` is
+/// skipped. The caller locates the freshly-built plugin cdylib
+/// from this list rather than guessing a filename derived from
+/// the package or lib name.
+pub fn parse_cargo_json_messages(stdout_lines: &[String]) -> (Vec<PathBuf>, Vec<String>) {
     let mut compiled = Vec::new();
     let mut events = Vec::new();
     for line in stdout_lines {
@@ -1074,13 +1360,14 @@ pub fn parse_cargo_json_messages(stdout_lines: &[String]) -> (Vec<String>, Vec<S
         let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
         let fresh = v.get("fresh").and_then(|f| f.as_bool()).unwrap_or(false);
         if reason == "compiler-artifact" && !fresh {
-            let name = v
-                .get("target")
-                .and_then(|t| t.get("name"))
-                .and_then(|n| n.as_str());
-            if let Some(name) = name {
-                if !compiled.iter().any(|c| c == name) {
-                    compiled.push(name.to_string());
+            if let Some(filenames) = v.get("filenames").and_then(|f| f.as_array()) {
+                for f in filenames {
+                    if let Some(s) = f.as_str() {
+                        let p = std::path::PathBuf::from(s);
+                        if !compiled.iter().any(|c| c == &p) {
+                            compiled.push(p);
+                        }
+                    }
                 }
             }
         }

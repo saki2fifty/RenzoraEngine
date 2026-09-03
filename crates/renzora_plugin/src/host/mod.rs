@@ -46,8 +46,101 @@ use bevy::render::render_phase::TrackedRenderPass;
 use bevy::render::render_resource::{BindGroup, RenderPipeline};
 use bevy::shader::Shader;
 use crate::sys;
+use renzora_identity::CanonicalId;
 use std::alloc::Layout;
 use std::ffi::c_void;
+
+/// The durable-identity format version marker. Bumping this string is the
+/// breaking change for the saved-scene schema; old scenes resolve through
+/// the documented migration path, never via a silent rename.
+pub const DURABLE_TYPE_PATH_FORMAT_VERSION: &str = "v1";
+
+/// Construct the durable, host-owned, scene-persisted type path for a
+/// component or resource registered by a plugin.
+///
+/// `local_path` is whatever the plugin supplied — the Rust type path the
+/// `derive(Component)` macro generated from `module_path!()`, or the
+/// literal name in a hand-written `ComponentDesc`. It is the path the
+/// plugin thinks it owns. The host owns the durable path; the format is
+/// `renzora.plugin/<version>/<blake3_64hex>/<local_path>`.
+///
+/// Why this shape:
+///   * The version marker is explicit so the format can evolve without
+///     silently colliding with the prior version. A reader that doesn't
+///     recognise `v1` refuses the scene rather than guessing.
+///   * The 64-hex BLAKE3 is full-strength (256 bits) and the canonical
+///     identity is its only input. Two canonical identities that hash to
+///     the same digest is a cryptographic event; the host still detects
+///     it (see `check_identity_digest_collision`) so the failure mode
+///     is "clear diagnostic" rather than "two plugins merged".
+///   * The local path appears at the end for human readability — a
+///     scene file is recognisable when one of its paths ends in `State`,
+///     not just in hex — and so that a v1 format change can preserve
+///     the local suffix without re-hashing.
+pub fn durable_type_path(identity: &CanonicalId, local_path: &str) -> String {
+    let digest = identity_digest(identity);
+    format!(
+        "renzora.plugin/{ver}/{digest}/{local}",
+        ver = DURABLE_TYPE_PATH_FORMAT_VERSION,
+        digest = digest,
+        local = local_path,
+    )
+}
+
+/// The 64-hex BLAKE3 of the canonical identity's `scheme://path` form.
+/// Exposed so callers that need to record the identity alongside its
+/// durable path (migrations, diagnostics) can do so without re-hashing.
+pub fn identity_digest(identity: &CanonicalId) -> String {
+    let canonical = identity.to_scheme_path();
+    let mut hex = String::with_capacity(64);
+    for b in blake3::hash(canonical.as_bytes()).as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex
+}
+
+/// Detect a 256-bit BLAKE3 collision between canonical identities
+/// at the host's registration boundary. The function is the single
+/// point of contact for the `PluginIdentityDigests` registry so
+/// production code and tests can both exercise the same logic.
+///
+/// Outcomes:
+///   * `digest` not present in the registry → install
+///     `digest → new_identity` and return `Ok`. This is the first
+///     registration from a plugin.
+///   * `digest` present and equal to `new_identity` → return `Ok`.
+///     This is a hot-reload under the same canonical identity —
+///     canonical aliasing is allowed.
+///   * `digest` present and different from `new_identity` →
+///     return `Err` with a diagnostic naming both identities. With
+///     256-bit BLAKE3 this is a cryptographic event, but the
+///     failure mode matters: silently merging here would route data
+///     to the wrong archetype.
+///
+/// The function is pure with respect to its inputs: the world is
+/// used only to access the `PluginIdentityDigests` resource. Tests
+/// can pass any pre-populated registry plus a fake digest to
+/// exercise the comparison logic.
+pub fn check_identity_digest_collision(
+    world: &mut World,
+    digest: &str,
+    new_identity: &CanonicalId,
+) -> Result<(), String> {
+    let mut digests = world.get_resource_or_insert_with::<PluginIdentityDigests>(Default::default);
+    match digests.0.get(digest) {
+        None => {
+            digests.0.insert(digest.to_string(), new_identity.clone());
+            Ok(())
+        }
+        Some(existing) if existing == new_identity => Ok(()),
+        Some(existing) => Err(format!(
+            "durable identity collision: digest `{digest}` is already registered by \
+             canonical identity `{existing}`; refusing to merge with the new identity \
+             `{new_identity}` instead"
+        )),
+    }
+}
 
 /// What the opaque `sys::Host` pointer actually points at.
 ///
@@ -67,6 +160,32 @@ struct HostCtx<'w> {
     /// Set when a reload re-registers a component with a different memory layout
     /// than the live one. Fails the whole init — see [`init_plugin_gen`].
     layout_conflict: bool,
+    /// Concrete reason for the first layout-conflicting re-registration. The
+    /// P3V-3 review found that the prior design only carried a bool and the
+    /// inventory could not distinguish `LayoutChangeRequiresRestart` from a
+    /// generic load failure. Now captured here and forwarded through
+    /// `init_plugin_gen`'s `InitResult::LayoutConflict(reason)` to the
+    /// transactional loader.
+    layout_conflict_reason: Option<String>,
+    /// Canonical plugin identity for this init call. Every
+    /// `register_component` / `register_resource` builds the durable
+    /// type path from this identity plus the plugin-supplied local
+    /// name; without it the host cannot produce a host-scoped name
+    /// that is distinct across canonical plugins. Lifecycle /
+    /// ownership metadata — slot, generation — remain in their own
+    /// fields above.
+    identity: CanonicalId,
+    /// True when the identity was synthesised by the legacy
+    /// non-transactional `init_plugin` entry point. The
+    /// synthesised identity is derived from a function pointer
+    /// and is therefore not stable across ASLR / relinking; the
+    /// registrations produced under it are explicitly marked
+    /// non-persistable. The host refuses to register
+    /// `Component` / `Resource` schemas under this flag — a test
+    /// that wants to exercise the legacy entry point must use
+    /// `init_plugin_gen` (or the new `load_one_transactional`)
+    /// with an explicit, stable canonical identity.
+    non_persistable: bool,
 }
 
 /// Refuse the reload if `desc` is not byte-compatible with what is already
@@ -84,9 +203,11 @@ struct HostCtx<'w> {
 /// worse case, since a resource's storage is a single allocation that a
 /// grown struct writes straight off the end of.
 ///
-/// Migrating instead — a second `ComponentId` plus a field-name remap, the way
-/// `renzora_bsn::raw_registry` does it for scenes — is the real fix and is worth
-/// doing. It is just much larger than making the hazard impossible.
+/// The concrete reason is captured on `HostCtx::layout_conflict_reason` so the
+/// transactional loader can surface it as `ActivationFailure::LayoutConflict`,
+/// not generic `InitResult::Failed`. The P3V-3 review found that the prior
+/// `bool` flag lost the message and the inventory could not transition to
+/// `LayoutChangeRequiresRestart` reliably.
 ///
 /// # Safety
 ///
@@ -103,12 +224,15 @@ unsafe fn verify_same_layout(
     match layout_change(&stored, desc) {
         Some(reason) => {
             let kind = if stored.is_resource { "resource" } else { "component" };
+            let full = format!("plugin {kind} `{name}`: {reason}");
             error!(
-                "plugin {kind} `{name}` changed layout on reload ({reason}) — refusing \
-                 the reload, since what already holds it was allocated for the old \
-                 layout. Restart to pick this up."
+                "{full} — refusing the reload, since what already holds it was allocated \
+                 for the old layout. Restart to pick this up."
             );
             ctx.layout_conflict = true;
+            if ctx.layout_conflict_reason.is_none() {
+                ctx.layout_conflict_reason = Some(full);
+            }
         }
         // Byte-compatible, so the data is still valid — but a field may have been
         // renamed or the display name changed, and the editor reads those.
@@ -221,24 +345,53 @@ unsafe fn refresh_component_schema(
 ///
 /// **Not here:** systems. Bevy cannot remove one from a schedule, so they retire
 /// themselves by generation instead — see [`GenGate`].
-pub fn retire_slot(world: &mut World, slot: usize) {
+/// Retire the prior generation of a slot's registrations.
+///
+/// `prior_loaded_at` is the prior `loaded_at` for the slot. Only entries
+/// whose `(owner == slot, owner_generation == prior_loaded_at)` are
+/// removed; entries at any other generation (typically the candidate's
+/// at `proposed_generation`) survive untouched. This is what makes a
+/// same-slot commit possible: the prior generation's panels, render
+/// passes, materials, components and resources are dropped, and the
+/// candidate's equivalent entries (already in the registries from
+/// `init_plugin_gen`) take their place.
+///
+/// Component / resource handling under a same-identity reload:
+///
+/// Bevy `ComponentId`s are permanent. A same-identity reload reuses
+/// the id; the prior-generation claim on the id is removed (so the
+/// id is now solely the candidate's), but the id itself STAYS in
+/// `PluginComponents` / `PluginResources` / `PluginComponentSchemas`.
+/// That is the documented trade-off: a same-identity reload sees the
+/// same component, with the candidate's fresh schema having replaced
+/// the prior's (the prior's bytes are still in column storage for
+/// live entities — `refresh_compatible_schemas` keeps the layout).
+pub fn retire_slot(world: &mut World, slot: usize, prior_loaded_at: u32) {
     if let Some(mut panels) = world.get_resource_mut::<PluginPanels>() {
-        panels.0.retain(|p| p.owner != slot);
+        panels
+            .0
+            .retain(|p| !(p.owner == slot && p.owner_generation == prior_loaded_at));
     }
     if let Some(mut passes) = world.get_resource_mut::<PendingRenderPasses>() {
-        passes.0.retain(|p| p.owner != slot);
+        passes
+            .0
+            .retain(|p| !(p.owner == slot && p.owner_generation == prior_loaded_at));
     }
     if let Some(mut effects) = world.get_resource_mut::<PendingPostProcesses>() {
-        effects.0.retain(|e| e.owner != slot);
+        effects
+            .0
+            .retain(|e| !(e.owner == slot && e.owner_generation == prior_loaded_at));
     }
     if let Some(mut mats) = world.get_resource_mut::<PendingMaterials>() {
-        mats.0.retain(|m| m.owner != slot);
+        mats.0.retain(|m| !(m.owner == slot && m.owner_generation == prior_loaded_at));
     }
     // A retired backend's `entry` points into a library about to be unmapped.
     // Leaving it registered would turn the next `on_update` into a call through
     // a dangling function pointer, so this one is not merely tidy.
     if let Some(mut backends) = world.get_resource_mut::<PluginScriptBackends>() {
-        backends.0.retain(|b| b.owner != slot);
+        backends
+            .0
+            .retain(|b| !(b.owner == slot && b.owner_generation == prior_loaded_at));
     }
     // Same hazard, and worse consequences: an audio backend's entry is called
     // from a frame loop that has no idea the library went away, and `state`
@@ -246,7 +399,11 @@ pub fn retire_slot(world: &mut World, slot: usize) {
     // until a backend registers again, which is the correct outcome — the
     // alternative is a call through a dangling pointer on the next frame.
     if let Some(mut audio) = world.get_resource_mut::<PluginAudioBackend>() {
-        if audio.0.as_ref().is_some_and(|b| b.owner == slot) {
+        if audio
+            .0
+            .as_ref()
+            .is_some_and(|b| b.owner == slot && b.owner_generation == prior_loaded_at)
+        {
             audio.0 = None;
         }
     }
@@ -256,7 +413,11 @@ pub fn retire_slot(world: &mut World, slot: usize) {
     // and fails every request still waiting on it, which is what stops a
     // background thread blocking forever on an answer that can no longer come.
     if let Some(mut net) = world.get_resource_mut::<PluginNetBackend>() {
-        if net.0.as_ref().is_some_and(|b| b.owner == slot) {
+        if net
+            .0
+            .as_ref()
+            .is_some_and(|b| b.owner == slot && b.owner_generation == prior_loaded_at)
+        {
             net.0 = None;
         }
     }
@@ -270,29 +431,57 @@ pub fn retire_slot(world: &mut World, slot: usize) {
         .map(|mut a| {
             let meshes = std::mem::take(&mut a.meshes);
             let materials = std::mem::take(&mut a.materials);
-            (meshes, materials)
+            let images = std::mem::take(&mut a.images);
+            (meshes, materials, images)
         })
         .unwrap_or_default();
-    let (meshes, materials) = assets;
+    let (meshes, materials, images) = assets;
     let mut kept_meshes = Vec::new();
-    for (owner, handle) in meshes {
-        if owner == slot {
+    for (owner, gen, handle) in meshes {
+        if owner == slot && gen == prior_loaded_at {
             drop(handle);
         } else {
-            kept_meshes.push((owner, handle));
+            kept_meshes.push((owner, gen, handle));
         }
     }
     let mut kept_materials = Vec::new();
-    for (owner, handle) in materials {
-        if owner == slot {
+    for (owner, gen, handle) in materials {
+        if owner == slot && gen == prior_loaded_at {
             drop(handle);
         } else {
-            kept_materials.push((owner, handle));
+            kept_materials.push((owner, gen, handle));
+        }
+    }
+    let mut kept_images = Vec::new();
+    for (owner, gen, handle) in images {
+        if owner == slot && gen == prior_loaded_at {
+            drop(handle);
+        } else {
+            kept_images.push((owner, gen, handle));
         }
     }
     if let Some(mut a) = world.get_resource_mut::<PluginAssets>() {
         a.meshes = kept_meshes;
         a.materials = kept_materials;
+        a.images = kept_images;
+    }
+
+    // Component / resource ownership at the prior generation. For every id
+    // that has a prior-generation claim for this slot, REMOVE just that claim
+    // (the candidate's claim — if any — survives untouched). The id itself
+    // remains in `PluginComponents` / `PluginResources` /
+    // `PluginComponentSchemas` because Bevy never frees `ComponentId`s.
+    //
+    // The prior review required: "Existing component/resource values remain
+    // intact" — the column storage is untouched, and the schema entry
+    // remains so the inspector / scripting bindings can read existing
+    // entities' bytes at the prior layout (refresh_compatible_schemas
+    // restores the prior schema fields if the candidate re-registered).
+    if let Some(mut owners) = world.get_resource_mut::<PluginComponentOwners>() {
+        for claims in owners.0.values_mut() {
+            claims.retain(|&(s, g)| !(s == slot && g == prior_loaded_at));
+        }
+        owners.0.retain(|_, claims| !claims.is_empty());
     }
 }
 
@@ -405,6 +594,56 @@ static IFACE: sys::Interface = sys::Interface {
     add_net_backend,
 };
 
+/// Public accessor for tests that drive `init_plugin_gen` directly.
+/// Returns a pointer to the same iface table the production init
+/// path uses. Test-only — production code never calls this.
+pub fn iface_for_tests() -> *const sys::Interface {
+    &IFACE
+}
+
+/// Test-only helper that simulates `add_material_shader` minus the
+/// renderer dependency (no `Shader::from_wgsl`, no `Assets<Shader>`).
+///
+/// Goes through the SAME counter (`next_custom_material_id`) and pushes
+/// the SAME `PendingMaterial` row + `MaterialSlot::Custom { material_id }`
+/// entry that the production path does. The fallback WGSL is empty,
+/// which is fine for rollback tests because the bridge consumes the
+/// `PendingMaterials` row to build the asset, and rollback's contract
+/// is to drop the row from `PendingMaterials` and `PluginAssets`.
+///
+/// Test-only — production code never calls this.
+pub fn register_custom_material_for_test(
+    world: &mut World,
+    slot: usize,
+    owner_generation: u32,
+    id: &str,
+) {
+    let material_id = next_custom_material_id(world);
+    let pos = {
+        let mut store = world.get_resource_or_insert_with(PluginAssets::default);
+        store
+            .materials
+            .push((slot, owner_generation, MaterialSlot::Custom { material_id }));
+        store.materials.len() - 1
+    };
+    world
+        .get_resource_or_insert_with(PendingMaterials::default)
+        .0
+        .push(PendingMaterial {
+            owner: slot,
+            owner_generation,
+            id: id.to_string(),
+            shader: Handle::default(),
+            wgsl: String::new(),
+            settings: ComponentId::new(usize::MAX),
+            settings_size: 0,
+            alpha_mode: crate::sys::AlphaMode(0),
+            textures: Vec::new(),
+            slot: pos,
+            material_id,
+        });
+}
+
 
 // ── Interface implementations ────────────────────────────────────────────────
 
@@ -432,7 +671,7 @@ unsafe extern "C" fn register_component(
     guard_host("register_component", sys::ComponentId::INVALID, || {
     let ctx = &mut *(host as *mut HostCtx);
     let desc = &*desc;
-    let name = desc.name.as_str().to_string();
+    let local_name = desc.name.as_str().to_string();
 
     // Refused rather than ignored: a component with a destructor whose drop is
     // never run leaks whatever it owns, silently, for the life of the process.
@@ -445,39 +684,104 @@ unsafe extern "C" fn register_component(
     // impl reaches here without passing through the derive at all.
     if desc.drop.is_some() {
         error!(
-            "plugin component `{name}` declares a destructor, which is not supported yet — \
+            "plugin component `{local_name}` declares a destructor, which is not supported yet — \
              keep plugin components plain data (no String, Vec or Box fields)"
         );
         return sys::ComponentId::INVALID;
     }
 
-    // Re-registering the same name must return the same id: a plugin reloaded
-    // mid-session would otherwise get a second component and silently stop
-    // matching the entities carrying the first.
-    if let Some(existing) = lookup_component(ctx.world, &name) {
-        verify_same_layout(ctx, existing, desc, &name);
+    // Identity-collision check (10th-correction AC3-2). The
+    // canonical identity in `HostCtx` is a stable identifier; the
+    // 256-bit BLAKE3 of its `scheme://path` form is the durable
+    // identity anchor. Two distinct canonical identities producing
+    // the same digest is a cryptographic event; if it ever
+    // happens, refuse the second registration with a clear
+    // diagnostic naming both identities rather than silently
+    // merging them. Same digest + same identity is the hot-reload
+    // path (canonical aliasing) and is allowed.
+    if let Err(reason) = check_identity_digest_collision(
+        ctx.world,
+        &identity_digest(&ctx.identity),
+        &ctx.identity,
+    ) {
+        error!("{reason}");
+        return sys::ComponentId::INVALID;
+    }
+
+    // Non-persistable guard (10th-correction AC3-6). The legacy
+    // `init_plugin` entry point accepts a function-pointer-derived
+    // identity that is not stable across ASLR / relinking. It is
+    // safe to register systems that run their callbacks against
+    // the same pointer, but persisting the resulting
+    // component / resource names to a saved scene would store a
+    // path that resolves to nothing in a subsequent process. The
+    // new `load_one_transactional` and `load_dir` paths supply
+    // an explicit stable canonical identity and pass
+    // `non_persistable = false`; only the legacy entry point sets
+    // it to `true`. A test that wants to register components via
+    // the legacy entry point must use the new `init_plugin_gen`
+    // overload instead.
+    if ctx.non_persistable {
+        error!(
+            "plugin component `{local_name}` is being registered under the \
+             legacy `init_plugin` entry point, which derives a non-stable \
+             function-pointer identity. Persisted component / resource \
+             schemas require an explicit, stable canonical identity; use \
+             `init_plugin_gen` (or `load_one_transactional`) with a real \
+             identity, not the synthetic one from `init_plugin`"
+        );
+        return sys::ComponentId::INVALID;
+    }
+
+    // Construct the durable host-owned type path from the canonical
+    // identity in the HostCtx plus the plugin-supplied local name.
+    // The local name is what the plugin thinks it owns — `State`,
+    // `manual::State`, `mod_a::Inner`, or anything else — and the
+    // durable prefix is the versioned, collision-resistant identity
+    // anchor shared by every type this plugin registers.
+    let durable_name = durable_type_path(&ctx.identity, &local_name);
+
+    // Re-registering the same durable name reuses the id: a hot reload
+    // of the same canonical plugin gets the same durable path back
+    // and reuses Bevy's permanent id. Two distinct canonical plugins
+    // get distinct durable paths and so two distinct ids, regardless
+    // of what their local names or basenames look like.
+    if let Some(existing) = ctx
+        .world
+        .get_resource::<PluginComponents>()
+        .and_then(|m| m.0.get(&durable_name).copied())
+    {
+        verify_same_layout(ctx, existing, desc, &local_name);
+        ctx.world
+            .get_resource_or_insert_with(PluginComponentOwners::default)
+            .0
+            .entry(existing)
+            .or_default()
+            .push((ctx.slot, ctx.gate.at));
         return sys::ComponentId(existing.index() as u32);
     }
 
+    let name_for_layout_err = durable_name.clone();
     let Ok(layout) = Layout::from_size_align(desc.size, desc.align) else {
-        error!("plugin component `{name}` has an invalid layout ({} / {})", desc.size, desc.align);
+        error!(
+            "plugin component `{}` has an invalid layout ({} / {})",
+            name_for_layout_err, desc.size, desc.align
+        );
         return sys::ComponentId::INVALID;
     };
 
-    // SAFETY: the plugin supplied the layout for its own type, and `drop` (if
-    // any) is that type's destructor. We never construct one ourselves — the
-    // plugin writes into storage we allocate to this layout.
+    // Bevy's component descriptor gets the durable name as its
+    // identifier — Bevy uses it for debug names, but the durable
+    // identity ledger is `PluginComponents`, not this string.
+    // SAFETY: the plugin supplied the layout for its own type, and
+    // `drop` (if any) is that type's destructor. We never construct
+    // one ourselves — the plugin writes into storage we allocate to
+    // this layout.
     let descriptor = unsafe {
         ComponentDescriptor::new_with_layout(
-            name,
+            durable_name.clone(),
             StorageType::Table,
             layout.pad_to_align(),
-            // Deliberately `None`, having already refused a non-`None` drop
-            // above. This used to be `desc.drop.map(|_| unimplemented!(..))`,
-            // which reads like a guard and is not one: `Option::map` evaluates
-            // its body, so any component declaring a destructor panicked here,
-            // and `guard_host` swallowed the explanatory message and reported
-            // only "host call 'register_component' panicked".
             None,
             true,
             bevy::ecs::component::ComponentCloneBehavior::Default,
@@ -486,11 +790,25 @@ unsafe extern "C" fn register_component(
     };
 
     let id = ctx.world.register_component_with_descriptor(descriptor);
-    let type_path = desc.name.as_str().to_string();
+    // The durable identity ledger, keyed by the durable name. Two
+    // canonical plugins in the same partition land at two distinct
+    // keys here; `RawTypeTable::by_path` mirrors this on the scene
+    // side and gets both entries side by side.
     ctx.world
         .get_resource_or_insert_with(PluginComponents::default)
         .0
-        .insert(type_path.clone(), id);
+        .insert(durable_name.clone(), id);
+    // Stamp ownership + generation so a same-slot reload can retire
+    // only the prior generation's components and rollback can drop
+    // only the candidate's. Bevy allocates `id` permanently; a
+    // same-identity reload reuses it and we APPEND the candidate's
+    // claim rather than overwriting the prior's.
+    ctx.world
+        .get_resource_or_insert_with(PluginComponentOwners::default)
+        .0
+        .entry(id)
+        .or_default()
+        .push((ctx.slot, ctx.gate.at));
 
     // Copy the schema out of the plugin's memory now, while we know it is valid.
     //
@@ -558,7 +876,14 @@ unsafe extern "C" fn register_component(
     let display_name = {
         let d = desc.display_name.as_str();
         if d.is_empty() {
-            type_path.rsplit("::").next().unwrap_or(&type_path).to_string()
+            // The durable name has the local suffix at the end, so
+            // taking the trailing `::`-segment gives the plugin's
+            // local basename for the inspector display.
+            durable_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(&durable_name)
+                .to_string()
         } else {
             d.to_string()
         }
@@ -568,7 +893,12 @@ unsafe extern "C" fn register_component(
         .0
         .push(PluginComponentInfo {
             id,
-            type_path,
+            // The schema's `type_path` is the durable name. The
+            // `plugin_scene_bridge::refresh_raw_component_registry`
+            // pass copies this into `RawTypeTable::by_path`, which is
+            // what the scene format keys on. The plugin's local
+            // name is preserved as the `display_name` segment.
+            type_path: durable_name.clone(),
             display_name,
             fields,
             size: desc.size,
@@ -610,7 +940,9 @@ unsafe extern "C" fn register_resource(
 
         let existing = {
             let ctx = &mut *(host as *mut HostCtx);
-            lookup_component(ctx.world, (*desc).name.as_str())
+            let local_name = (*desc).name.as_str();
+            let durable_name = durable_type_path(&ctx.identity, local_name);
+            lookup_plugin_component(ctx.world, &durable_name)
         };
         let id = match existing {
             Some(id) => {
@@ -655,6 +987,17 @@ unsafe extern "C" fn register_resource(
         if !listed.0.contains(&bevy_id) {
             listed.0.push(bevy_id);
         }
+        // Stamp ownership + generation for the resource id too, so a
+        // same-slot reload can retire only the prior generation's resources
+        // and rollback can drop only the candidate's. APPEND the candidate's
+        // claim rather than overwriting the prior's — the prior is still the
+        // live owner until commit.
+        ctx.world
+            .get_resource_or_insert_with(PluginComponentOwners::default)
+            .0
+            .entry(bevy_id)
+            .or_default()
+            .push((ctx.slot, ctx.gate.at));
         id
     })
 }
@@ -729,6 +1072,7 @@ unsafe extern "C" fn add_panel(
         }
         panels.0.push(PluginPanel {
             owner,
+            owner_generation: ctx.gate.at,
             title: {
                 let t = desc.title.as_str();
                 if t.is_empty() { id.clone() } else { t.to_string() }
@@ -780,6 +1124,7 @@ unsafe extern "C" fn add_settings_section(
         }
         panels.0.push(PluginPanel {
             owner,
+            owner_generation: ctx.gate.at,
             title: {
                 let t = desc.title.as_str();
                 if t.is_empty() { id.clone() } else { t.to_string() }
@@ -861,6 +1206,7 @@ unsafe extern "C" fn add_script_backend(
             extensions,
             entry: desc.entry,
             owner,
+            owner_generation: ctx.gate.at,
         });
         sys::RegisterStatus::Ok
     })
@@ -905,6 +1251,7 @@ unsafe extern "C" fn add_audio_backend(
             state: desc.state as usize,
             entry: desc.entry,
             owner,
+            owner_generation: ctx.gate.at,
         });
         sys::RegisterStatus::Ok
     })
@@ -949,6 +1296,7 @@ unsafe extern "C" fn add_net_backend(
             state: desc.state as usize,
             entry: desc.entry,
             owner,
+            owner_generation: ctx.gate.at,
         });
         sys::RegisterStatus::Ok
     })
@@ -1013,6 +1361,43 @@ unsafe fn write_resource_bytes(world: &mut World, id: ComponentId, bytes: &[u8])
     // did, leaked `size_of::<T>()` bytes on every single insert. Dropping a
     // `Vec<u8>` runs no element destructors, so the moved-out value is not
     // dropped twice either.
+}
+
+/// Public wrapper around [`write_resource_bytes`] for use by integration
+/// crates that need to restore a resource's prior bytes on rollback
+/// (Phase 3 `renzora_loose_plugins`).
+///
+/// # Safety
+///
+/// `bytes` must be the prior serialized form of the resource at `id`.
+pub unsafe fn write_resource_bytes_unsafe(world: &mut World, id: ComponentId, bytes: &[u8]) {
+    write_resource_bytes(world, id, bytes);
+}
+
+/// Read the bytes of resource `id`. Returns `None` if the resource does
+/// not exist or its layout is zero.
+///
+/// Used by Phase 3 `renzora_loose_plugins` to snapshot a resource's prior
+/// bytes before a candidate overwrites them, so a failed activation can
+/// restore the original value.
+pub fn read_resource_bytes_safe(world: &World, id: ComponentId) -> Option<Vec<u8>> {
+    let entity = world.resource_entities().get(id)?;
+    let info = world.components().get_info(id)?;
+    let layout = info.layout();
+    if layout.size() == 0 {
+        return None;
+    }
+    let ptr = world.entity(entity).get_by_id(id).ok()?;
+    // SAFETY: the pointer is a valid OwningPtr into a single instance of
+    // the resource; reading layout.size() bytes from it is exactly what
+    // `OwningPtr::deref` would do, and we copy out so we don't outlive
+    // any borrow.
+    let bytes = unsafe {
+        let mut out = vec![0u8; layout.size()];
+        std::ptr::copy_nonoverlapping(ptr.as_ptr().cast::<u8>(), out.as_mut_ptr(), layout.size());
+        out
+    };
+    Some(bytes)
 }
 
 unsafe extern "C" fn component_id_by_name(
@@ -1112,20 +1497,74 @@ unsafe extern "C" fn add_system(
 /// for cleanup.
 #[derive(Resource, Default)]
 pub struct PluginAssets {
-    /// Images a plugin created, by the handle index it was given.
-    pub images: Vec<(usize, Handle<Image>)>,
-    /// `(owning slot, handle)`. The owner is what lets a reload drop only its own
-    /// meshes — the strong handle here is usually the only one, so dropping it is
-    /// what actually frees the GPU memory.
-    pub meshes: Vec<(usize, Handle<Mesh>)>,
-    pub materials: Vec<(usize, MaterialSlot)>,
+    /// `(owning slot, generation, handle)`. The generation is the slot's
+    /// `loaded_at` for prior entries or the candidate's `proposed_generation`
+    /// during a transaction. Generation-aware so a same-slot reload can retire
+    /// only the prior generation without touching the candidate's.
+    pub images: Vec<(usize, u32, Handle<Image>)>,
+    /// `(owning slot, generation, handle)`. The owner is what lets a reload
+    /// drop only its own meshes — the strong handle here is usually the only
+    /// one, so dropping it is what actually frees the GPU memory.
+    pub meshes: Vec<(usize, u32, Handle<Mesh>)>,
+    pub materials: Vec<(usize, u32, MaterialSlot)>,
+}
+
+/// Monotonic counter for `MaterialSlot::Custom { material_id }` assignments.
+///
+/// Custom materials get a fresh `material_id` here on every registration so
+/// the host can identify the candidate's row in `PluginAssets::materials` and
+/// the matching row in `PendingMaterials` by stable identity across vector
+/// insertions or removals during the same transaction.
+#[derive(Resource, Default)]
+pub struct CustomMaterialIdCounter(pub u64);
+
+/// Read-only accessor used by tests and the rollback path. The counter is
+/// monotonically increasing — values are never reused even after rollback,
+/// matching the host's never-free allocation pattern.
+pub fn next_custom_material_id(world: &mut World) -> u64 {
+    let mut c = world.get_resource_or_insert_with(CustomMaterialIdCounter::default);
+    let v = c.0;
+    c.0 = c.0.wrapping_add(1);
+    v
+}
+
+/// Encode a Bevy `AssetId` as a stable `u32` for journal entries.
+///
+/// Bevy 0.19's `AssetId<A>` is an enum with `Index { index, marker }`
+/// (where `AssetIndex` is a `{ generation, index }` struct) and `Uuid
+/// { uuid }`. There is no public `as_u32` accessor. The C3-7 review
+/// required a STABLE per-handle identifier so rollback can drop
+/// exactly the candidate's entry regardless of intervening
+/// insertions. We use `AssetIndex::to_bits()` which is a public
+/// stable encoding of `(generation, index)` as a `u64`; the lower 32
+/// bits hold the slot index and the upper 32 hold the generation.
+/// For the UUID case we take the first four bytes of the UUID.
+///
+/// Note: `Assets<Mesh>`, `Assets<Image>`, and `Assets<Standard
+/// Material>` have separate handle-id spaces, so two entries with
+/// the same `to_bits()` across stores cannot collide — the journal
+/// is keyed on `(owner, generation, handle_id)`, and the handle
+/// itself is bound to the asset type.
+///
+/// Public so integration tests can build the same handle-id
+/// comparison the journal / rollback use; see
+/// `crates/renzora_loose_plugins/tests/acceptance.rs`.
+pub fn asset_id_to_u32<A: bevy::asset::Asset>(id: bevy::asset::AssetId<A>) -> u32 {
+    use bevy::asset::AssetId;
+    match id {
+        AssetId::Index { index, .. } => (index.to_bits() & 0xFFFF_FFFF) as u32,
+        AssetId::Uuid { uuid } => {
+            let bytes = uuid.as_bytes();
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+    }
 }
 
 /// What a plugin's material handle actually refers to.
 ///
 /// Two kinds share one index space so a plugin can pass a handle to `spawn_mesh`
 /// without caring which it holds.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MaterialSlot {
     /// Built by `add_material` — a plain PBR material this crate can name.
     ///
@@ -1137,7 +1576,11 @@ pub enum MaterialSlot {
     /// Built by `add_material_shader`. The asset type lives in the render
     /// bridge, which this crate cannot depend on, so applying it goes through
     /// [`CustomMaterialApplier`] — the same indirection `BsnSpawner` uses.
-    Custom,
+    /// Carries a monotonic `material_id` assigned at registration time so a
+    /// transactional rollback can identify the candidate's entry by stable
+    /// identity across any number of vector insertions or removals during
+    /// the same transaction.
+    Custom { material_id: u64 },
 }
 
 /// Attaches a custom plugin material to an entity.
@@ -1174,7 +1617,7 @@ fn attach_material(
         // back out through the applier the bridge registered. Absent in a build
         // with no renderer, where the entity ends up unmaterialed rather than
         // wrong.
-        MaterialSlot::Custom => match world.get_resource::<CustomMaterialApplier>().copied() {
+        MaterialSlot::Custom { .. } => match world.get_resource::<CustomMaterialApplier>().copied() {
             Some(apply) => (apply.0)(world, entity, index),
             None => error!(
                 "[plugin] {what} used a custom material but nothing registered a \
@@ -1216,10 +1659,11 @@ unsafe extern "C" fn add_mesh(host: *mut sys::Host, desc: *const sys::MeshDesc) 
         };
         let handle = meshes.add(mesh);
         let owner = ctx.slot;
+        let owner_generation = ctx.gate.at;
         let mut store = ctx
             .world
             .get_resource_or_insert_with(PluginAssets::default);
-        store.meshes.push((owner, handle));
+        store.meshes.push((owner, owner_generation, handle));
         sys::AssetHandle((store.meshes.len() - 1) as u64)
     })
 }
@@ -1290,8 +1734,9 @@ unsafe extern "C" fn add_image(
         };
         let handle = images.add(image);
         let owner = ctx.slot;
+        let owner_generation = ctx.gate.at;
         let mut store = ctx.world.get_resource_or_insert_with(PluginAssets::default);
-        store.images.push((owner, handle));
+        store.images.push((owner, owner_generation, handle));
         sys::AssetHandle((store.images.len() - 1) as u64)
     })
 }
@@ -1430,8 +1875,9 @@ unsafe extern "C" fn add_mesh_data(
         };
         let handle = meshes.add(mesh);
         let owner = ctx.slot;
+        let owner_generation = ctx.gate.at;
         let mut store = ctx.world.get_resource_or_insert_with(PluginAssets::default);
-        store.meshes.push((owner, handle));
+        store.meshes.push((owner, owner_generation, handle));
         sys::AssetHandle((store.meshes.len() - 1) as u64)
     })
 }
@@ -1467,10 +1913,11 @@ unsafe extern "C" fn add_material(
         };
         let handle = materials.add(material);
         let owner = ctx.slot;
+        let owner_generation = ctx.gate.at;
         let mut store = ctx
             .world
             .get_resource_or_insert_with(PluginAssets::default);
-        store.materials.push((owner, MaterialSlot::Standard(handle)));
+        store.materials.push((owner, owner_generation, MaterialSlot::Standard(handle)));
         sys::AssetHandle((store.materials.len() - 1) as u64)
         }
     })
@@ -1717,7 +2164,7 @@ unsafe extern "C" fn image_write(
     let Some(store) = me.store else {
         return false;
     };
-    let Some((_, target)) = store.images.get(handle.0 as usize).cloned() else {
+    let Some((_, _, target)) = store.images.get(handle.0 as usize).cloned() else {
         error!("[plugin] image write named slot {}, which was never created", handle.0);
         return false;
     };
@@ -1773,7 +2220,7 @@ unsafe extern "C" fn mesh_write(
     let Some(store) = me.store else {
         return false;
     };
-    let Some((_, target)) = store.meshes.get(handle.0 as usize).cloned() else {
+    let Some((_, _, target)) = store.meshes.get(handle.0 as usize).cloned() else {
         error!("[plugin] mesh write named slot {}, which was never created", handle.0);
         return false;
     };
@@ -2137,13 +2584,14 @@ fn apply_queued(commands: &mut Commands, queued: Vec<(sys::Command, Vec<u8>)>) {
                         let Some(store) = world.get_resource::<PluginAssets>() else {
                             return;
                         };
-                        // `.1` — the store keys each handle by owning slot so a
-                        // reload can free its own; a spawn only wants the handle.
-                        let m = store.meshes.get(d.mesh.0 as usize).map(|(_, h)| h.clone());
+                        // `.2` — the store keys each handle by owning slot
+                        // and generation so a reload can free its own; a
+                        // spawn only wants the handle.
+                        let m = store.meshes.get(d.mesh.0 as usize).map(|(_, _, h)| h.clone());
                         let mat = store
                             .materials
                             .get(d.material.0 as usize)
-                            .map(|(_, h)| h.clone());
+                            .map(|(_, _, h)| h.clone());
                         match (m, mat) {
                             (Some(m), Some(mat)) => (m, mat),
                             _ => {
@@ -2170,7 +2618,7 @@ fn apply_queued(commands: &mut Commands, queued: Vec<(sys::Command, Vec<u8>)>) {
                     let Some(slot) = world
                         .get_resource::<PluginAssets>()
                         .and_then(|store| store.materials.get(index))
-                        .map(|(_, slot)| slot.clone())
+                        .map(|(_, _, slot)| slot.clone())
                     else {
                         error!("[plugin] set_material used an unknown material handle");
                         return;
@@ -2400,6 +2848,10 @@ pub struct PendingRenderPass {
     /// Registering plugin slot, so a reload replaces this rather than adding a
     /// second copy. See [`retire_slot`].
     pub owner: usize,
+    /// Generation at which this entry was registered. The prior generation's
+    /// entries are retired on commit; the candidate's entries (at
+    /// `proposed_generation`) survive. See `PluginGeneration`.
+    pub owner_generation: u32,
 }
 
 /// Registered-but-not-yet-built plugin render passes.
@@ -2424,6 +2876,10 @@ pub struct PluginPanel {
     pub user: usize,
     /// Registering plugin slot — see [`retire_slot`].
     pub owner: usize,
+    /// Generation at which this entry was registered. The prior generation's
+    /// entries are retired on commit; the candidate's entries (at
+    /// `proposed_generation`) survive.
+    pub owner_generation: u32,
     /// Renders on the Settings overlay's Plugins tab rather than in the dock.
     ///
     /// A flag rather than a second registry because everything else about the
@@ -2450,6 +2906,8 @@ pub struct PluginScriptBackend {
     pub entry: sys::ScriptEntry,
     /// Registering plugin slot — see [`retire_slot`].
     pub owner: usize,
+    /// Generation at which this entry was registered.
+    pub owner_generation: u32,
 }
 
 /// Every scripting language registered by every loaded plugin.
@@ -2474,6 +2932,8 @@ pub struct PluginAudioBackendEntry {
     pub entry: sys::AudioEntry,
     /// Registering plugin slot — see [`retire_slot`].
     pub owner: usize,
+    /// Generation at which this entry was registered.
+    pub owner_generation: u32,
 }
 
 /// The one audio backend, if a plugin registered one.
@@ -2503,6 +2963,8 @@ pub struct PluginNetBackendEntry {
     pub entry: sys::NetEntry,
     /// Registering plugin slot — see [`retire_slot`].
     pub owner: usize,
+    /// Generation at which this entry was registered.
+    pub owner_generation: u32,
 }
 
 /// The one network backend, if a plugin registered one.
@@ -2544,6 +3006,8 @@ pub struct PendingPostProcess {
     pub order: f32,
     /// Registering plugin slot — see [`retire_slot`].
     pub owner: usize,
+    /// Generation at which this entry was registered.
+    pub owner_generation: u32,
 }
 
 /// Registered-but-not-yet-built plugin effects.
@@ -2585,6 +3049,7 @@ unsafe extern "C" fn add_render_pass(host: *mut sys::Host, desc: *const sys::Ren
         .0
         .push(PendingRenderPass {
             owner: ctx.slot,
+            owner_generation: ctx.gate.at,
             id,
             shader: handle,
             wgsl: desc.fragment_wgsl.as_str().to_string(),
@@ -2618,6 +3083,7 @@ unsafe extern "C" fn add_post_process(host: *mut sys::Host, desc: *const sys::Po
             .0
             .push(PendingPostProcess {
                 owner: ctx.slot,
+                owner_generation: ctx.gate.at,
                 id,
                 shader: handle,
                 wgsl: desc.fragment_wgsl.as_str().to_string(),
@@ -2630,6 +3096,7 @@ unsafe extern "C" fn add_post_process(host: *mut sys::Host, desc: *const sys::Po
 }
 
 /// A custom shaded material a plugin registered, waiting for the render bridge.
+#[derive(Clone)]
 pub struct PendingMaterial {
     pub id: String,
     pub shader: Handle<Shader>,
@@ -2646,6 +3113,21 @@ pub struct PendingMaterial {
     pub slot: usize,
     /// Registering plugin slot — see [`retire_slot`].
     pub owner: usize,
+    /// Registering plugin generation (the `proposed_generation` the candidate
+    /// ran at). P3V-3 added `owner_generation` to every other registry row;
+    /// `PendingMaterial` was the last slot-only one, which made a same-slot
+    /// reload's `retire_slot` `retain(|m| m.owner != slot)` delete both the
+    /// prior and candidate pending materials on a successful commit. With
+    /// this stamp, `retire_slot` keeps prior generation's pending materials
+    /// while the candidate's are dropped on rollback, and vice versa.
+    pub owner_generation: u32,
+    /// Monotonic custom-material id assigned at registration. Stable across
+    /// any number of subsequent `PluginAssets::materials` insertions or
+    /// removals during the same transaction, so the rollback path can drop
+    /// this row by identity (its `material_id` matches the
+    /// `MaterialSlot::Custom { material_id }` entry's id, independent of
+    /// vector position).
+    pub material_id: u64,
 }
 
 /// Registered-but-not-yet-built plugin materials.
@@ -2701,7 +3183,7 @@ unsafe extern "C" fn add_material_shader(
             let store = ctx.world.get_resource::<PluginAssets>();
             for slot in slots {
                 match store.and_then(|s| s.images.get(slot.0 as usize)).cloned() {
-                    Some((_, h)) => textures.push(h),
+                    Some((_, _, h)) => textures.push(h),
                     None => {
                         error!(
                             "[plugin] material `{id}` names image slot {}, which was never created",
@@ -2724,9 +3206,19 @@ unsafe extern "C" fn add_material_shader(
         // spawning a mesh does not have to know which kind of material it holds.
         // The bridge fills it in once it can build the real asset.
         let owner = ctx.slot;
+        let owner_generation = ctx.gate.at;
+        // `material_id` is the STABLE identity for this custom material
+        // across the candidate's lifetime. It lives in both
+        // `MaterialSlot::Custom { material_id }` and the matching
+        // `PendingMaterial { material_id }` so the rollback path can drop
+        // the candidate's row by id even after other entries have been
+        // removed (and indices shifted) earlier in the same transaction.
+        let material_id = next_custom_material_id(ctx.world);
         let slot = {
             let mut store = ctx.world.get_resource_or_insert_with(PluginAssets::default);
-            store.materials.push((owner, MaterialSlot::Custom));
+            store
+                .materials
+                .push((owner, owner_generation, MaterialSlot::Custom { material_id }));
             store.materials.len() - 1
         };
 
@@ -2735,6 +3227,7 @@ unsafe extern "C" fn add_material_shader(
             .0
             .push(PendingMaterial {
                 owner,
+                owner_generation,
                 id,
                 shader,
                 wgsl: desc.wgsl.as_str().to_string(),
@@ -2743,6 +3236,7 @@ unsafe extern "C" fn add_material_shader(
                 alpha_mode: desc.alpha_mode,
                 textures,
                 slot,
+                material_id,
             });
         sys::AssetHandle(slot as u64)
     })
@@ -3746,6 +4240,56 @@ pub struct PluginComponents(pub std::collections::HashMap<String, ComponentId>);
 #[derive(bevy::prelude::Resource, Default)]
 pub struct PluginResources(pub Vec<ComponentId>);
 
+/// Maps every `ComponentId` registered by a plugin slot to every
+/// `(slot, generation)` claim that has been registered against it.
+///
+/// A single `ComponentId` may carry multiple claims because Bevy
+/// allocates the id permanently and a same-identity reload reuses it:
+/// the prior generation's stable registration keeps one claim, and the
+/// candidate adds another during a transaction. Each claim can be
+/// retired independently by its `(slot, generation)` tuple.
+///
+/// Why a vector, not a single entry: P3V-2 + the prior review showed
+/// that one `HashMap<ComponentId, (slot, generation)>` cannot
+/// represent the prior-generation and candidate-generation claims
+/// that share the same stable `ComponentId` simultaneously. Two
+/// registrations, same id, different generations, both alive during
+/// the transaction. The vector carries both until commit promotes the
+/// candidate (and removes only the prior) or rollback removes the
+/// candidate's claim.
+///
+/// Bevy `ComponentId`s themselves are permanent — they are never
+/// freed. The entries in `PluginComponents` / `PluginResources` /
+/// `PluginComponentSchemas` persist across reloads; what changes is
+/// which generation owns the id.
+#[derive(Resource, Default)]
+pub struct PluginComponentOwners(
+    pub std::collections::HashMap<ComponentId, Vec<(usize, u32)>>,
+);
+
+/// Maps every 256-bit BLAKE3 identity digest that has ever registered
+/// a component or resource in this host to the canonical identity
+/// that produced it. Populated lazily on the first
+/// `register_component` / `register_resource` call from each plugin;
+/// consulted on every subsequent registration to detect a real
+/// collision (two distinct canonical identities producing the same
+/// 256-bit BLAKE3 digest).
+///
+/// With 256-bit BLAKE3 the collision probability is cryptographic;
+/// the registry exists so the failure mode is "clear diagnostic
+/// naming both identities" rather than "two plugins silently share
+/// a `ComponentId` and data is routed to the wrong archetype".
+///
+/// The registry is host-global. Different `App`s have different
+/// registries; a cross-process restart is always collision-free by
+/// construction.
+#[derive(Resource, Default)]
+pub struct PluginIdentityDigests(
+    /// `BLAKE3(identity.to_scheme_path()).hex()` → the canonical
+    /// identity that produced it. 256-bit digest as 64 hex chars.
+    pub std::collections::HashMap<String, renzora_identity::CanonicalId>,
+);
+
 /// One editable field of a plugin component, copied out of the plugin's
 /// `sys::FieldDesc` at registration.
 ///
@@ -3910,6 +4454,25 @@ fn component_type_path(world: &World, id: ComponentId) -> Option<String> {
     Some(path)
 }
 
+/// Exact-name lookup against the durable identity ledger. The name
+/// passed in must already be a `durable_type_path(...)` value —
+/// `register_component` constructs it from the canonical identity in
+/// `HostCtx` plus the plugin's local name, and the lookup uses the
+/// resulting durable string verbatim.
+fn lookup_plugin_component(world: &World, durable_name: &str) -> Option<ComponentId> {
+    world
+        .get_resource::<PluginComponents>()
+        .and_then(|m| m.0.get(durable_name).copied())
+}
+
+/// Host/reflection component lookup. EXACT match by full type path —
+/// never basename-matched. Used by `component_id_by_name`, where a
+/// plugin is asking the host for one of its exposed components by
+/// string. The host's reflection registry is the source of truth for
+/// names. Distinct from the slot-scoped `lookup_plugin_component`
+/// because a plugin's request for a host component MUST be exact: a
+/// typo'd basename here would silently resolve to the wrong id
+/// rather than fail loudly.
 fn lookup_component(world: &World, name: &str) -> Option<ComponentId> {
     if let Some(map) = world.get_resource::<PluginComponents>() {
         if let Some(id) = map.0.get(name) {
@@ -3948,6 +4511,757 @@ fn bevy_label(s: sys::Schedule) -> impl ScheduleLabel {
 
 // ── Loading ──────────────────────────────────────────────────────────────────
 
+/// One mutation a candidate made during a transactional activation.
+///
+/// Used by Phase 3 `renzora_loose_plugins` and by `host::loader`'s
+/// `activate_with_transaction`. The host crate owns the type so all
+/// integrations agree on one definition.
+///
+/// Asset entries carry a **stable `Handle` id** rather than a vector
+/// index. Index-based rollback was the prior review's C3-7 finding:
+/// removing whatever currently occupied a recorded index shifts every
+/// later entry, and the post-rollback vector order no longer matches
+/// the pre-init order. The handle id is stable for the lifetime of
+/// the asset and lets rollback drop exactly the candidate's entries.
+#[derive(Debug, Clone)]
+pub enum JournalEntry {
+    PanelAdded { slot: usize, id: String },
+    RenderPassAdded { slot: usize, id: String },
+    PostProcessAdded { slot: usize, id: String },
+    ScriptBackendAdded { slot: usize, name: String },
+    AudioBackendClaimed { slot: usize, name: String },
+    NetBackendClaimed { slot: usize, name: String },
+    /// A pending custom material the candidate registered. Identified by
+    /// `(slot, owner_generation, id)` and by the stable `material_id` so a
+    /// rollback that runs after any number of additional registrations —
+    /// or after prior `MaterialSlot::Custom` entries have been removed from
+    /// the same transaction — still drops exactly the candidate's row.
+    PendingMaterialAdded {
+        slot: usize,
+        id: String,
+        material_id: u64,
+    },
+    MeshCreated { slot: usize, handle_id: u32 },
+    MaterialCreated { slot: usize, handle_id: u32 },
+    ImageCreated { slot: usize, handle_id: u32 },
+    /// A component id the candidate first introduced. `was_pre_existing` is
+    /// false, so a failed candidate must drop the public metadata
+    /// (`PluginComponents` / `PluginComponentSchemas`) on rollback. The
+    /// underlying `ComponentId` stays allocated (Bevy never frees them)
+    /// because Bevy cannot tell whether a future plugin will reuse it.
+    ComponentRegistered {
+        slot: usize,
+        type_path: String,
+        id: bevy::ecs::component::ComponentId,
+        was_pre_existing: bool,
+    },
+    /// As [`ComponentRegistered`], but for a resource id. A resource is
+    /// also a `ComponentId`, with `is_resource == true` on its schema.
+    ResourceRegistered {
+        slot: usize,
+        type_path: String,
+        id: bevy::ecs::component::ComponentId,
+        was_pre_existing: bool,
+        /// True if the candidate's `register_resource` / `insert_resource`
+        /// wrote a value to this resource (the default-init performed by
+        /// `register_resource` qualifies). Rollback uses this to remove
+        /// the candidate's orphan resource value when the resource is
+        /// itself candidate-only (`was_pre_existing == false`).
+        candidate_wrote_value: bool,
+    },
+    ResourceInserted { id: bevy::ecs::component::ComponentId, prior_bytes: Option<Vec<u8>> },
+    LayoutConflict { type_path: String, reason: String },
+}
+
+/// A snapshot of the slot-owned registry entries before a candidate init.
+///
+/// Each entry is paired with the slot and generation at which it was
+/// registered. Asset rows also carry the stable `Handle::id().index()`
+/// so the diff (and rollback) can identify them across vector
+/// insertions. The diff compares against this snapshot AND the
+/// `(owner, owner_generation)` tuple of each post-init entry so a
+/// same-slot reload can distinguish the candidate's newly-added entries
+/// from the prior generation's pre-existing entries.
+///
+/// `pre_existing_component_ids` and `pre_existing_resource_ids` are the
+/// set of ids that existed BEFORE the candidate's init. The diff uses
+/// them to decide whether a candidate-introduced id is "candidate-only"
+/// (rollback must drop the public metadata entry too) or "pre-existing"
+/// (rollback leaves the id in `PluginComponents`/`PluginResources`
+/// because the prior generation owned it and only the candidate's claim
+/// is to be removed).
+#[derive(Debug, Default, Clone)]
+pub struct RegistrySnapshot {
+    pub panels: Vec<(usize, u32, String)>,
+    pub render_passes: Vec<(usize, u32, String)>,
+    pub post_processes: Vec<(usize, u32, String)>,
+    pub script_backends: Vec<(usize, u32, String)>,
+    pub audio: Option<(usize, u32, String)>,
+    pub net: Option<(usize, u32, String)>,
+    pub meshes: Vec<(usize, u32, u32)>,
+    pub materials: Vec<(usize, u32, u32)>,
+    pub images: Vec<(usize, u32, u32)>,
+    pub resources: Vec<(bevy::ecs::component::ComponentId, usize, u32)>,
+    pub component_ids: Vec<(bevy::ecs::component::ComponentId, usize, u32)>,
+    /// Pending custom materials registered before init, paired with their
+    /// `(owner, owner_generation)`. Same-shape bookkeeping as the rest of
+    /// the registry rows so `diff_registrations` can identify candidate-
+    /// introduced entries by `(slot, proposed_generation)` and
+    /// `apply_journal_rollback` can remove only the candidate's.
+    pub pending_materials: Vec<(usize, u32, String)>,
+    /// Ids already registered in `PluginComponents` before init. The diff
+    /// uses this to mark a `ComponentRegistered` journal entry as
+    /// `was_pre_existing = true` when the id was already live.
+    pub pre_existing_component_ids: std::collections::HashSet<bevy::ecs::component::ComponentId>,
+    /// Ids already registered in `PluginResources` before init. The diff
+    /// uses this to mark a `ResourceRegistered` journal entry as
+    /// `was_pre_existing = true` when the resource id was already live.
+    pub pre_existing_resource_ids: std::collections::HashSet<bevy::ecs::component::ComponentId>,
+}
+
+/// Capture every relevant registry's keys into a snapshot, including the
+/// generation at which each entry was registered.
+pub fn snapshot_registrations(world: &World) -> RegistrySnapshot {
+    let mut s = RegistrySnapshot::default();
+    if let Some(panels) = world.get_resource::<PluginPanels>() {
+        for p in &panels.0 {
+            s.panels.push((p.owner, p.owner_generation, p.id.clone()));
+        }
+    }
+    if let Some(passes) = world.get_resource::<PendingRenderPasses>() {
+        for p in &passes.0 {
+            s.render_passes.push((p.owner, p.owner_generation, p.id.clone()));
+        }
+    }
+    if let Some(effects) = world.get_resource::<PendingPostProcesses>() {
+        for e in &effects.0 {
+            s.post_processes.push((e.owner, e.owner_generation, e.id.clone()));
+        }
+    }
+    if let Some(mats) = world.get_resource::<PendingMaterials>() {
+        for m in &mats.0 {
+            s.pending_materials
+                .push((m.owner, m.owner_generation, m.id.clone()));
+        }
+    }
+    if let Some(backends) = world.get_resource::<PluginScriptBackends>() {
+        for b in &backends.0 {
+            s.script_backends.push((b.owner, b.owner_generation, b.name.clone()));
+        }
+    }
+    if let Some(audio) = world.get_resource::<PluginAudioBackend>() {
+        if let Some(b) = &audio.0 {
+            s.audio = Some((b.owner, b.owner_generation, b.name.clone()));
+        }
+    }
+    if let Some(net) = world.get_resource::<PluginNetBackend>() {
+        if let Some(b) = &net.0 {
+            s.net = Some((b.owner, b.owner_generation, b.name.clone()));
+        }
+    }
+    if let Some(assets) = world.get_resource::<PluginAssets>() {
+        for (owner, gen, handle) in &assets.meshes {
+            s.meshes.push((*owner, *gen, asset_id_to_u32(handle.id())));
+        }
+        for (owner, gen, mat_slot) in &assets.materials {
+            let hid = match mat_slot {
+                #[cfg(feature = "render_3d")]
+                MaterialSlot::Standard(h) => asset_id_to_u32(h.id()),
+                MaterialSlot::Custom { .. } => 0,
+            };
+            s.materials.push((*owner, *gen, hid));
+        }
+        for (owner, gen, handle) in &assets.images {
+            s.images.push((*owner, *gen, asset_id_to_u32(handle.id())));
+        }
+    }
+    if let Some(resources) = world.get_resource::<PluginResources>() {
+        let owners = world.get_resource::<PluginComponentOwners>();
+        for cid in &resources.0 {
+            // Record one snapshot row per active claim. A same-identity
+            // reload may carry two claims (prior + candidate) on the same
+            // id; both must be visible to the diff so the journal does not
+            // mistake the prior's claim for a candidate mutation.
+            s.pre_existing_resource_ids.insert(*cid);
+            let claims = owners
+                .as_ref()
+                .and_then(|o| o.0.get(cid))
+                .cloned()
+                .unwrap_or_default();
+            for (slot, gen) in claims {
+                s.resources.push((*cid, slot, gen));
+            }
+        }
+    }
+    if let Some(components) = world.get_resource::<PluginComponents>() {
+        let owners = world.get_resource::<PluginComponentOwners>();
+        for (path, cid) in &components.0 {
+            s.pre_existing_component_ids.insert(*cid);
+            let claims = owners
+                .as_ref()
+                .and_then(|o| o.0.get(cid))
+                .cloned()
+                .unwrap_or_default();
+            for (slot, gen) in claims {
+                s.component_ids.push((*cid, slot, gen));
+            }
+            let _ = path;
+        }
+    }
+    s
+}
+
+/// Diff the post-init state against the snapshot, returning every
+/// mutation the candidate made.
+///
+/// The candidate's new entries are precisely those whose
+/// `(owner, owner_generation) == (slot, proposed_generation)` AND whose
+/// key is not present in `before`. The `(slot, proposed_generation)`
+/// filter is what distinguishes candidate from prior when both share the
+/// same slot.
+pub fn diff_registrations(
+    world: &World,
+    before: &RegistrySnapshot,
+    slot: usize,
+    proposed_generation: u32,
+) -> TransactionJournal {
+    let mut journal = TransactionJournal::new();
+    let mut seen_panels: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(panels) = world.get_resource::<PluginPanels>() {
+        for p in &panels.0 {
+            if p.owner != slot || p.owner_generation != proposed_generation {
+                continue;
+            }
+            if before
+                .panels
+                .iter()
+                .any(|(o, g, id)| *o == slot && *g == proposed_generation && id == &p.id)
+            {
+                continue;
+            }
+            if seen_panels.insert(p.id.clone()) {
+                journal.0.push(JournalEntry::PanelAdded { slot, id: p.id.clone() });
+            }
+        }
+    }
+    let mut seen_rp: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(passes) = world.get_resource::<PendingRenderPasses>() {
+        for p in &passes.0 {
+            if p.owner != slot || p.owner_generation != proposed_generation {
+                continue;
+            }
+            if before
+                .render_passes
+                .iter()
+                .any(|(o, g, id)| *o == slot && *g == proposed_generation && id == &p.id)
+            {
+                continue;
+            }
+            if seen_rp.insert(p.id.clone()) {
+                journal.0.push(JournalEntry::RenderPassAdded { slot, id: p.id.clone() });
+            }
+        }
+    }
+    let mut seen_pp: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(effects) = world.get_resource::<PendingPostProcesses>() {
+        for e in &effects.0 {
+            if e.owner != slot || e.owner_generation != proposed_generation {
+                continue;
+            }
+            if before
+                .post_processes
+                .iter()
+                .any(|(o, g, id)| *o == slot && *g == proposed_generation && id == &e.id)
+            {
+                continue;
+            }
+            if seen_pp.insert(e.id.clone()) {
+                journal.0.push(JournalEntry::PostProcessAdded { slot, id: e.id.clone() });
+            }
+        }
+    }
+    let mut seen_sb: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(backends) = world.get_resource::<PluginScriptBackends>() {
+        for b in &backends.0 {
+            if b.owner != slot || b.owner_generation != proposed_generation {
+                continue;
+            }
+            if before
+                .script_backends
+                .iter()
+                .any(|(o, g, n)| *o == slot && *g == proposed_generation && n == &b.name)
+            {
+                continue;
+            }
+            if seen_sb.insert(b.name.clone()) {
+                journal.0.push(JournalEntry::ScriptBackendAdded { slot, name: b.name.clone() });
+            }
+        }
+    }
+    if let Some(audio) = world.get_resource::<PluginAudioBackend>() {
+        if let Some(b) = &audio.0 {
+            if b.owner == slot
+                && b.owner_generation == proposed_generation
+                && before.audio.as_ref() != Some(&(slot, proposed_generation, b.name.clone()))
+            {
+                journal.0.push(JournalEntry::AudioBackendClaimed { slot, name: b.name.clone() });
+            }
+        }
+    }
+    if let Some(net) = world.get_resource::<PluginNetBackend>() {
+        if let Some(b) = &net.0 {
+            if b.owner == slot
+                && b.owner_generation == proposed_generation
+                && before.net.as_ref() != Some(&(slot, proposed_generation, b.name.clone()))
+            {
+                journal.0.push(JournalEntry::NetBackendClaimed { slot, name: b.name.clone() });
+            }
+        }
+    }
+    let mut seen_pm: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(mats) = world.get_resource::<PendingMaterials>() {
+        for m in &mats.0 {
+            if m.owner != slot || m.owner_generation != proposed_generation {
+                continue;
+            }
+            if before
+                .pending_materials
+                .iter()
+                .any(|(o, g, id)| *o == slot && *g == proposed_generation && id == &m.id)
+            {
+                continue;
+            }
+            if seen_pm.insert(m.id.clone()) {
+                journal.0.push(JournalEntry::PendingMaterialAdded {
+                    slot,
+                    id: m.id.clone(),
+                    material_id: m.material_id,
+                });
+            }
+        }
+    }
+    if let Some(assets) = world.get_resource::<PluginAssets>() {
+        // The pre-init snapshot already records every `(owner, gen)` for
+        // meshes, materials, and images. Rollback uses these to
+        // identify the prior's entries, while the journal records the
+        // STABLE `Handle::id().index()` so a rollback that runs after
+        // an unrelated add (or any number of them) still drops exactly
+        // the candidate's entry — the prior review's C3-7 finding:
+        // index-based rollback shifts vectors on every remove and
+        // throws the post-init order away from the pre-init order.
+        for (owner, gen, handle) in &assets.meshes {
+            if *owner != slot || *gen != proposed_generation {
+                continue;
+            }
+            let hid = asset_id_to_u32(handle.id());
+            if before
+                .meshes
+                .iter()
+                .any(|(o, g, h)| *o == slot && *g == proposed_generation && *h == hid)
+            {
+                continue;
+            }
+            journal.0.push(JournalEntry::MeshCreated {
+                slot,
+                handle_id: hid,
+            });
+        }
+        for (owner, gen, mat_slot) in &assets.materials {
+            if *owner != slot || *gen != proposed_generation {
+                continue;
+            }
+            let hid = match mat_slot {
+                #[cfg(feature = "render_3d")]
+                MaterialSlot::Standard(h) => asset_id_to_u32(h.id()),
+                MaterialSlot::Custom { .. } => 0, // Custom materials don't expose a handle id; they live in PendingMaterials.
+            };
+            if before
+                .materials
+                .iter()
+                .any(|(o, g, h)| *o == slot && *g == proposed_generation && *h == hid)
+            {
+                continue;
+            }
+            journal.0.push(JournalEntry::MaterialCreated {
+                slot,
+                handle_id: hid,
+            });
+        }
+        for (owner, gen, handle) in &assets.images {
+            if *owner != slot || *gen != proposed_generation {
+                continue;
+            }
+            let hid = asset_id_to_u32(handle.id());
+            if before
+                .images
+                .iter()
+                .any(|(o, g, h)| *o == slot && *g == proposed_generation && *h == hid)
+            {
+                continue;
+            }
+            journal.0.push(JournalEntry::ImageCreated {
+                slot,
+                handle_id: hid,
+            });
+        }
+    }
+    if let Some(components) = world.get_resource::<PluginComponents>() {
+        let owners = world.get_resource::<PluginComponentOwners>();
+        for (path, cid) in &components.0 {
+            // A candidate-ownership claim for this id at this slot +
+            // generation. The candidate appends a claim on every
+            // registration (including re-registration of an existing
+            // id), so the presence of a matching claim is the
+            // candidate-touched signal.
+            let owned_by_candidate = owners
+                .as_ref()
+                .and_then(|o| o.0.get(cid))
+                .is_some_and(|claims| claims.contains(&(slot, proposed_generation)));
+            if !owned_by_candidate {
+                continue;
+            }
+            // Was this exact claim present BEFORE init? If so the
+            // candidate's `register_component` re-used the id but the
+            // claim itself was already there — no new mutation.
+            if before
+                .component_ids
+                .iter()
+                .any(|(c, s, g)| *c == *cid && *s == slot && *g == proposed_generation)
+            {
+                continue;
+            }
+            let was_pre_existing = before.pre_existing_component_ids.contains(cid);
+            journal.0.push(JournalEntry::ComponentRegistered {
+                slot,
+                type_path: path.clone(),
+                id: *cid,
+                was_pre_existing,
+            });
+        }
+    }
+    // Diff the per-identity durable registration for inserts and
+    // replacements the candidate made. The candidate's
+    // ownership claim is the touch signal — same as the
+    // `ComponentRegistered` diff above. With Z3-1 durable
+    // identities, the lookup key is the per-canonical-identity
+    // durable path, not a (slot, basename) pair.
+    if let Some(resources) = world.get_resource::<PluginResources>() {
+        let owners = world.get_resource::<PluginComponentOwners>();
+        for cid in &resources.0 {
+            let owned_by_candidate = owners
+                .as_ref()
+                .and_then(|o| o.0.get(cid))
+                .is_some_and(|claims| claims.contains(&(slot, proposed_generation)));
+            if !owned_by_candidate {
+                continue;
+            }
+            if before
+                .resources
+                .iter()
+                .any(|(c, s, g)| *c == *cid && *s == slot && *g == proposed_generation)
+            {
+                continue;
+            }
+            let was_pre_existing = before.pre_existing_resource_ids.contains(cid);
+            // A candidate that called `register_resource` ran the same
+            // path as `insert_resource` for default-init, so the
+            // resource backing entity exists at the diff point. A
+            // candidate that only called `register_component` (without
+            // `register_resource`) for a resource-like id is not
+            // possible — `register_resource` is the resource
+            // registration entry point — so the resource backing
+            // entity is always present for any id in `PluginResources`.
+            let candidate_wrote_value = world.resource_entities().get(*cid).is_some();
+            journal.0.push(JournalEntry::ResourceRegistered {
+                slot,
+                type_path: format!("<id-{}>", cid.index()),
+                id: *cid,
+                was_pre_existing,
+                candidate_wrote_value,
+            });
+        }
+    }
+    journal
+}
+
+/// A list of `JournalEntry`s plus the helpers the loader uses to commit
+/// or rollback.
+#[derive(Debug, Default)]
+pub struct TransactionJournal(pub Vec<JournalEntry>);
+
+impl TransactionJournal {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+    pub fn entries(&self) -> &[JournalEntry] {
+        &self.0
+    }
+    pub fn entries_mut(&mut self) -> &mut Vec<JournalEntry> {
+        &mut self.0
+    }
+}
+
+/// Replay every entry in `journal` in reverse, undoing each one. Used by
+/// the transactional loader path on every failure mode.
+///
+/// `proposed_generation` is the candidate's generation tag; entries whose
+/// `(slot, owner_generation)` does not match are left alone. Rollback
+/// therefore affects only the candidate's mutations and never touches
+/// the prior generation's stable registrations.
+pub fn apply_journal_rollback(
+    world: &mut World,
+    journal: &mut TransactionJournal,
+    slot: usize,
+    proposed_generation: u32,
+) {
+    // Q3-2: collect every candidate custom-material id into a single batch
+    // BEFORE mutating either `PendingMaterials` or `PluginAssets::materials`.
+    // Removing one candidate's row at a time while iterating the journal in
+    // reverse shifts the remaining rows' positions, so subsequent removes
+    // point at the wrong (or already-removed) entries. A single sorted-desc
+    // batch keeps each removal targeted to the candidate's stable identity.
+    let mut pending_material_ids: Vec<u64> = Vec::new();
+    for entry in journal.0.iter() {
+        if let JournalEntry::PendingMaterialAdded { material_id, .. } = entry {
+            if !pending_material_ids.contains(material_id) {
+                pending_material_ids.push(*material_id);
+            }
+        }
+    }
+    pending_material_ids.sort_unstable_by(|a, b| b.cmp(a));
+    let pending_material_id_set: std::collections::HashSet<u64> =
+        pending_material_ids.iter().copied().collect();
+
+    // Drop the candidate's `PendingMaterial` rows by stable id.
+    if !pending_material_id_set.is_empty() {
+        if let Some(mut mats) = world.get_resource_mut::<PendingMaterials>() {
+            mats.0
+                .retain(|m| !pending_material_id_set.contains(&m.material_id));
+        }
+        // Drop the candidate's `MaterialSlot::Custom { material_id }` rows
+        // by stable id. Each `assets.materials` row carries the
+        // `material_id` registered at the same `add_material_shader` call,
+        // so identity-based removal works regardless of insertion order.
+        if let Some(mut assets) = world.get_resource_mut::<PluginAssets>() {
+            assets.materials.retain(|(_, _, slot)| match slot {
+                MaterialSlot::Custom { material_id } => {
+                    !pending_material_id_set.contains(material_id)
+                }
+                #[cfg(feature = "render_3d")]
+                _ => true,
+            });
+        }
+    }
+
+    let entries: Vec<JournalEntry> = journal.0.drain(..).rev().collect();
+    for entry in entries {
+        match entry {
+            JournalEntry::PanelAdded { slot: s, id } => {
+                if let Some(mut panels) = world.get_resource_mut::<PluginPanels>() {
+                    panels
+                        .0
+                        .retain(|p| !(p.owner == s && p.owner_generation == proposed_generation && p.id == id));
+                }
+                let _ = slot;
+            }
+            JournalEntry::RenderPassAdded { slot: s, id } => {
+                if let Some(mut passes) = world.get_resource_mut::<PendingRenderPasses>() {
+                    passes
+                        .0
+                        .retain(|p| !(p.owner == s && p.owner_generation == proposed_generation && p.id == id));
+                }
+                let _ = slot;
+            }
+            JournalEntry::PostProcessAdded { slot: s, id } => {
+                if let Some(mut effects) = world.get_resource_mut::<PendingPostProcesses>() {
+                    effects
+                        .0
+                        .retain(|e| !(e.owner == s && e.owner_generation == proposed_generation && e.id == id));
+                }
+                let _ = slot;
+            }
+            JournalEntry::ScriptBackendAdded { slot: s, name } => {
+                if let Some(mut backends) = world.get_resource_mut::<PluginScriptBackends>() {
+                    backends.0.retain(|b| !(b.owner == s && b.owner_generation == proposed_generation && b.name == name));
+                }
+                let _ = slot;
+            }
+            JournalEntry::AudioBackendClaimed { slot: s, name } => {
+                if let Some(mut audio) = world.get_resource_mut::<PluginAudioBackend>() {
+                    if audio
+                        .0
+                        .as_ref()
+                        .is_some_and(|b| b.owner == s && b.owner_generation == proposed_generation && b.name == name)
+                    {
+                        audio.0 = None;
+                    }
+                }
+                let _ = slot;
+            }
+            JournalEntry::NetBackendClaimed { slot: s, name } => {
+                if let Some(mut net) = world.get_resource_mut::<PluginNetBackend>() {
+                    if net
+                        .0
+                        .as_ref()
+                        .is_some_and(|b| b.owner == s && b.owner_generation == proposed_generation && b.name == name)
+                    {
+                        net.0 = None;
+                    }
+                }
+                let _ = slot;
+            }
+            JournalEntry::PendingMaterialAdded { .. } => {
+                // Q3-2: handled by the batched pass at the top of
+                // `apply_journal_rollback`. Iterating here with `slot` /
+                // `id` matching would re-shift vectors mid-loop.
+            }
+            JournalEntry::MeshCreated { slot: s, handle_id } => {
+                // Identify the candidate's entry by STABLE handle id,
+                // not by vector index. Removing whatever currently
+                // occupies an index would shift every later entry and
+                // break rollback's invariant that the post-rollback
+                // registries match the pre-init snapshot exactly.
+                if let Some(mut assets) = world.get_resource_mut::<PluginAssets>() {
+                    if let Some(pos) = assets.meshes.iter().position(|(owner, gen, handle)| {
+                        *owner == s
+                            && *gen == proposed_generation
+                            && asset_id_to_u32(handle.id()) == handle_id
+                    }) {
+                        let (_owner, _gen, handle) = assets.meshes.remove(pos);
+                        drop(handle);
+                    }
+                }
+                let _ = slot;
+            }
+            JournalEntry::MaterialCreated { slot: s, handle_id } => {
+                if let Some(mut assets) = world.get_resource_mut::<PluginAssets>() {
+                    if let Some(pos) = assets.materials.iter().position(|(owner, gen, mat_slot)| {
+                        *owner == s
+                            && *gen == proposed_generation
+                            && match mat_slot {
+                                #[cfg(feature = "render_3d")]
+                                MaterialSlot::Standard(h) => {
+                                    asset_id_to_u32(h.id()) == handle_id
+                                }
+                                MaterialSlot::Custom { .. } => handle_id == 0,
+                            }
+                    }) {
+                        let (_owner, _gen, _slot) = assets.materials.remove(pos);
+                        // No handle to drop — the StandardMaterial's
+                        // strong handle lived in the MaterialSlot and
+                        // dropping the slot releases it.
+                    }
+                }
+                let _ = slot;
+            }
+            JournalEntry::ImageCreated { slot: s, handle_id } => {
+                if let Some(mut assets) = world.get_resource_mut::<PluginAssets>() {
+                    if let Some(pos) = assets.images.iter().position(|(owner, gen, handle)| {
+                        *owner == s
+                            && *gen == proposed_generation
+                            && asset_id_to_u32(handle.id()) == handle_id
+                    }) {
+                        let (_owner, _gen, handle) = assets.images.remove(pos);
+                        drop(handle);
+                    }
+                }
+                let _ = slot;
+            }
+            JournalEntry::ComponentRegistered { id, was_pre_existing, .. } => {
+                // Two cases, distinguished by the pre-init snapshot:
+                //
+                // - `was_pre_existing == true` (a same-identity reload
+                //   re-registered an id the prior generation already
+                //   owned): drop the candidate's claim only. The id
+                //   itself stays in `PluginComponents` and
+                //   `PluginComponentSchemas` because Bevy allocates
+                //   `ComponentId`s permanently and existing entity data
+                //   references them. The candidate's system
+                //   registrations carry `at = proposed_generation` and
+                //   stay stale because
+                //   `restore_slot_after_rollback` keeps the counter at
+                //   `prior_loaded_at`.
+                //
+                // - `was_pre_existing == false` (the candidate first
+                //   introduced this id): drop the candidate's claim AND
+                //   the public metadata — the inspector,
+                //   `PluginComponents`, and `PluginComponentSchemas`
+                //   must NOT show a component the failed candidate
+                //   installed. The underlying `ComponentId` stays
+                //   allocated (Bevy never frees them) because we cannot
+                //   know whether a future plugin will reuse it; what we
+                //   MUST do is hide it from every consumer.
+                if let Some(mut owners) = world.get_resource_mut::<PluginComponentOwners>() {
+                    if let Some(claims) = owners.0.get_mut(&id) {
+                        claims.retain(|&(s, g)| !(s == slot && g == proposed_generation));
+                    }
+                    owners.0.retain(|_, claims| !claims.is_empty());
+                }
+                if !was_pre_existing {
+                    if let Some(mut comps) = world.get_resource_mut::<PluginComponents>() {
+                        comps.0.retain(|_, existing_id| *existing_id != id);
+                    }
+                    if let Some(mut schemas) = world.get_resource_mut::<PluginComponentSchemas>() {
+                        schemas.0.retain(|info| info.id != id);
+                    }
+                }
+            }
+            JournalEntry::ResourceRegistered { id, was_pre_existing, candidate_wrote_value, .. } => {
+                // F3-1: registration cleanup and byte restoration are
+                // separate operations. A failed candidate that
+                // overwrote a pre-existing resource gets byte
+                // restoration (driven by the companion `ResourceInserted`
+                // entry — see `activate_with_transaction`) and ALSO gets
+                // its ownership/metadata cleanup here. A failed candidate
+                // that introduced a brand-new resource gets cleanup of
+                // its ownership claim, the `PluginResources` /
+                // `PluginComponentSchemas` entries, and (if it wrote a
+                // value) the orphan resource backing entity.
+                if let Some(mut owners) = world.get_resource_mut::<PluginComponentOwners>() {
+                    if let Some(claims) = owners.0.get_mut(&id) {
+                        claims.retain(|&(s, g)| !(s == slot && g == proposed_generation));
+                    }
+                    owners.0.retain(|_, claims| !claims.is_empty());
+                }
+                if !was_pre_existing {
+                    if let Some(mut res) = world.get_resource_mut::<PluginResources>() {
+                        res.0.retain(|existing_id| *existing_id != id);
+                    }
+                    if let Some(mut schemas) = world.get_resource_mut::<PluginComponentSchemas>() {
+                        schemas.0.retain(|info| info.id != id);
+                    }
+                    if candidate_wrote_value {
+                        // The candidate installed a value the world now
+                        // holds. No other registered plugin can reach it
+                        // — the id is no longer in `PluginResources` —
+                        // so dropping the resource backing entity is
+                        // safe. The Bevy `ComponentId` stays allocated,
+                        // matching the ComponentRegistered cleanup.
+                        if let Some(entity) = world.resource_entities().get(id) {
+                            let mut ent = world.entity_mut(entity);
+                            ent.remove_by_id(id);
+                            // Despawn if nothing else hangs off the
+                            // entity. Resource backing entities carry
+                            // the resource component plus the marker,
+                            // so no actual despawn is expected —
+                            // the resource is removed but the entity
+                            // is left for Bevy's resource marker.
+                        }
+                    }
+                }
+            }
+            JournalEntry::ResourceInserted { id, prior_bytes } => {
+                if let Some(bytes) = prior_bytes {
+                    unsafe {
+                        crate::host::write_resource_bytes_unsafe(world, id, &bytes);
+                    }
+                }
+            }
+            JournalEntry::LayoutConflict { .. } => {}
+        }
+    }
+}
+
 /// Call a freshly-`dlopen`'d plugin's init function.
 ///
 /// The library handle must outlive the process: every function pointer the
@@ -3955,7 +5269,70 @@ fn bevy_label(s: sys::Schedule) -> impl ScheduleLabel {
 /// holding dangling entries. (Unloading safely needs a registration ledger and
 /// a teardown pass — a separate piece of work.)
 pub fn init_plugin(world: &mut World, init: sys::ExtensionInit) -> sys::InitResult {
-    init_plugin_gen(world, init, PluginGeneration::default(), 0, usize::MAX)
+    init_plugin_gen_with_non_persistable(
+        world,
+        init,
+        PluginGeneration::default(),
+        0,
+        usize::MAX,
+        // The legacy non-transactional entry point has no canonical
+        // identity to pass. The function-pointer-derived identity is
+        // reproducible within one process and distinct across
+        // processes, but it is NOT stable across ASLR / relinking
+        // and therefore cannot back persisted component paths. The
+        // host marks the registration as non-persistable; component
+        // / resource registrations are refused. New callers should
+        // use `init_plugin_gen` (or `init_plugin_gen_with_non_persistable`
+        // for test-only entry) directly with a real, stable
+        // canonical identity, or `load_one_transactional`.
+        CanonicalId::from_rooted(
+            renzora_identity::RootKind::Engine,
+            &format!("legacy://init_plugin/{:p}", init as *const ()),
+        )
+        .expect("synthetic identity is well-formed"),
+        true,
+    )
+    .as_init_result()
+}
+
+/// What `init_plugin_gen` actually reported. The C ABI carries only
+/// [`sys::InitResult`] (a `#[repr(transparent)] i32`), so the host layers a
+/// richer return on top that distinguishes `LayoutConflict(reason)` from
+/// generic `Failed`. The transactional loader uses this to set
+/// `ActivationFailure::LayoutConflict` and the inventory transitions to
+/// `LayoutChangeRequiresRestart`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitOutcome {
+    Ok,
+    VersionTooOld,
+    AbiMismatch,
+    /// Concrete layout-conflict reason. Distinct from `Failed` so the
+    /// inventory can report the specific incompatible component / field.
+    LayoutConflict(String),
+    /// Generic init failure, or `Failed` from the plugin. We cannot tell
+    /// which without inspecting `result`; the loader passes the reason
+    /// through.
+    Failed,
+    /// The plugin returned a `sys::InitResult` value outside the known
+    /// range. The plugin was built against a newer ABI than this host
+    /// knows, so refused.
+    UnknownStatus(i32),
+}
+
+impl InitOutcome {
+    /// Translate a host-side `InitOutcome` back into the C-ABI `InitResult`
+    /// for code paths that still hand it to the legacy `load_one`
+    /// non-transactional loader.
+    pub fn as_init_result(&self) -> sys::InitResult {
+        match self {
+            InitOutcome::Ok => sys::InitResult::Ok,
+            InitOutcome::VersionTooOld => sys::InitResult::VersionTooOld,
+            InitOutcome::AbiMismatch => sys::InitResult::AbiMismatch,
+            InitOutcome::LayoutConflict(_) => sys::InitResult::Failed,
+            InitOutcome::Failed => sys::InitResult::Failed,
+            InitOutcome::UnknownStatus(s) => sys::InitResult(*s),
+        }
+    }
 }
 
 /// Initialise a plugin as a numbered reload of a slot.
@@ -3963,13 +5340,45 @@ pub fn init_plugin(world: &mut World, init: sys::ExtensionInit) -> sys::InitResu
 /// `counter`/`generation` are the slot's shared reload counter and the value it
 /// holds for this load. Every system registered during this call captures them and
 /// retires itself once the counter moves on — see [`GenGate`].
+///
+/// Returns a host-side [`InitOutcome`] so the transactional loader can
+/// distinguish `LayoutConflict(reason)` from generic `Failed` and the
+/// inventory can transition to `LayoutChangeRequiresRestart`. The C-ABI
+/// [`sys::InitResult`] is what the plugin produced; layout conflicts are
+/// detected on the way out (see [`HostCtx::layout_conflict`]).
 pub fn init_plugin_gen(
     world: &mut World,
     init: sys::ExtensionInit,
     counter: PluginGeneration,
     generation: u32,
     slot: usize,
-) -> sys::InitResult {
+    identity: CanonicalId,
+) -> InitOutcome {
+    init_plugin_gen_with_non_persistable(
+        world,
+        init,
+        counter,
+        generation,
+        slot,
+        identity,
+        false,
+    )
+}
+
+/// Internal helper: `non_persistable = true` marks the
+/// registration as ineligible to produce durable component /
+/// resource paths. The legacy `init_plugin` entry point uses
+/// this; production paths (transactional loader, linked plugins)
+/// pass `false`.
+pub fn init_plugin_gen_with_non_persistable(
+    world: &mut World,
+    init: sys::ExtensionInit,
+    counter: PluginGeneration,
+    generation: u32,
+    slot: usize,
+    identity: CanonicalId,
+    non_persistable: bool,
+) -> InitOutcome {
     // MUST be the `'static` table, not `interface()`. A plugin stores this
     // pointer so its render callbacks can reach the interface on later frames;
     // handing it a stack local leaves it dangling the moment this returns, and
@@ -3983,6 +5392,9 @@ pub fn init_plugin_gen(
         },
         slot,
         layout_conflict: false,
+        layout_conflict_reason: None,
+        identity,
+        non_persistable,
     };
     let result = unsafe { init(&IFACE, (&mut ctx as *mut HostCtx).cast()) };
     // A layout change is only discoverable once the plugin registers, i.e. part
@@ -3990,7 +5402,16 @@ pub fn init_plugin_gen(
     // loader leaves the generation counter alone, so this build's systems are
     // permanently stale and the previous build carries on running.
     if ctx.layout_conflict {
-        return sys::InitResult::Failed;
+        let reason = ctx
+            .layout_conflict_reason
+            .unwrap_or_else(|| "layout conflict detected during init".to_string());
+        return InitOutcome::LayoutConflict(reason);
     }
-    result
+    match result {
+        r if r == sys::InitResult::Ok => InitOutcome::Ok,
+        r if r == sys::InitResult::VersionTooOld => InitOutcome::VersionTooOld,
+        r if r == sys::InitResult::AbiMismatch => InitOutcome::AbiMismatch,
+        r if r == sys::InitResult::Failed => InitOutcome::Failed,
+        other => InitOutcome::UnknownStatus(other.0),
+    }
 }

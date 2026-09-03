@@ -104,3 +104,14 @@ Scripts may live anywhere in the project, not only in `scripts/`. Where two fold
 - **No props.** A Lua script declares tunables in a table the backend parses. The Rust equivalent would read attributes off the source; until then, a script's tunables are ordinary components on the entity, which the inspector already edits.
 - **No REPL.** Evaluating a Rust expression would mean invoking the compiler and mapping a library per expression.
 - **One file.** A script is a single `.rs`; a plugin is the answer when you need modules.
+
+## Phase 3 vs Phase 4
+
+Phase 3 (loose Tier-1 plugins) adds `<plugin-root>/<name>.rs` files,
+which compile and load via the small `renzora_plugin` C ABI through
+the Phase 2 cached compiler service. Phase 3 does NOT migrate editor
+Rust scripts (the `.rs` files this page describes) onto the same path.
+Those remain on the accepted Phase 1 `renzora_rust_script` build path
+until Phase 4. Phase 4 will introduce the small Tier-1 script ABI
+that lets editor Rust scripts compile against the same `BuildService`
+the loose plugins use.

@@ -1280,6 +1280,97 @@ pub fn stage_runtime_native_plugins(
     Ok(shipped.len())
 }
 
+/// Ship the loose Tier-1 plugin cdylibs the editor already built, beside
+/// a copy-based export.
+///
+/// Mirrors [`stage_runtime_native_plugins`]: each selected Runtime loose
+/// plugin's staged cdylib is copied to `<output>/plugins/<safe-name>/build/`.
+/// Editor-scoped loose plugins are excluded (the runtime has no editor
+/// surface); disabled loose plugins are excluded (the user disabled them).
+///
+/// `candidates` is the snapshot `run_export` takes of
+/// `LoosePluginInventory::export_candidates()` while it still holds
+/// `&mut World`; passing it by value lets the background export worker
+/// stage without touching a Bevy world.
+///
+/// C3-6: the filesystem path uses the safe-name encoder (`:` and `/`
+/// replaced with `_`) because the canonical id (e.g. `engine://spin.rs`)
+/// contains path separators that would create unintended subdirectories
+/// and an invalid Windows directory name. The full canonical id is the
+/// logical key and selection identity, but the filesystem placement
+/// uses the safe name.
+///
+/// Returns how many were staged.
+pub fn stage_loose_plugins_from(
+    candidates: &[(String, std::path::PathBuf)],
+    output_dir: &std::path::Path,
+    selected: Option<&std::collections::HashSet<String>>,
+    progress: &mut dyn FnMut(String),
+) -> Result<usize, String> {
+    let disabled = renzora::load_disabled_plugins();
+
+    let mut shipped: Vec<String> = Vec::new();
+    for (name, staged_path) in candidates {
+        if disabled.iter().any(|d| d == name) {
+            continue;
+        }
+        // Unticked in the picker. Distinct from `disabled` above: that is
+        // "not in my editor", this is "not in this build".
+        if selected.is_some_and(|s| !s.contains(name)) {
+            continue;
+        }
+        // Logical key: full canonical id (kept as `name` for the
+        // progress / persistence layer). Physical placement: the
+        // safe-name encoder's output, which is a valid directory name
+        // on every OS. Two loose plugins whose canonical ids share a
+        // leaf (e.g. `engine://spin.rs` and `market://spin.rs`) export
+        // to two distinct directories under different safe names.
+        let safe_name = canonical_to_safe_dir_name(name);
+        let dest = output_dir
+            .join("plugins")
+            .join(&safe_name)
+            .join("build");
+        std::fs::create_dir_all(&dest)
+            .map_err(|e| format!("create {}: {e}", dest.display()))?;
+        // The staged file's filename already encodes the canonical id
+        // through the same safe-name encoder (see
+        // `StableStaging::stable_name_for`); we copy it under that
+        // name so a runtime that scans the export tree can resolve the
+        // canonical id back to its stable file.
+        let staged_name = staged_path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        let dest_lib = dest.join(&staged_name);
+        std::fs::copy(staged_path, &dest_lib).map_err(|e| {
+            format!(
+                "copy {} → {}: {e}",
+                staged_path.display(),
+                dest_lib.display()
+            )
+        })?;
+        shipped.push(name.clone());
+    }
+    if !shipped.is_empty() {
+        progress(format!(
+            "Shipped {} loose runtime plugin(s): {}",
+            shipped.len(),
+            shipped.join(", ")
+        ));
+    }
+    Ok(shipped.len())
+}
+
+/// Encode a canonical id's `Display` form (`engine://spin.rs`) as a
+/// directory-safe name. Replaces `:` and `/` with `_`, producing a
+/// valid filename on every OS. Same encoding as
+/// `StableStaging::safe_dir_name_for`, duplicated here to avoid
+/// adding `renzora_loose_plugins` as a build-script / public-export
+/// dependency on this crate's runtime path.
+pub fn canonical_to_safe_dir_name(canonical: &str) -> String {
+    canonical.replace([':', '/'], "_")
+}
+
 /// Ship the script libraries the editor already built, beside a copy-based
 /// export.
 ///

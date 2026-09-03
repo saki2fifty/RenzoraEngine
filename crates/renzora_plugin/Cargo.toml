@@ -150,7 +150,7 @@ net = ["std"]
 # Requires `std` — it links Bevy, `libloading` and the host's own threading, none
 # of which exist without it. That is not a limitation to lift: the host is the
 # editor, and the editor is a windowed GPU application.
-host = ["std", "dep:bevy", "dep:libloading", "dep:notify-debouncer-full"]
+host = ["std", "dep:bevy", "dep:libloading", "dep:notify-debouncer-full", "dep:blake3"]
 # The 3D half of the host: `StandardMaterial` / `MeshMaterial3d`, which come from
 # `bevy_pbr`. A 2D-only export strips that, so without this `add_material`
 # refuses with a warning and `MaterialSlot::Standard` does not exist. Plugins
@@ -179,6 +179,7 @@ render_3d = []
 # mirrored rather than shared by pointer.
 [dependencies]
 renzora_plugin_derive = { path = "../renzora_plugin_derive" }
+renzora_identity = { path = "../renzora_identity", default-features = false }
 bevy = { workspace = true, optional = true }
 libloading = { version = "0.8", optional = true }
 # `host` only — the live-rebuild source watcher (`host::dev`). Already in the
@@ -194,6 +195,10 @@ notify-debouncer-full = { version = "0.7", optional = true }
 # `no_std` and dependency-free, so it does not weaken the guarantee above — it
 # exposes functions, not types, and nothing from it crosses the ABI boundary.
 libm = { version = "0.2", optional = true }
+# Used only by `host` for the durable-identity hash. The plugin side does not
+# need it — `durable_type_path` lives behind `host` because the host is the
+# sole constructor of the durable name.
+blake3 = { version = "1", optional = true }
 
 # NOTE: the tests deliberately link NO plugin from `plugins/`. A path dependency
 # on one would drag it back into the engine's workspace — cargo rejects a path dep

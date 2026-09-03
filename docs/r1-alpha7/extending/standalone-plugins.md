@@ -1428,6 +1428,33 @@ assert_eq!(
 
 Your crate can import `renzora_plugin`, so it can compare the two strings directly. Do this — it is the only thing standing between a rename and a class of bug with no error message.
 
+### Durable host identity
+
+The local `TypePath` your plugin passes to `register_component`
+or writes into a hand-written `ComponentDesc.name` is a **plugin
+identifier**. The host wraps it in a versioned, collision-
+resistant durable name before storing it anywhere the scene can
+see:
+
+```
+renzora.plugin/v1/<blake3_64hex>/<local>
+```
+
+`<blake3_64hex>` is a full-strength (256-bit) BLAKE3 of the plugin's
+canonical identity. The format version `v1` is a marker; bumping
+it is the breaking-change path. A reader that does not recognise
+the prefix refuses the scene rather than guessing. Two distinct
+canonical plugins therefore have two distinct durable paths even
+when they ship the same local type name `State`, so a single
+scene can save and restore both without aliasing.
+
+The host constructs the durable name at the registration
+boundary (`renzora_plugin::host::durable_type_path`). The plugin
+author never has to know or write the generated path. The
+`PluginComponents` map and `PluginComponentSchemas` store the
+durable name; Bevy's `ComponentDescriptor.name` and the scene's
+`RawTypeTable::by_path` mirror it.
+
 ### Where the module goes
 
 In the crate that owns the domain, as long as that crate may depend on `renzora_plugin` (with the `host` feature). The dependency only ever runs that way: `renzora_plugin` must stay publishable to crates.io so a third-party author can `cargo add` it, and a published crate cannot have path dependencies.
@@ -1530,3 +1557,14 @@ material supplies a fragment only; the second rasterizes glyphs into an SDF atla
 runtime, and plugin image creation is init-only. Both are [native plugins](native-plugins.md)
 now, which is the right answer to that shape of limit — a native plugin links the real Bevy, so
 neither constraint applies to it.
+
+## Loose Tier-1 plugins (Phase 3)
+
+The directory-based C-ABI path (one `plugins/<name>/Cargo.toml` per
+plugin) is one way to author a standalone plugin. Phase 3 adds a
+second: a loose `plugins/<name>.rs` file with the same `renzora_plugin`
+ergonomic API and an explicit `Runtime` or `Editor` scope. The editor
+compiles the file through the Phase 2 cached compiler service and
+loads it through the same C-ABI mechanism this page documents. See
+[plugins.md § Loose single-file plugins](./plugins.md#loose-single-file-plugins-phase-3)
+for the authoring contract and the supported scopes.

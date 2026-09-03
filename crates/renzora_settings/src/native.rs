@@ -259,6 +259,8 @@ pub(crate) fn build(app: &mut App) {
             refresh_settings_on_font_change,
             settings_close_click,
             plugin_toggle_click,
+            plugin_trust_click,
+            plugin_reload_click,
             theme_save_click,
             ember_theme_save_click,
             apply_font_settings,
@@ -2324,6 +2326,13 @@ struct PluginCard {
     status: String,
     /// Whether `status` describes something wrong, which decides its colour.
     problem: bool,
+    /// Whether this card corresponds to a Phase 3 loose Tier-1 plugin
+    /// (drives the trust and reload buttons).
+    is_loose: bool,
+    /// Loose plugins that have not yet been granted consent get a
+    /// "Grant trust" button; trusted ones get "Revoke trust".
+    awaiting_consent: bool,
+    trusted: bool,
 }
 
 fn plugin_cards(rx: &Rx) -> renzora_ember::reactive::KeyedSnapshot {
@@ -2345,6 +2354,27 @@ fn plugin_cards(rx: &Rx) -> renzora_ember::reactive::KeyedSnapshot {
         .into_iter()
         .map(|e| {
             let enabled = !disabled.map(|d| d.contains(&e.id)).unwrap_or(false);
+            let is_loose = matches!(e.kind, renzora::PluginKind::LooseTier1);
+            // Read loose-plugin-specific resources only for loose rows.
+            let (awaiting_consent, trusted) = if is_loose {
+                let consent = rx.get_resource::<renzora_loose_plugins::LoosePluginTrust>();
+                let awaiting = matches!(
+                    &e.state,
+                    renzora::PluginState::Skipped(s) if s == "awaiting trust consent"
+                );
+                let trusted = consent
+                    .map(|c| {
+                        // The canonical id is what the loose host keys
+                        // its trust set on. Compare via the plugin
+                        // entry's id field (which is the canonical
+                        // id, per `mirror_to_plugin_inventory`).
+                        c.has_consent_by_str(&e.id)
+                    })
+                    .unwrap_or(false);
+                (awaiting, trusted)
+            } else {
+                (false, false)
+            };
             let (status, problem) = match &e.state {
                 // Both halves matter: "Active" is this launch, the switch is
                 // intent for the next one. A plugin that is running but toggled
@@ -2369,6 +2399,9 @@ fn plugin_cards(rx: &Rx) -> renzora_ember::reactive::KeyedSnapshot {
                 enabled,
                 status,
                 problem,
+                is_loose,
+                awaiting_consent,
+                trusted,
             }
         })
         .collect();
@@ -2496,6 +2529,40 @@ fn plugin_card(commands: &mut Commands, fonts: &EmberFonts, card: &PluginCard) -
         FocusPolicy::Block,
     ));
 
+    // Loose Tier-1 plugins need two extra controls: a trust toggle (to
+    // grant or revoke the consent gate that blocks the initial compile)
+    // and a reload button (to re-submit the source to BuildService
+    // without waiting for a filesystem event). Both are surfaced as
+    // markers on clickable children of the footer; the click systems
+    // below mutate the loose-plugin resources.
+    let trust_btn = if card.is_loose && card.awaiting_consent {
+        Some(plugin_button(commands, fonts, &tr("settings.plugin.grant_trust")))
+    } else if card.is_loose && card.trusted {
+        Some(plugin_button(commands, fonts, &tr("settings.plugin.revoke_trust")))
+    } else {
+        None
+    };
+    if let Some(b) = trust_btn {
+        commands.entity(b).insert((
+            PluginTrustButton {
+                id: card.id.clone(),
+                grant: !card.trusted,
+            },
+            FocusPolicy::Block,
+        ));
+    }
+    let reload_btn = if card.is_loose {
+        Some(plugin_button(commands, fonts, &tr("settings.plugin.reload")))
+    } else {
+        None
+    };
+    if let Some(b) = reload_btn {
+        commands.entity(b).insert((
+            PluginReloadButton { id: card.id.clone() },
+            FocusPolicy::Block,
+        ));
+    }
+
     // `width: 100%` as well as `no_wrap`: a no-wrap text node sizes itself to its
     // content, so there is nothing for `clip` to clip against without one.
     let name = commands
@@ -2522,7 +2589,14 @@ fn plugin_card(commands: &mut Commands, fonts: &EmberFonts, card: &PluginCard) -
             Node { flex_grow: 1.0, min_width: Val::Px(0.0), overflow: Overflow::clip(), ..default() },
         ))
         .id();
-    commands.entity(foot).add_children(&[kind, sw]);
+    let mut foot_children: Vec<Entity> = vec![kind, sw];
+    if let Some(b) = trust_btn {
+        foot_children.push(b);
+    }
+    if let Some(b) = reload_btn {
+        foot_children.push(b);
+    }
+    commands.entity(foot).add_children(&foot_children);
     let status = commands
         .spawn((
             Text::new(card.status.clone()),
@@ -2542,8 +2616,48 @@ fn plugin_card(commands: &mut Commands, fonts: &EmberFonts, card: &PluginCard) -
 
 /// Marks a plugin card's switch with the plugin it controls.
 #[derive(Component)]
-struct PluginToggle {
+pub struct PluginToggle {
+    pub id: String,
+}
+
+/// Loose Tier-1 plugin trust-toggle button. `grant = true` grants
+/// consent; `grant = false` revokes it. The click handler below
+/// mutates `LoosePluginTrust` and (on grant) also enqueues a
+/// reload request so the initial compile fires.
+#[derive(Component)]
+struct PluginTrustButton {
     id: String,
+    grant: bool,
+}
+
+/// Loose Tier-1 plugin reload button. The click handler appends the
+/// canonical id to `LoosePluginReloadRequests`, which the loose-plugin
+/// host drains in `PreUpdate`.
+#[derive(Component)]
+struct PluginReloadButton {
+    id: String,
+}
+
+/// Build a compact, clickable text button used by the loose-plugin
+/// trust and reload controls on the Plugins panel. Smaller than
+/// `ctl_button` would have been; this style is matched to the card
+/// footer.
+fn plugin_button(commands: &mut Commands, fonts: &EmberFonts, label: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            Node {
+                padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(rgb(card_bg())),
+            Text::new(label.to_string()),
+            ui_font(&fonts.ui, 9.0),
+            TextColor(rgb(text_primary())),
+            Name::new("plugin-button"),
+        ))
+        .id()
 }
 
 /// Flip a plugin on or off, and persist it.
@@ -2565,10 +2679,13 @@ struct PluginToggle {
 ///
 /// `Changed<Interaction>` on top of that, so a held press is one event rather
 /// than one per frame.
-fn plugin_toggle_click(
+pub fn plugin_toggle_click(
     changed: Query<(Entity, &Interaction, &PluginToggle), Changed<Interaction>>,
     mut armed: Local<Option<Entity>>,
     mut disabled: Option<ResMut<renzora::DisabledPlugins>>,
+    mut loose_inventory: Option<ResMut<renzora_loose_plugins::LoosePluginInventory>>,
+    mut reloads: Option<ResMut<renzora_loose_plugins::LoosePluginReloadRequests>>,
+    mut pending: Option<ResMut<renzora_loose_plugins::LoosePendingBuilds>>,
 ) {
     for (entity, interaction, toggle) in &changed {
         match interaction {
@@ -2594,6 +2711,43 @@ fn plugin_toggle_click(
                 if let Err(e) = renzora::save_disabled_plugins(&disabled.0) {
                     warn!("[plugins] could not save the disabled-plugin list: {e}");
                 }
+                // C3-4: for a loose Tier-1 plugin, mirror the disable
+                // decision into the authoritative LoosePluginInventory
+                // and tear down any pending build. T3-3 goes further:
+                // drop the in-flight receiver, drop any queued
+                // staged-for-activation entry, and prevent any
+                // future watcher / reload submission from re-arming
+                // the build.
+                if let (Some(inv), Some(parsed)) = (
+                    loose_inventory.as_mut(),
+                    renzora_loose_plugins::parse_canonical_id(&toggle.id),
+                ) {
+                    // F3-9: route through the shared command function
+                    // the integration tests also call. Tests that
+                    // re-implement these steps are testing a duplicate,
+                    // not the production path. Both branches forward
+                    // to the same shared command; only the
+                    // `LoosePluginReloadRequests` resource lookup
+                    // distinguishes enable from disable at the UI
+                    // boundary.
+                    let Some(p) = pending.as_deref_mut() else {
+                        continue;
+                    };
+                    if enable {
+                        if let Some(r) = reloads.as_deref_mut() {
+                            renzora_loose_plugins::host_plugin::apply_loose_plugin_toggle(
+                                inv, p, r, &parsed, true,
+                            );
+                        }
+                    } else {
+                        // Disable does not write to `reloads`.
+                        let mut scratch =
+                            renzora_loose_plugins::LoosePluginReloadRequests::default();
+                        renzora_loose_plugins::host_plugin::apply_loose_plugin_toggle(
+                            inv, p, &mut scratch, &parsed, false,
+                        );
+                    }
+                }
             }
             // Left the switch, or released elsewhere. Disarm rather than carry
             // the press to whatever the pointer lands on next.
@@ -2611,6 +2765,115 @@ fn hash_str(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+/// Handle a press on a loose-plugin trust button. On grant, also
+/// enqueues a reload so the plugin's first compile happens right
+/// after consent is recorded — a freshly-discovered plugin sitting in
+/// `AwaitingTrustConsent` is the only thing this system keeps in
+/// flight, so this is the same path the watcher would have taken had
+/// consent been granted at the source root.
+fn plugin_trust_click(
+    mut inventory: Option<ResMut<renzora_loose_plugins::LoosePluginInventory>>,
+    mut trust: Option<ResMut<renzora_loose_plugins::LoosePluginTrust>>,
+    mut reloads: Option<ResMut<renzora_loose_plugins::LoosePluginReloadRequests>>,
+    mut armed: Local<Option<Entity>>,
+    changed: Query<(Entity, &Interaction, &PluginTrustButton), Changed<Interaction>>,
+) {
+    for (entity, interaction, button) in &changed {
+        match interaction {
+            Interaction::Pressed => *armed = Some(entity),
+            Interaction::Hovered if *armed == Some(entity) => {
+                *armed = None;
+                let Some(trust) = trust.as_mut() else {
+                    continue;
+                };
+                let parsed = renzora_loose_plugins::parse_canonical_id(&button.id);
+                let Some(id) = parsed else {
+                    warn!("[plugin-trust] could not parse `{}` as a canonical id", button.id);
+                    continue;
+                };
+                if button.grant {
+                    trust.grant(id.clone());
+                    if let Some(inv) = inventory.as_mut() {
+                        inv.grant_consent(id.clone());
+                        inv.transition(
+                            &id,
+                            renzora_loose_plugins::LoosePluginStatusKind::Compiling,
+                        );
+                    }
+                    if let Some(r) = reloads.as_mut() {
+                        r.0.push(id);
+                    }
+                    // T3-6: persist consent immediately so a crash
+                    // before the next deferred save does not
+                    // silently revoke the user's grant. The list
+                    // survives editor restart, and the next launch's
+                    // initial_scan / watcher path consults it.
+                    let snapshot: Vec<String> = trust
+                        .consented()
+                        .map(|c| c.to_string())
+                        .collect();
+                    if let Err(e) = renzora::save_trusted_loose_plugins(&snapshot) {
+                        warn!("[plugin-trust] could not save trusted-plugin list: {e}");
+                    }
+                } else {
+                    trust.revoke(&id);
+                    if let Some(inv) = inventory.as_mut() {
+                        inv.revoke_consent(&id);
+                        inv.transition(
+                            &id,
+                            renzora_loose_plugins::LoosePluginStatusKind::AwaitingTrustConsent,
+                        );
+                    }
+                    let snapshot: Vec<String> = trust
+                        .consented()
+                        .map(|c| c.to_string())
+                        .collect();
+                    if let Err(e) = renzora::save_trusted_loose_plugins(&snapshot) {
+                        warn!("[plugin-trust] could not save trusted-plugin list: {e}");
+                    }
+                }
+            }
+            _ => {
+                if *armed == Some(entity) {
+                    *armed = None;
+                }
+            }
+        }
+    }
+}
+
+/// Handle a press on a loose-plugin reload button. Appends the
+/// canonical id to `LoosePluginReloadRequests`; the loose-plugin host
+/// drains the queue and re-submits to `BuildService` in `PreUpdate`.
+fn plugin_reload_click(
+    mut reloads: Option<ResMut<renzora_loose_plugins::LoosePluginReloadRequests>>,
+    mut armed: Local<Option<Entity>>,
+    changed: Query<(Entity, &Interaction, &PluginReloadButton), Changed<Interaction>>,
+) {
+    for (entity, interaction, button) in &changed {
+        match interaction {
+            Interaction::Pressed => *armed = Some(entity),
+            Interaction::Hovered if *armed == Some(entity) => {
+                *armed = None;
+                let Some(reloads) = reloads.as_mut() else {
+                    continue;
+                };
+                let parsed = renzora_loose_plugins::parse_canonical_id(&button.id);
+                let Some(id) = parsed else {
+                    warn!("[plugin-reload] could not parse `{}` as a canonical id", button.id);
+                    continue;
+                };
+                reloads.0.push(id);
+            }
+            _ => {
+                if *armed == Some(entity) {
+                    *armed = None;
+                }
+            }
+        }
+    }
 }
 
 // ── Viewport ─────────────────────────────────────────────────────────────────
@@ -4290,5 +4553,154 @@ mod tests {
         assert!(!shown(&w, theme) && !shown(&w, camera));
         assert!(!shown(&w, appearance) && !shown(&w, editor));
     }
-}
 
+    // ── plugin_toggle_click: real Settings interaction ─────────────────────
+
+    /// X3-5: drive the production `plugin_toggle_click` system
+    /// through the full Pressed → Hovered sequence and observe the
+    /// real `LoosePluginInventory`, `LoosePendingBuilds`, and
+    /// `LoosePluginReloadRequests` resources — i.e., the Settings
+    /// UI's interaction calls the same shared command the
+    /// integration tests do, and the side effects on the loose-host
+    /// resources match what the production toggle would produce.
+    #[test]
+    fn plugin_toggle_click_drives_disabled_pending_and_reloads() {
+        use bevy::ecs::system::{IntoSystem, System};
+        use renzora_compiler_cache::types::Revision;
+        use renzora_identity::CanonicalId;
+        use renzora_loose_plugins::{
+            contract::LoosePluginScope, host_plugin::PendingBuild,
+            LoosePendingBuilds, LoosePluginInventory, LoosePluginReloadRequests,
+        };
+
+        let id_str = "engine://toggle_click.rs".to_string();
+        let id = CanonicalId::parse(&id_str).unwrap();
+
+        // Build a World with the resources the system observes and
+        // the loose-host ones the shared command mutates. Insert the
+        // loose plugin's inventory row so `apply_loose_plugin_toggle`
+        // has something to mark disabled.
+        let mut world = World::new();
+        world.insert_resource(renzora::DisabledPlugins::default());
+        world.insert_resource(LoosePluginInventory::default());
+        world.insert_resource(LoosePluginReloadRequests::default());
+        world.insert_resource(LoosePendingBuilds::default());
+
+        // Add a pending build for the id so we can observe the
+        // Disable path's receiver removal. The receiver does not
+        // need to be functional for this test — we only care that the
+        // production system removes it from the pending map.
+        let (_tx, rx) = crossbeam_channel::unbounded::<renzora_compiler_cache::BuildOutcome>();
+        {
+            let mut pending = world.resource_mut::<LoosePendingBuilds>();
+            pending.pending.insert(
+                id.clone(),
+                PendingBuild {
+                    receiver: rx,
+                    revision: Revision(0),
+                },
+            );
+        }
+        // Add a staged-for-activation entry to observe its removal
+        // on disable.
+        {
+            let mut pending = world.resource_mut::<LoosePendingBuilds>();
+            pending.staged_for_activation.push((
+                id.clone(),
+                std::path::PathBuf::from("/tmp/staged_for_activation.so"),
+                1,
+            ));
+        }
+        // Upsert the inventory row.
+        {
+            let mut inv = world.resource_mut::<LoosePluginInventory>();
+            inv.upsert_discovered(
+                id.clone(),
+                LoosePluginScope::Runtime,
+                std::path::PathBuf::from("/tmp/source.rs"),
+                true,
+                false,
+            );
+        }
+
+        // Spawn an entity with `Interaction::None` + `PluginToggle`.
+        let entity = world
+            .spawn((Interaction::None, PluginToggle { id: id_str.clone() }))
+            .id();
+
+        // Build a SINGLE system instance so its `Local<Option<Entity>>`
+        // state persists across runs. `run_system_once` would build a
+        // fresh system each call, resetting the press-arm.
+        let mut system = IntoSystem::into_system(plugin_toggle_click);
+        system.initialize(&mut world);
+
+        // Pressed transition: the system arms the entity. Clear
+        // change-detection trackers so `Changed<Interaction>` fires.
+        world.entity_mut(entity).insert(Interaction::Pressed);
+        world.clear_trackers();
+        let _ = system.run((), &mut world);
+        // Hovered transition on the SAME entity: a click is detected.
+        world.entity_mut(entity).insert(Interaction::Hovered);
+        world.clear_trackers();
+        let _ = system.run((), &mut world);
+
+        // After the click, the disabled list contains the id.
+        let disabled = world.resource::<renzora::DisabledPlugins>();
+        assert!(
+            disabled.contains(&id_str),
+            "DisabledPlugins must contain the toggled id after Pressed→Hovered; got {:?}",
+            disabled.0
+        );
+        // The loose inventory marks the row Disabled.
+        let inv = world.resource::<LoosePluginInventory>();
+        assert!(
+            inv.is_disabled(&id),
+            "LoosePluginInventory must mark the id disabled after the click"
+        );
+        // Pending receiver dropped, staged_for_activation cleared.
+        let pending = world.resource::<LoosePendingBuilds>();
+        assert!(
+            !pending.pending.contains_key(&id),
+            "pending receiver must be dropped after Disable"
+        );
+        assert!(
+            pending.staged_for_activation.iter().all(|(q, _, _)| q != &id),
+            "staged_for_activation entry must be cleared after Disable"
+        );
+        // Disable does NOT push a reload.
+        let reloads = world.resource::<LoosePluginReloadRequests>();
+        assert!(
+            reloads.0.is_empty(),
+            "Disable must NOT push a LoosePluginReloadRequests entry"
+        );
+
+        // Reverse the interaction (the user clicks again to Enable).
+        world.entity_mut(entity).insert(Interaction::Pressed);
+        world.clear_trackers();
+        let _ = system.run((), &mut world);
+        world.entity_mut(entity).insert(Interaction::Hovered);
+        world.clear_trackers();
+        let _ = system.run((), &mut world);
+
+        // The canonical LoosePluginReloadRequests entry must exist
+        // for the re-enabled id.
+        let reloads = world.resource::<LoosePluginReloadRequests>();
+        assert!(
+            reloads.0.iter().any(|q| q == &id),
+            "LoosePluginReloadRequests must contain a canonical-id entry after Enable"
+        );
+        // Disabled list no longer contains the id.
+        let disabled = world.resource::<renzora::DisabledPlugins>();
+        assert!(
+            !disabled.contains(&id_str),
+            "DisabledPlugins must not contain the toggled id after Enable"
+        );
+        // The loose inventory row is no longer Disabled.
+        let inv = world.resource::<LoosePluginInventory>();
+        assert!(
+            !inv.is_disabled(&id),
+            "LoosePluginInventory must mark the id enabled after the Enable click"
+        );
+
+    }
+}

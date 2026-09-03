@@ -449,11 +449,17 @@ impl BuildService {
             );
             if let Ok(r) = lookup {
                 if r.matched {
+                    let artifact_path = self.cache.artifact_path(
+                        &id,
+                        active.generation,
+                        &fingerprint.crate_type_default_lib_ext(),
+                    );
                     let (tx, rx) = crossbeam_channel::bounded::<BuildOutcome>(1);
                     let _ = tx.send(BuildOutcome::CacheHit {
                         request_revision: revision,
                         fingerprint,
                         generation: active.generation,
+                        immutable_artifact_path: artifact_path,
                         compiled_packages: Vec::new(),
                     });
                     return Ok(rx);
@@ -478,11 +484,17 @@ impl BuildService {
                         },
                         false,
                     );
+                    let artifact_path = self.cache.artifact_path(
+                        &id,
+                        gen,
+                        &fingerprint.crate_type_default_lib_ext(),
+                    );
                     let (tx, rx) = crossbeam_channel::bounded::<BuildOutcome>(1);
                     let _ = tx.send(BuildOutcome::CacheHit {
                         request_revision: revision,
                         fingerprint,
                         generation: gen,
+                        immutable_artifact_path: artifact_path,
                         compiled_packages: Vec::new(),
                     });
                     return Ok(rx);
@@ -865,12 +877,14 @@ fn route_completion(
                 request_revision: req.revision,
                 fingerprint: completion.fingerprint.clone(),
                 generation: completion.generation.unwrap_or(PublishedGeneration(1)),
+                immutable_artifact_path: completion.artifact_path.clone().unwrap_or_default(),
                 compiled_packages: completion.compiled_packages.clone(),
             },
             CompletionKind::Published => BuildOutcome::Published {
                 request_revision: req.revision,
                 fingerprint: completion.fingerprint.clone(),
                 generation: completion.generation.unwrap_or(PublishedGeneration(1)),
+                immutable_artifact_path: completion.artifact_path.clone().unwrap_or_default(),
                 compiled_packages: completion.compiled_packages.clone(),
             },
             CompletionKind::CompileError => BuildOutcome::CompileFailed {

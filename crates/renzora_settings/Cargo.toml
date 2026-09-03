@@ -14,9 +14,21 @@ renzora_keybindings = { path = "../renzora_keybindings" }
 renzora_viewport = { path = "../renzora_viewport" }
 renzora_splash = { path = "../renzora_splash" }
 renzora_input = { path = "../renzora_input" }
+# Phase 3 Tier-1 loose plugins: read-only consumer for the Plugins
+# panel's trust and reload buttons.
+renzora_loose_plugins = { path = "../renzora_loose_plugins" }
+# Test-only: lets the Settings-interaction tests construct a real
+# BuildService and exercise the production plugin_toggle_click →
+# drain → activation path. Not used by shipping code.
+renzora_compiler_cache = { path = "../renzora_compiler_cache" }
+crossbeam-channel = "0.5"
 rfd = "0.15"
 # Save the ember Theme's per-widget style sections to themes/*.toml.
 toml = "0.8"
+
+[dev-dependencies]
+# Needed by the plugin_toggle_click system test.
+renzora_identity = { path = "../renzora_identity" }
 
 [lints]
 workspace = true

@@ -188,6 +188,24 @@ fn scan_plugins(world: &mut World) {
     let dir = world.resource::<TemplateManager>().plugins_dir_for(platform);
     let mut plugins = renzora_plugin::host::loader::scan_plugins(world, &dir);
 
+    // Phase 3 loose Tier-1 plugins. The same canonical identity and
+    // staged cdylib the editor sees is what the export ships — a loose
+    // plugin has no separate "source directory" to look up, only the
+    // artifact the editor already produced. Editor-scoped loose plugins
+    // are excluded because they would never load in a runtime build.
+    if let Some(inventory) =
+        world.get_resource::<renzora_loose_plugins::LoosePluginInventory>()
+    {
+        for (id, staged_path) in inventory.export_candidates() {
+            plugins.push(renzora_plugin::host::loader::PluginInfo {
+                id: id.to_string(),
+                path: staged_path,
+                scope: renzora_plugin::sys::PluginScope::Runtime,
+            });
+        }
+        plugins.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+
     // Native plugins too, which the C-ABI scan above cannot see: it looks for
     // library FILES exporting `renzora_plugin_init`, and a native plugin is a
     // directory holding a `build/` — so the picker listed only half of what an

@@ -451,6 +451,10 @@ uuid = "1"
 # on `renzora_plugin` with default features and gets zero deps; the engine opts
 # into `host` for the interface impl, dispatcher and dlopen loader.
 renzora_plugin = { path = "crates/renzora_plugin", features = ["host"] }
+# Phase 3: Tier-1 single-file hot Rust plugins. Runtime-side install only
+# (no source watcher, no editor-only features); a runtime host activates
+# loose plugins a user dropped into `plugins/`.
+renzora_loose_plugins = { path = "crates/renzora_loose_plugins" }
 # The generated list of plugins linked into the binary. Optional because it is
 # empty (and so pure overhead) in every build but a lean export that asked for
 # static plugins — see the `static_plugins` feature above.

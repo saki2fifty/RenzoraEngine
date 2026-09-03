@@ -90,6 +90,17 @@ _cargo_target/
 
 Two unrelated scripts sharing (target, toolchain, abi, profile, capabilities) compile in the same partition and reuse the same `target/release/deps/*.rlib` artefacts. Concurrent cargo invocations inside one partition are serialized by a `PartitionLock` mutex (`cargo_target::PartitionLock` holds a real `parking_lot::Mutex<()>`; the guard is retained for the duration of the cargo invocation); different partitions run in parallel. **Validated by `prod_partition_eviction_uses_real_lock`.**
 
+**Cross-platform artifact selection.** After cargo exits successfully, the cache extracts the compiled artefact from the `compiler-artifact.filenames` JSON stream. Selection is platform-aware (`compiler::locate_artifact`) so the same code path handles every supported target:
+
+| target triple       | dynamic library | static library  |
+| ---                 | ---             | ---             |
+| `*-linux-*`         | `lib<name>.so`  | `lib<name>.a`   |
+| `*-apple-darwin`    | `lib<name>.dylib`| `lib<name>.a`  |
+| `*-windows-msvc`    | `<name>.dll`    | `<name>.lib`    |
+| `*-windows-gnu`     | `<name>.dll`    | `lib<name>.a`   |
+
+The selector ignores the SDK's own `renzora_plugin` artefacts (both `librenzora_plugin.so` and `renzora_plugin.dll`), Windows MSVC `<name>.dll.lib` import-library sidecars, `<name>.exp` and `<name>.pdb` debug artefacts, rustc intermediates (`*.d`, `*.rlib`, `*.rmeta`), and any other identity's cdylib. A miss produces a `LocateArtifactMiss` diagnostic that names the target triple, the platform-expected filename, and the full Cargo-emitted list. **Validated by 11 unit tests in `crates/renzora_compiler_cache/tests/acceptance.rs::unit_locate_artifact_*` plus a Windows cross-compile of `renzora_compiler_cache --tests --target x86_64-pc-windows-msvc` in the `renzora-50f2cb55-windows` container.**
+
 ## Retention budgets
 
 | Budget | Default | Applies to | Reset on editor restart |
@@ -108,3 +119,172 @@ The Phase 1 lifecycle (`LifecycleAction::Idle/OpenFirst/Keep/Switch/Close/RetryA
 - **Edit-during-build.** If the user edits the source while a Cargo build is running, the in-flight attempt is **not** cancelled. The attempt completes its scheduled revision; on completion the scheduler compares `latest_revision` to `completed_revision` and enqueues at most one follow-up attempt for the latest revision. Intermediate revisions are coalesced.
 - **Transient infrastructure failure.** `cargo` exits non-zero but the error is `I/O`, `could not lock`, or similar — the worker treats it as transient and re-enqueues with jittered bounded backoff (initial 500 ms, cap 30 s, max 5 attempts then `CompileError`). The re-enqueueing background thread re-checks `transient_eligible_now()` after the delay and skips the enqueue if the revision has since advanced or the project closed.
 - **Editor crash.** POSIX: each cargo child is its own process-group leader (`setpgid(0,0)`); the supervisor retains no PID list and the OS terminates the entire group only via `kill(-pgid, …)` from a deliberate shutdown path. On an unclean exit, orphan children inherit init. **Windows**: each cargo child is created suspended (`CREATE_SUSPENDED`), assigned to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, then resumed. The supervisor retains the job handle; when the supervisor dies, the OS closes the handle and terminates the entire descendant tree. The supervisor never enumerates processes by name on startup.
+
+## Offline build contract
+
+The Tier-1 build path uses Cargo, which has its own network access
+requirement on the very first build of each partition. The contract
+is:
+
+1. **First compile of a partition requires network access.** The
+   worker invokes `cargo generate-lockfile` exactly once per partition
+   to bootstrap `<generated_root>/Cargo.lock` from the rendered
+   manifest + SDK. Cargo reaches `index.crates.io` (or a configured
+   mirror) to resolve `renzora_plugin`'s dependencies (`proc-macro2`,
+   `quote`, `syn`, `renzora_plugin_derive`). This step runs at most
+   once per unique combination of `(target_triple, toolchain_stamp,
+   capabilities, profile, abi_version, compiler_service_schema)`;
+   subsequent submits targeting the same partition reuse the on-disk
+   lockfile.
+
+2. **Subsequent compiles are fully offline.** Once `Cargo.lock` is
+   on disk, every compile in that partition passes `--locked` to
+   `cargo build`. Cargo refuses to run if the resolved graph has
+   drifted from the lockfile — that refusal is the `lockfile drift`
+   error path, not a network error.
+
+3. **Cache reuse is also offline.** A `CacheHit` reads the published
+   artifact from the cache without invoking cargo at all. Only the
+   first cache miss for a unique `(canonical_identity, source)`
+   combination invokes cargo; a `CacheHit` does not.
+
+4. **The network gate is one-time and one-partition.** An editor
+   installed on a fully offline machine, with the SDK on disk and
+   no prior `Cargo.lock` in any partition, will fail to compile any
+   first-ever plugin of a new capability set until at least one
+   successful network-resolved `cargo generate-lockfile` has run.
+   After that, every compile, hot-reload, and cache hit is offline.
+
+The harness's `make_fake_sdk` test fixture declares a `std` feature
+on the fake `renzora_plugin` package because the production renderer
+emits `features = ["std", ...]` on the per-package `renzora_plugin`
+dependency (Y3-5) — a test that omits `std` from its fake SDK will
+see `cargo generate-lockfile` fail with `package renzora_plugin does
+not have that feature`. The acceptance test `prod_real_source_compiles_publishes_loads`
+proves the first-compile network gate works end-to-end with the
+real `BuildService` and a real SDK path.
+
+## Phase 3 integration (Tier-1 loose plugins)
+
+> **Phase 3 scope.** The Tier-1 hot-plugin path uses the same
+> `renzora_compiler_cache` service. A loose `plugins/<name>.rs` file is
+> discovered by the editor-only `LoosePluginHost` watcher (root-level
+> `notify-debouncer-full`, 300 ms debounce, non-recursive), parsed for
+> its `renzora_plugin::add!(PluginType, Runtime|Editor)` declaration,
+> and submitted as an `ArtifactKind::Tier1Plugin` request to the
+> host-owned `BuildService` (one `Arc<BuildService>` per process). The
+> service publishes immutable cache generations; the loose-plugin host
+> stages each successful generation to a flat loader-visible path
+> under `<plugins-dir>/.loose-staged/` and loads it through the new
+> `renzora_plugin::host::loader::load_one_transactional`.
+
+**Artifact-path handoff.** `BuildOutcome::{Published,CacheHit}`
+carry the exact `immutable_artifact_path: PathBuf` the cache
+publishes. The loose host consumes it directly — no fallback
+directory scan, no process-relative cache guess. The path the
+worker threads report is `cache.artifact_path(id, generation,
+lib_ext)`, the same path the cache's `read_active` /
+`lookup_inactive` lookups return.
+
+**Stable staged path:** `<plugins-dir>/.loose-staged/<safe-id>.<ext>`,
+where `<safe-id>` is the canonical identity's `to_scheme_path()` with
+`:` and `/` replaced by `_`. The directory is FLAT — collision-proof
+names per identity — so the slot identity keys on a single stable
+file that survives every cache generation. `StableStaging::place`
+copies the immutable generation to a `swap-<uuid>.<ext>` temp file
+and atomically renames it onto the stable path (`rename(2)` on POSIX,
+`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows).
+
+**Compile failure does not touch the stable staged file.** The cache
+publishes only on success, and the swap-rename only happens after the
+cache reports `Published | CacheHit`. A failed submission leaves the
+previous stable file in place and the row's status becomes
+`CompileFailed`. The previous active generation is preserved.
+
+**Transactional activation with owner-aware rollback.**
+`load_one_transactional` audits every non-system host registration
+surface reachable through `renzora_plugin::sys::Interface`. Every
+slot-owned entry now carries an `(owner: usize, owner_generation:
+u32)` pair so the candidate's mutations are distinguishable from the
+prior generation's. `activate_with_transaction` snapshots:
+
+- `RegistrySnapshot` of every registry, including the per-entry
+  generation;
+- the prior bytes of every Bevy resource via
+  `host::read_resource_bytes_safe`, captured BEFORE
+  `init_plugin_gen` so a candidate that overwrites a resource
+  cannot also overwrite the snapshot;
+- a `PluginComponentSchemas` clone for layout-conflict detection.
+
+It then runs `init_plugin_gen` with `at = proposed_generation`
+(candidate systems inert until commit), diffs the registries into
+a `Journal` filtered by `(slot, proposed_generation)`, and either:
+
+- commits: bump the slot's counter, retire ONLY the prior
+  generation's slot-owned registrations via
+  `retire_slot(world, slot, prior_loaded_at)`, refresh
+  byte-compatible schemas via `refresh_compatible_schemas`, and
+  atomically publish the new generation counter. The candidate's
+  entries (at `proposed_generation`) survive untouched; or
+- rolls back: `apply_journal_rollback(world, &mut journal, slot,
+  proposed_generation)` undoes every entry in reverse — including
+  restoring resource bytes via
+  `host::write_resource_bytes_unsafe` from the captured
+  `prior_bytes`. The slot's `loaded_at` and counter are restored
+  to their prior values, and the candidate's systems stay
+  permanently inert (`at != counter`).
+
+Layout conflict detection is real: `detect_layout_conflict`
+compares the candidate's `PluginComponentInfo` against its pre-init
+counterpart by `size`, field count, per-field offset, and per-field
+kind discriminant. A mismatch refuses the candidate with
+`ActivationFailure::LayoutConflict(why)` and rolls back; the prior
+generation stays active with all of its registrations intact.
+
+The journal types live in `renzora_plugin::host::{JournalEntry,
+RegistrySnapshot, TransactionJournal}` (the contract crate); the
+loose-plugin crate re-exports them. `PluginComponentOwners` is the
+companion map that records `(slot, owner_generation)` for every
+component / resource id so a same-slot reload can retire only the
+prior generation's ids.
+
+**Never-unload invariant.** Every `Library` opened by
+`Library::new` in `load_one_transactional` is wrapped in
+`ManuallyDrop` and pushed onto one of two pools in the
+`PluginSlot`:
+
+- `PluginSlot::_libraries`: committed loads.
+- `PluginSlot::failed_libraries`: rolled-back loads (open
+  succeeded but symbol / scope / ABI / init / layout refused).
+
+Dropping a `Library` would call `FreeLibrary`, which has deadlocked
+on this platform; any function pointer the candidate registered
+would point at freed memory. Neither pool is ever drained.
+
+**Windows shadow copy.** `load_one_transactional` calls the existing
+`shadow_copy(stable_path, generation)` helper before mapping the
+image, so a mapped DLL never blocks the staged-file replace. The
+editor-only shadow copy directory is `stable_path.parent()/.reload/`,
+named `<stem>-<generation>.<ext>`. A shipped game maps the stable
+file directly without a shadow copy.
+
+**Phase 1 paths remain on `renzora_rust_script`.** Editor Rust
+scripts are not migrated to the cache service in Phase 3 — that is
+Phase 4's work, gated on the Tier-1 script ABI. The
+`renzora_loose_plugins` crate does not depend on `renzora_rust_script`.
+
+**Settings, trust, and reload.** Loose plugin cards on the Settings
+→ Editor → Plugins panel carry a **Grant / Revoke trust** button and
+a **Reload** button. They mutate the authoritative
+`LoosePluginInventory` and `LoosePluginTrust` resources and enqueue
+a manual reload via `LoosePluginReloadRequests`, which the loose
+host drains in `PreUpdate`. The full canonical identity is the
+durable key in `renzora::PluginInventory` (not the bare leaf), so
+two plugins with the same filename remain distinct.
+
+**Export.** Active Runtime loose plugins are copied into the
+export tree by `renzora_export::build::stage_loose_plugins_from`.
+The export overlay reads `LoosePluginInventory::export_candidates`
+while it holds `&mut World`, snapshots the list, and passes it to
+the background export worker. Editor-scoped loose plugins are
+filtered upstream; disabled plugins are filtered at staging time.

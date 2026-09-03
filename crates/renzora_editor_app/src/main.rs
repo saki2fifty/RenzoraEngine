@@ -53,12 +53,16 @@ fn main() {
     // No `statics`: linking plugins in is an export-time choice for a shipped
     // game, and it would cost the editor the thing it needs most from them —
     // hot reload, which needs a file on disk to watch and swap.
+    let disabled = renzora_runtime::renzora::load_disabled_plugins();
+    // T3-6: load the persisted trust consent list before the loose
+    // host installs. The host seeds `LoosePluginTrust` and the
+    // inventory's `consented` set so the watcher / initial_scan
+    // paths see the user's prior grants on first frame.
+    let trusted = renzora_runtime::renzora::load_trusted_loose_plugins();
     app.add_plugins(renzora_plugin::host::loader::RenzoraPluginHostPlugin {
         is_editor: true,
         statics: Vec::new(),
-        // Read here rather than inside the loader: that crate is published to
-        // crates.io and cannot take a path dependency on the contract crate.
-        disabled: renzora_runtime::renzora::load_disabled_plugins(),
+        disabled: disabled.clone(),
     });
     // Render passes those plugins registered. Separate plugin because the work
     // happens in `finish`, after every `build` has run and the render sub-app
@@ -67,6 +71,20 @@ fn main() {
     // Custom shaded materials registered by those plugins — same `finish`
     // reasoning as the render bridge.
     renzora_postprocess::add_plugin_material(&mut app);
+
+    // Phase 3: install the loose-plugin host AFTER `RenzoraPluginHostPlugin`
+    // so directory plugins are already in the `LoadedPlugins` resource, and
+    // the loose plugin's transactional activation can refuse ids that are
+    // already loaded as directory plugins. The crate stays independent of
+    // `renzora_plugin` (and vice versa) to avoid a cycle.
+    let plugins_dir = renzora_runtime::editor_image::exe_dir_or_default()
+        .map(|d| d.join("plugins"))
+        .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+    app.add_plugins(renzora_loose_plugins::LoosePluginHost::editor_with_trust(
+        &plugins_dir,
+        disabled,
+        trusted,
+    ));
 
     app.run();
 }

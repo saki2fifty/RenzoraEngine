@@ -833,6 +833,20 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    // Snapshot the loose-plugin candidates from the Bevy world so the
+    // background export worker doesn't need `&mut World` to stage them.
+    // Only Runtime loose plugins are eligible (Editor scope never ships
+    // in a game); disabled ones are filtered at staging time.
+    let loose_candidates: Vec<(String, std::path::PathBuf)> = world
+        .get_resource::<renzora_loose_plugins::LoosePluginInventory>()
+        .map(|inv| {
+            inv.export_candidates()
+                .into_iter()
+                .map(|(id, p)| (id.to_string(), p))
+                .collect()
+        })
+        .unwrap_or_default();
+
     // The dedicated server reuses the game binary (run with `--server`), so
     // there's no separate server template to resolve here.
 
@@ -885,6 +899,7 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
             lean_profile,
             upx_compress,
             cancel,
+            loose_candidates,
         );
     });
 }
@@ -922,6 +937,7 @@ fn export_worker(
     lean_profile: crate::build::LeanProfile,
     upx_compress: bool,
     cancel: Arc<AtomicBool>,
+    loose_candidates: Vec<(String, std::path::PathBuf)>,
 ) {
     // Pack assets
     let _ = tx.send(ExportMsg::Progress("Scanning project assets...".into()));
@@ -1178,6 +1194,17 @@ fn export_worker(
                     &editor_dir,
                     &output_dir,
                     lib_ext,
+                    Some(&native_selection),
+                    &mut sp,
+                ) {
+                    let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
+                }
+                // Phase 3 Tier-1 loose plugins. Same selection set, same
+                // library, same destination shape — the loose form is
+                // just a different way to author the same C-ABI cdylib.
+                if let Err(e) = crate::build::stage_loose_plugins_from(
+                    &loose_candidates,
+                    &output_dir,
                     Some(&native_selection),
                     &mut sp,
                 ) {

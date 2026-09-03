@@ -208,3 +208,12 @@ The engine is dual-licensed under **MIT OR Apache-2.0** (`LICENSE-MIT` and `LICE
 - [Building from Source](/docs/r1-alpha7/setup/building-from-source) — the full build, aliases, and Docker cross-compile flow
 - [Architecture](/docs/r1-alpha7/setup/architecture) — the one-binary, editor-as-removable-cdylib model
 - [Building Plugins](/docs/r1-alpha7/extending/plugins) — extend the engine with `renzora::add!`
+
+## Phase 3 plugin authoring
+
+Loose Tier-1 plugins (`plugins/<name>.rs`) follow the contract in
+[extending/plugins.md](../extending/plugins.md#loose-single-file-plugins-phase-3).
+The author writes ordinary `renzora_plugin` source plus one
+`renzora_plugin::add!(P, Runtime|Editor)` declaration. The editor
+compiles, stages, loads, and hot-reloads the file through the Phase 2
+cached compiler service.
