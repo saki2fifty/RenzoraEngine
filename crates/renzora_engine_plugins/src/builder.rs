@@ -183,6 +183,26 @@ impl EngineBuildService {
         Ok(events)
     }
 
+    /// Make every current result stale before a newer source snapshot has
+    /// finished preparation. This closes the window where an older Cargo build
+    /// could publish while discovery and hashing for a new edit are running.
+    pub fn invalidate(&mut self) -> Vec<EngineBuildEvent> {
+        let invalidating_revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.latest_revision
+            .store(invalidating_revision, Ordering::Release);
+        let mut events = Vec::new();
+        if let Some(queued) = self.queued.take() {
+            events.push(EngineBuildEvent::Superseded {
+                revision: queued.revision,
+            });
+        }
+        if let Some(running) = &self.running {
+            self.supervisor.cancel(running.attempt_id);
+        }
+        events
+    }
+
     /// Drain completed work and start the newest eligible work without waiting.
     pub fn poll(&mut self) -> Vec<EngineBuildEvent> {
         let mut events = Vec::new();

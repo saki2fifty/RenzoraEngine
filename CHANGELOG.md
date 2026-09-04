@@ -16,6 +16,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Connected advanced plugin runtime and editor halves to their matching executables while rejecting unsafe, missing, or mixed-up declarations before a build starts.
 - Added background engine-plugin builds where newer saves replace older work, failures preserve the last working candidate, and the editor remains responsive.
 - Fixed cancelled Rust compiler processes on Linux and macOS sometimes remaining stuck as “in progress.”
+- Added the editor-facing progress and diagnostics foundation for advanced plugin builds without putting compilation or file-copy work in the frame loop.
 
 ## September 4, 2026 — 19:47 UTC
 

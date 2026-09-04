@@ -163,10 +163,16 @@ pub fn load_engine_plugin(path: &Path) -> Result<EnginePluginDeclaration, Manife
 /// only a child containing `plugin.toml` explicitly enters Tier 2 discovery.
 pub fn discover_engine_plugins(root: &Path) -> Result<Vec<EnginePluginDeclaration>, ManifestError> {
     let mut manifests = Vec::new();
-    let entries = fs::read_dir(root).map_err(|source| ManifestError::Read {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(ManifestError::Read {
+                path: root.to_path_buf(),
+                source,
+            });
+        }
+    };
     for entry in entries {
         let entry = entry.map_err(|source| ManifestError::Read {
             path: root.to_path_buf(),
@@ -260,6 +266,14 @@ fn valid_reverse_domain_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_plugins_directory_is_an_empty_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert!(discover_engine_plugins(&temp.path().join("plugins"))
+            .expect("optional plugins directory")
+            .is_empty());
+    }
 
     fn write_crate(root: &Path, relative: &str) {
         let crate_root = root.join(relative);

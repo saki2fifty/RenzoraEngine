@@ -22,6 +22,22 @@ pub struct OverlayWorkspace {
     pub cache_hit: bool,
 }
 
+/// Hash one validated plugin independently for generation inventories.
+pub fn engine_plugin_source_hash(
+    declaration: &EnginePluginDeclaration,
+) -> Result<String, OverlayError> {
+    let mut hasher = blake3::Hasher::new();
+    let manifest = toml::to_string(&declaration.manifest).map_err(|error| {
+        OverlayError::WorkspaceManifest {
+            path: declaration.root.join("plugin.toml"),
+            message: error.to_string(),
+        }
+    })?;
+    hash_field(&mut hasher, manifest.as_bytes());
+    hash_tree(&mut hasher, &declaration.root, &declaration.root)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 /// Overlay creation failure.
 #[derive(Debug, thiserror::Error)]
 pub enum OverlayError {
