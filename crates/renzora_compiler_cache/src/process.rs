@@ -94,7 +94,10 @@ pub mod platform {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "child already reaped")
         })?;
         match c.try_wait()? {
-            Some(status) => Ok(status.code()),
+            // A Unix signal has no numeric exit code. It is still a completed
+            // child, so retain the cross-platform `i32` contract with -1
+            // instead of confusing it with `None` (which means still running).
+            Some(status) => Ok(Some(status.code().unwrap_or(-1))),
             None => Ok(None),
         }
     }
@@ -622,23 +625,40 @@ impl CargoSupervisor {
     /// reader threads (if the process has exited) before draining the
     /// per-stream buffers.
     pub fn try_reap(&self, attempt_id: u64) -> Option<AttemptRecord> {
+        self.try_reap_result(attempt_id).ok().flatten()
+    }
+
+    /// Fallible form of [`Self::try_reap`] for coordinators that must surface
+    /// an operating-system wait failure rather than treating it as "running".
+    pub fn try_reap_result(&self, attempt_id: u64) -> std::io::Result<Option<AttemptRecord>> {
         let mut guard = self.children.lock();
-        let handle = guard.get_mut(&attempt_id)?;
-        let exit_status: i32 = handle.child.as_mut().and_then(|c| c.try_wait().ok().flatten())?;
-        let mut handle = guard.remove(&attempt_id)?;
-        let mut child = handle.child.take()?;
+        let Some(handle) = guard.get_mut(&attempt_id) else {
+            return Ok(None);
+        };
+        let Some(child) = handle.child.as_mut() else {
+            return Ok(None);
+        };
+        let Some(exit_status) = child.try_wait()? else {
+            return Ok(None);
+        };
+        let Some(mut handle) = guard.remove(&attempt_id) else {
+            return Ok(None);
+        };
+        let Some(mut child) = handle.child.take() else {
+            return Ok(None);
+        };
         join_reader(child.stdout_thread.take());
         join_reader(child.stderr_thread.take());
         let stdout: Vec<String> = child.stdout_buffer.lock().drain(..).collect();
         let stderr: Vec<String> = child.stderr_buffer.lock().drain(..).collect();
         self.record_finish(attempt_id);
-        Some(AttemptRecord {
+        Ok(Some(AttemptRecord {
             attempt_id,
             exit_status: Some(exit_status),
             stdout,
             stderr,
             artifact_path: None,
-        })
+        }))
     }
 
     pub fn cancel(&self, attempt_id: u64) {
@@ -1172,6 +1192,41 @@ mod tests {
         all_ids.dedup();
         assert_eq!(all_ids.len(), total);
         assert_eq!(total, 16 * 50);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_terminated_child_is_reaped_as_completed() {
+        let supervisor = CargoSupervisor::new(
+            Arc::new(PartitionRegistry::new()),
+            CargoSupervisorConfig::default(),
+        );
+        let identity = CanonicalId::parse("engine://tests/signal-reap").expect("identity");
+        let partition = crate::cargo_target::PartitionKey::from_inputs(
+            "test-target",
+            "test-toolchain",
+            &std::collections::BTreeSet::new(),
+            "dist",
+            0,
+            1,
+        );
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let attempt = supervisor
+            .spawn(identity, partition, command)
+            .expect("spawn");
+        supervisor.cancel(attempt);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let record = loop {
+            if let Some(record) = supervisor.try_reap(attempt) {
+                break record;
+            }
+            assert!(Instant::now() < deadline, "cancelled child was not reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(record.exit_status, Some(-1));
     }
 
     #[cfg(windows)]

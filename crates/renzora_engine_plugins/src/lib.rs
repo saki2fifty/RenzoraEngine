@@ -6,6 +6,7 @@
 //! explicit declaration contract.
 
 pub mod build_kit;
+pub mod builder;
 pub mod generation;
 pub mod manifest;
 pub mod overlay;
@@ -14,9 +15,14 @@ pub use build_kit::{
     create_build_kit_manifest, load_and_validate_build_kit, BuildKit, BuildKitError, BuildKitFile,
     BuildKitManifest, BuildKitRequirement, BUILD_KIT_MANIFEST_SCHEMA,
 };
+pub use builder::{
+    EngineBinaryTarget, EngineBuildEvent, EngineBuildJob, EngineBuildService,
+    EngineBuildServiceError,
+};
 pub use generation::{
-    load_candidate_generation, publish_generation, GenerationArtifact, GenerationError,
-    GenerationManifest, GenerationOutputs, PublishedEngineGeneration,
+    load_candidate_generation, publish_generation, select_candidate_generation, stage_generation,
+    GenerationArtifact, GenerationError, GenerationManifest, GenerationOutputs,
+    PublishedEngineGeneration,
 };
 pub use manifest::{
     discover_engine_plugins, load_engine_plugin, EnginePluginDeclaration, ManifestError,

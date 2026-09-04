@@ -96,6 +96,9 @@ pub enum GenerationError {
     /// Pointer and immutable generation disagree.
     #[error("candidate generation failed content verification")]
     CandidateMismatch,
+    /// Another process selected a newer generation before this one.
+    #[error("generation was superseded before candidate selection")]
+    CandidateSuperseded,
     /// Atomic pointer publication failed.
     #[error("could not publish generation candidate: {0}")]
     PublishPointer(String),
@@ -103,6 +106,20 @@ pub enum GenerationError {
 
 /// Publish compiler outputs without replacing the currently running executable.
 pub fn publish_generation(
+    cache_root: &Path,
+    stamp: EnginePluginGenerationStamp,
+    outputs: &GenerationOutputs,
+) -> Result<PublishedEngineGeneration, GenerationError> {
+    let published = stage_generation(cache_root, stamp, outputs)?;
+    if !select_candidate_generation(cache_root, &published)? {
+        return Err(GenerationError::CandidateSuperseded);
+    }
+    Ok(published)
+}
+
+/// Copy and verify large artifacts into an immutable generation without
+/// changing the restart candidate. This is safe to run on a worker thread.
+pub fn stage_generation(
     cache_root: &Path,
     stamp: EnginePluginGenerationStamp,
     outputs: &GenerationOutputs,
@@ -141,7 +158,7 @@ pub fn publish_generation(
     ));
     fs::create_dir(&temp).map_err(|source| io_error(&temp, source))?;
 
-    let result = publish_locked(cache_root, &generations, &temp, generation, stamp, outputs);
+    let result = stage_locked(&generations, &temp, generation, stamp, outputs);
     let _ = lock.unlock();
     if result.is_err() {
         let _ = fs::remove_dir_all(&temp);
@@ -149,8 +166,7 @@ pub fn publish_generation(
     result
 }
 
-fn publish_locked(
-    cache_root: &Path,
+fn stage_locked(
     generations: &Path,
     temp: &Path,
     generation: u64,
@@ -200,21 +216,58 @@ fn publish_locked(
     fs::rename(temp, &final_root).map_err(|error| io_error(&final_root, error))?;
     sync_directory(generations)?;
 
-    let candidate_dir = cache_root.join("candidate");
-    fs::create_dir_all(&candidate_dir).map_err(|error| io_error(&candidate_dir, error))?;
-    let pointer = ActivePointer {
-        generation: PublishedGeneration(generation),
-        fingerprint_hash: decode_hash(&manifest.content_hash)?,
-        compiler_service_schema: ENGINE_PLUGIN_GENERATION_SCHEMA,
-    };
-    let first = !candidate_dir.join("active.bin").exists();
-    replace_active_pointer(&candidate_dir, &pointer.encode(), first)
-        .map_err(|error| GenerationError::PublishPointer(error.to_string()))?;
-
     Ok(PublishedEngineGeneration {
         root: final_root,
         manifest,
     })
+}
+
+/// Atomically select a completely staged generation if it is newer than the
+/// current candidate. The monotonic check prevents cross-process stale writes.
+pub fn select_candidate_generation(
+    cache_root: &Path,
+    published: &PublishedEngineGeneration,
+) -> Result<bool, GenerationError> {
+    let expected_root = cache_root.join("generations").join(format!(
+        "{:020}-{}",
+        published.manifest.generation, published.manifest.content_hash
+    ));
+    if published.root != expected_root
+        || published.manifest.schema != ENGINE_PLUGIN_GENERATION_SCHEMA
+        || generation_hash(&published.manifest) != published.manifest.content_hash
+    {
+        return Err(GenerationError::CandidateMismatch);
+    }
+    let lock_path = cache_root.join("generation.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| io_error(&lock_path, source))?;
+    lock.lock().map_err(|source| io_error(&lock_path, source))?;
+    let candidate_dir = cache_root.join("candidate");
+    fs::create_dir_all(&candidate_dir).map_err(|error| io_error(&candidate_dir, error))?;
+    let active_path = candidate_dir.join("active.bin");
+    if active_path.is_file() {
+        let bytes = fs::read(&active_path).map_err(|error| io_error(&active_path, error))?;
+        let active = ActivePointer::decode(&bytes).map_err(GenerationError::CandidatePointer)?;
+        if active.generation.0 >= published.manifest.generation {
+            let _ = lock.unlock();
+            return Ok(false);
+        }
+    }
+    let pointer = ActivePointer {
+        generation: PublishedGeneration(published.manifest.generation),
+        fingerprint_hash: decode_hash(&published.manifest.content_hash)?,
+        compiler_service_schema: ENGINE_PLUGIN_GENERATION_SCHEMA,
+    };
+    let first = !active_path.exists();
+    replace_active_pointer(&candidate_dir, &pointer.encode(), first)
+        .map_err(|error| GenerationError::PublishPointer(error.to_string()))?;
+    let _ = lock.unlock();
+    Ok(true)
 }
 
 /// Load and fully verify the generation selected by the atomic candidate pointer.
@@ -484,6 +537,36 @@ mod tests {
         assert_eq!(second.manifest.generation, 2);
         assert!(first.root.is_dir());
         assert!(second.root.is_dir());
+        assert_eq!(load_candidate_generation(temp.path()).unwrap(), second);
+    }
+
+    #[test]
+    fn staging_is_invisible_and_candidate_selection_is_monotonic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = write_artifact(temp.path(), "runtime-output", b"runtime one");
+        let first = stage_generation(
+            temp.path(),
+            stamp(),
+            &GenerationOutputs {
+                editor: None,
+                runtime: Some(output.clone()),
+            },
+        )
+        .expect("stage first");
+        assert!(!temp.path().join("candidate/active.bin").exists());
+        fs::write(&output, b"runtime two").expect("artifact two");
+        let second = stage_generation(
+            temp.path(),
+            stamp(),
+            &GenerationOutputs {
+                editor: None,
+                runtime: Some(output),
+            },
+        )
+        .expect("stage second");
+
+        assert!(select_candidate_generation(temp.path(), &second).expect("select second"));
+        assert!(!select_candidate_generation(temp.path(), &first).expect("reject older"));
         assert_eq!(load_candidate_generation(temp.path()).unwrap(), second);
     }
 

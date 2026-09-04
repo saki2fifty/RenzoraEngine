@@ -7815,6 +7815,7 @@ dependencies = [
  "blake3",
  "renzora",
  "renzora_compiler_cache",
+ "renzora_identity",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

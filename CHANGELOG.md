@@ -14,6 +14,8 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Added isolated build workspaces that reuse identical inputs, keep plugin source untouched, and rebuild only when the kit or plugin content changes.
 - Added immutable editor/runtime generations so a completed build can be verified and offered for restart without replacing the running program or losing the previous candidate.
 - Connected advanced plugin runtime and editor halves to their matching executables while rejecting unsafe, missing, or mixed-up declarations before a build starts.
+- Added background engine-plugin builds where newer saves replace older work, failures preserve the last working candidate, and the editor remains responsive.
+- Fixed cancelled Rust compiler processes on Linux and macOS sometimes remaining stuck as “in progress.”
 
 ## September 4, 2026 — 19:47 UTC
 
