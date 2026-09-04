@@ -10,6 +10,7 @@ pub mod viewport_types;
 pub mod animation; // .anim clip format + property keyframes
 pub mod blockout_grid; // the generated "no material yet" grid textures
 pub mod components; // shared ECS components + entity-tag markers
+pub mod engine_plugins; // restart-required Tier 2 build and ECS contracts
 pub mod entity_id; // canonical unique snake_case entity ids (Name)
 pub mod plugin_inventory; // what plugins were found on disk, and their state
 pub mod project_config; // project.toml model + editor preferences
@@ -19,6 +20,7 @@ pub use animation::*;
 pub use blockout_grid::*;
 pub use project_config::*;
 pub use components::*;
+pub use engine_plugins::*;
 pub use entity_id::*;
 pub use plugin_inventory::*;
 pub use sprite_anim::*;

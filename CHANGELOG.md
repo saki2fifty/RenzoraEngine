@@ -2,6 +2,15 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 4, 2026 — 21:51 UTC
+
+### Full engine plugin foundation
+
+- Added an explicit declaration format for advanced plugins that need complete Bevy and Renzora access.
+- Kept ordinary live Rust plugins distinct so Renzora never guesses which compilation model a file requires.
+- Required separate editor and game/runtime halves to prevent editor-only code from entering exported games.
+- Added early checks for invalid identities, duplicate plugins, unsafe paths, and unsupported declarations.
+
 ## September 4, 2026 — 19:47 UTC
 
 ### Cached Rust scripts

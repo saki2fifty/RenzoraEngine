@@ -1,0 +1,17 @@
+[package]
+name = "renzora_engine_plugins"
+version = "0.1.0"
+edition = "2021"
+description = "Portable build and staging service for restart-required Renzora engine plugins."
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false }
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
