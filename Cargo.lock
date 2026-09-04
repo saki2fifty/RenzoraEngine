@@ -7812,7 +7812,9 @@ name = "renzora_engine_plugins"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "blake3",
  "renzora",
+ "serde",
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",

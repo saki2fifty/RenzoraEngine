@@ -5,8 +5,13 @@
 //! an editor. Later Phase 5 commits add those layers without changing this
 //! explicit declaration contract.
 
+pub mod build_kit;
 pub mod manifest;
 
+pub use build_kit::{
+    create_build_kit_manifest, load_and_validate_build_kit, BuildKit, BuildKitError, BuildKitFile,
+    BuildKitManifest, BuildKitRequirement, BUILD_KIT_MANIFEST_SCHEMA,
+};
 pub use manifest::{
     discover_engine_plugins, load_engine_plugin, EnginePluginDeclaration, ManifestError,
 };

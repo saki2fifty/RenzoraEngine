@@ -6,7 +6,9 @@ description = "Portable build and staging service for restart-required Renzora e
 
 [dependencies]
 bevy = { workspace = true }
+blake3 = "1"
 renzora = { path = "../renzora", default-features = false }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"
 

@@ -10,6 +10,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Kept ordinary live Rust plugins distinct so Renzora never guesses which compilation model a file requires.
 - Required separate editor and game/runtime halves to prevent editor-only code from entering exported games.
 - Added early checks for invalid identities, duplicate plugins, unsafe paths, and unsupported declarations.
+- Added a version-matched build-kit inventory that detects incompatible compilers, altered files, and incomplete installations before rebuilding the editor.
 
 ## September 4, 2026 — 19:47 UTC
 
