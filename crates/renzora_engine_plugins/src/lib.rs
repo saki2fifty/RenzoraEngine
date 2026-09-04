@@ -7,6 +7,7 @@
 
 pub mod build_kit;
 pub mod manifest;
+pub mod overlay;
 
 pub use build_kit::{
     create_build_kit_manifest, load_and_validate_build_kit, BuildKit, BuildKitError, BuildKitFile,
@@ -15,3 +16,4 @@ pub use build_kit::{
 pub use manifest::{
     discover_engine_plugins, load_engine_plugin, EnginePluginDeclaration, ManifestError,
 };
+pub use overlay::{materialize_overlay, OverlayError, OverlayWorkspace};
