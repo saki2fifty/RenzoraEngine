@@ -56,7 +56,10 @@ fn image_name() -> &'static str {
 
 /// Where the running executable lives.
 fn exe_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
 }
 
 /// Is an editor image present beside the executable?
@@ -71,7 +74,9 @@ pub fn present() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        exe_dir().map(|d| d.join(image_name()).is_file()).unwrap_or(false)
+        exe_dir()
+            .map(|d| d.join(image_name()).is_file())
+            .unwrap_or(false)
     }
 }
 
@@ -84,7 +89,9 @@ pub fn present() -> bool {
 pub fn install(app: &mut bevy::app::App) {
     use bevy::prelude::*;
 
-    let Some(path) = exe_dir().map(|d| d.join(image_name())) else { return };
+    let Some(path) = exe_dir().map(|d| d.join(image_name())) else {
+        return;
+    };
     if !path.is_file() {
         return;
     }

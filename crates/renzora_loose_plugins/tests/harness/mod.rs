@@ -15,24 +15,21 @@
 
 use bevy::prelude::*;
 use crossbeam_channel::Receiver;
-use renzora_compiler_cache::{BuildService, BuildServiceConfig};
 use renzora_compiler_cache::types::{
     default_target_triple, ArtifactKind, BuildOutcome, BuildProfile, BuildRequest,
     FingerprintInputs, PanicStrategy, Revision,
 };
+use renzora_compiler_cache::{BuildService, BuildServiceConfig};
 use renzora_identity::CanonicalId;
 use renzora_loose_plugins::contract::LoosePluginScope;
 use renzora_loose_plugins::host_plugin::{apply_loose_plugin_toggle, PendingBuild};
-use renzora_loose_plugins::{
-    LoosePendingBuilds, LoosePluginInventory, LoosePluginReloadRequests,
-};
+use renzora_loose_plugins::{LoosePendingBuilds, LoosePluginInventory, LoosePluginReloadRequests};
 use renzora_plugin::host::loader::{self, LoadOutcome, TransactionalActivationOutcome};
 use renzora_plugin::host::{
     apply_journal_rollback, diff_registrations, register_custom_material_for_test,
-    CustomMaterialApplier, PendingMaterials, PluginAssets, PluginAudioBackend,
-    PluginComponentSchemas, PluginComponents, PluginHttpInbox,
-    PluginNetBackend, PluginPanels, PluginResources, PluginScriptBackends,
-    PluginServiceReplies, PendingPostProcesses, PendingRenderPasses,
+    CustomMaterialApplier, PendingMaterials, PendingPostProcesses, PendingRenderPasses,
+    PluginAssets, PluginAudioBackend, PluginComponentSchemas, PluginComponents, PluginHttpInbox,
+    PluginNetBackend, PluginPanels, PluginResources, PluginScriptBackends, PluginServiceReplies,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -224,10 +221,7 @@ impl Harness {
             .app
             .world_mut()
             .try_run_schedule(bevy::prelude::PreUpdate);
-        let _ = self
-            .app
-            .world_mut()
-            .try_run_schedule(bevy::prelude::Update);
+        let _ = self.app.world_mut().try_run_schedule(bevy::prelude::Update);
         let _ = self
             .app
             .world_mut()
@@ -312,7 +306,8 @@ impl Harness {
                     // JSON, so the literal characters in the file are
                     // `"features":"[..\"host\"..]"`. Match on the
                     // actual escape patterns present in the file.
-                    let matches = text.contains(r#""\""host\"",\""#) || text.contains(r#""\""host\"" ]"#);
+                    let matches =
+                        text.contains(r#""\""host\"",\""#) || text.contains(r#""\""host\"" ]"#);
                     if matches {
                         if let Ok(meta) = std::fs::metadata(rlib) {
                             if let Ok(modified) = meta.modified() {
@@ -367,7 +362,10 @@ impl Harness {
         if output.status.success() {
             // Persist the workdir path under an env var so we can
             // inspect the produced cdylib if the test fails.
-            std::env::set_var(format!("HARNESS_CDYLIB_{crate_name}"), out.display().to_string());
+            std::env::set_var(
+                format!("HARNESS_CDYLIB_{crate_name}"),
+                out.display().to_string(),
+            );
             Some(CompiledCdylib {
                 path: out,
                 _workdir: workdir,
@@ -398,7 +396,14 @@ impl Harness {
         identity: &CanonicalId,
     ) -> Result<TransactionalActivationOutcome, LoadOutcome> {
         let path = self.compile_source_to_cdylib(source, crate_name);
-        loader::load_one_transactional(self.app.world_mut(), &path, true, &[], &[], identity.clone())
+        loader::load_one_transactional(
+            self.app.world_mut(),
+            &path,
+            true,
+            &[],
+            &[],
+            identity.clone(),
+        )
     }
 
     pub fn load_one_transactional_at(
@@ -429,14 +434,7 @@ impl Harness {
         dir: &Path,
         discovery_root: &Path,
     ) -> Vec<(PathBuf, LoadOutcome)> {
-        loader::load_dir(
-            self.app.world_mut(),
-            dir,
-            discovery_root,
-            true,
-            &[],
-            &[],
-        )
+        loader::load_dir(self.app.world_mut(), dir, discovery_root, true, &[], &[])
     }
 
     /// Install the production `RenzoraPluginHostPlugin`. After this,
@@ -445,22 +443,21 @@ impl Harness {
     /// editor (the watcher calls `request_reload`; the `PluginReload`
     /// schedule runs `apply_reload_requests` on the next frame).
     pub fn install_plugin_host(&mut self, plugin_dir: &Path) {
-        self.app.add_plugins(renzora_plugin::host::loader::RenzoraPluginHostPlugin {
-            is_editor: true,
-            statics: Vec::new(),
-            disabled: Vec::new(),
-        });
+        self.app
+            .add_plugins(renzora_plugin::host::loader::RenzoraPluginHostPlugin {
+                is_editor: true,
+                statics: Vec::new(),
+                disabled: Vec::new(),
+            });
         // The plugin chooses its own `dir` from `current_exe`; in
         // tests we want the watcher to observe a specific directory
         // — overwrite the resource after install so the watcher
         // polls the right place. `for_tests` primes the watcher's
         // `seen` map from a directory stat so the watcher does not
         // re-fire every existing plugin as "changed".
-        self.app
-            .world_mut()
-            .insert_resource(renzora_plugin::host::loader::PluginWatcher::for_tests(
-                plugin_dir.to_path_buf(),
-            ));
+        self.app.world_mut().insert_resource(
+            renzora_plugin::host::loader::PluginWatcher::for_tests(plugin_dir.to_path_buf()),
+        );
     }
 
     /// Push `path` onto the reload queue and run the `PluginReload`
@@ -512,9 +509,11 @@ impl Harness {
     ) -> Entity {
         let entity = self.app.world_mut().spawn_empty().id();
         unsafe {
-            let mut bytes =
-                std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
-                    .to_vec();
+            let mut bytes = std::slice::from_raw_parts(
+                (value as *const T).cast::<u8>(),
+                std::mem::size_of::<T>(),
+            )
+            .to_vec();
             let ptr = bevy::ptr::OwningPtr::new(std::ptr::NonNull::new_unchecked(
                 bytes.as_mut_ptr().cast(),
             ));
@@ -661,11 +660,7 @@ impl Harness {
         *world.resource_mut::<LoosePluginReloadRequests>() = reloads;
     }
 
-    pub fn attach_pending_build(
-        &mut self,
-        id: &CanonicalId,
-        rx: Receiver<BuildOutcome>,
-    ) {
+    pub fn attach_pending_build(&mut self, id: &CanonicalId, rx: Receiver<BuildOutcome>) {
         let world = self.app.world_mut();
         let mut pending = std::mem::take(&mut *world.resource_mut::<LoosePendingBuilds>());
         pending.pending.insert(
@@ -722,9 +717,13 @@ impl Harness {
         slot: usize,
         proposed_generation: u32,
     ) {
-        let mut journal =
-            diff_registrations(self.app.world(), before, slot, proposed_generation);
-        apply_journal_rollback(self.app.world_mut(), &mut journal, slot, proposed_generation);
+        let mut journal = diff_registrations(self.app.world(), before, slot, proposed_generation);
+        apply_journal_rollback(
+            self.app.world_mut(),
+            &mut journal,
+            slot,
+            proposed_generation,
+        );
     }
 }
 
@@ -756,7 +755,10 @@ impl BuildServiceDriver {
             n_workers: Some(1),
             n_children: Some(1),
             shutdown_deadline: std::time::Duration::from_secs(30),
-            required_symbols: vec![b"renzora_plugin_init\0".to_vec()],
+            required_symbols_by_kind: std::collections::HashMap::from([(
+                ArtifactKind::Tier1Plugin,
+                vec![b"renzora_plugin_init\0".to_vec()],
+            )]),
         };
         let service = BuildService::new(cfg);
         match service {

@@ -233,6 +233,77 @@ fn main() {
         add_default_rendering(&mut app, is_editor);
     }
 
+    // U4-2: the runtime's source-modding policy. Editor and
+    // explicit SourceModdingRuntime sessions construct a
+    // compiler; ordinary runtime, server, host, and VR sessions
+    // do NOT. The factory call returns `CompilerService::Available`
+    // for editor/source-modding sessions and `Unavailable` for
+    // runtime / server / VR / etc. The same U4-2 flag works for
+    // `renzora_editor_app/src/main.rs` and the acceptance harness.
+    let session_kind = if is_editor {
+        renzora_runtime::host_assembly::SessionKind::Editor
+    } else {
+        renzora_runtime::host_assembly::SessionKind::Runtime
+    };
+    let compiler_service = if renzora_runtime::host_assembly::compiler_modding_policy(session_kind) {
+        renzora_runtime::host_assembly::build_compiler_service(
+            &renzora_runtime::host_assembly::SharedServiceFactory,
+            renzora_compiler_cache::shared::SharedBuildServiceConfig {
+                cache_root: renzora_runtime::host_assembly::default_cache_root(None, is_editor),
+                ..Default::default()
+            },
+            if is_editor { "renzora" } else { "renzora-runtime" },
+        )
+    } else {
+        // U4-2: ordinary runtime sessions do not even attempt to
+        // construct a `BuildService`. No cache root, no worker
+        // pool, no SDK stamp hash, no filesystem side effects.
+        renzora_runtime::host_assembly::CompilerService::Unavailable {
+            diagnostic: format!(
+                "[{}] runtime sessions do not compile source",
+                if is_editor { "renzora" } else { "renzora-runtime" }
+            ),
+        }
+    };
+
+    // U4-3 + T4-1: install the compiler-service resources BEFORE
+    // `add_engine_plugins`. The shared `Arc` handed back here is
+    // the Arc the loose host installs into `LooseBuildService`.
+    // On `Unavailable`, no resource is installed and the loose
+    // host stays in `Unavailable` compiler mode (U4-1): loose-
+    // plugin source compilation is disabled for the session;
+    // prebuilt C-ABI cdylibs can still load.
+    let plugins_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("plugins")))
+        .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+    let (disabled_loose, trusted_loose) = if is_editor {
+        (
+            renzora_runtime::renzora::load_disabled_plugins(),
+            renzora_runtime::renzora::load_trusted_loose_plugins(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let extension_config = renzora_runtime::host_assembly::ExtensionHostConfig {
+        session: session_kind,
+        session_tag: if is_editor { "renzora" } else { "renzora-runtime" }.to_string(),
+        compiler_config: renzora_compiler_cache::shared::SharedBuildServiceConfig::default(),
+        plugins_dir,
+        disabled_plugin_ids: disabled_loose.clone(),
+        trusted_plugin_ids: trusted_loose,
+    };
+    let installed_extension_host = renzora_runtime::host_assembly::assemble_extension_host(
+        &mut app,
+        &extension_config,
+        &compiler_service,
+    );
+    let shared_arc = installed_extension_host.shared_arc.clone();
+    if let Some(diag) = compiler_service.diagnostic() {
+        eprintln!("{diag}");
+        renzora_runtime::renzora::core::console_log::console_error("Compiler", diag.to_string());
+    }
+
     add_engine_plugins(&mut app, is_editor);
     app.add_plugins(renzora_runtime::renzora_engine::crash::CrashReportPlugin);
 
@@ -258,21 +329,35 @@ fn main() {
     // C-ABI plugins from `<exe-dir>/plugins/`, after both.
     load_global_plugins(&mut app, is_editor);
 
-    // Phase 3 loose-plugin activation in shipped builds. The runtime
-    // doesn't watch source (no toolchain available), but it does activate
-    // any loose plugins already compiled by the editor and dropped into
-    // `plugins/.loose-staged/`.
+    // T4-1 / T4-2: hand the same `Arc` to the loose host when this
+    // is an editor session. The assembly function injects the
+    // Arc into the host's `shared_build_service` field; the host's
+    // `build` then installs THE SAME Arc into `LooseBuildService`.
+    // When the compiler is unavailable the loose host installs
+    // without a build service; precompiled plugins remain available
+    // and the editor's other functionality continues.
     if is_editor {
-        let plugins_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("plugins")))
-            .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
-        app.add_plugins(
-            renzora_loose_plugins::LoosePluginHost::editor_with_trust(
-                &plugins_dir,
-                renzora_runtime::renzora::load_disabled_plugins(),
-                renzora_runtime::renzora::load_trusted_loose_plugins(),
-            ),
+        app.add_plugins(installed_extension_host.loose_host);
+        // U4-4: install the production OS-watcher adapter so
+        // the lifecycle's event seam receives real filesystem
+        // events. Tests skip this plugin and push events through
+        // the `ScriptSourceEventQueue` directly.
+        app.add_plugins(renzora_rust_script::source_watcher::RustScriptSourceWatcherPlugin::default());
+    }
+
+    // U4-3: when both services came up, the loose-host
+    // `LooseBuildService` wraps the same Arc as
+    // `RustScriptBuildService`. The check is `debug_assert!`-gated
+    // because it runs every editor startup; the matching test
+    // in `phase4_acceptance.rs::p4_t4_1_single_install_path` is
+    // the release-grade proof.
+    if let (Some(arc), Some(loose_resource)) = (
+        shared_arc.as_ref(),
+        app.world().get_resource::<renzora_loose_plugins::LooseBuildService>(),
+    ) {
+        debug_assert!(
+            std::ptr::eq(arc.as_ref() as *const _, loose_resource.0.as_ref() as *const _),
+            "U4-3: loose-host BuildService and RustScriptBuildService must wrap the same Arc"
         );
     }
 

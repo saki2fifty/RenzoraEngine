@@ -67,7 +67,10 @@ fn runtime_execution_plugin_system_runs_and_writes_observed_value() {
         &CanonicalId::parse("engine://exec_runtime.rs").unwrap(),
     );
     assert!(
-        matches!(r, Ok(TransactionalActivationOutcome::Committed { generation: 1, .. })),
+        matches!(
+            r,
+            Ok(TransactionalActivationOutcome::Committed { generation: 1, .. })
+        ),
         "expected commit at generation 1, got {r:?}"
     );
 
@@ -149,7 +152,10 @@ fn behavior_reload_v1_then_v2_produce_distinct_writes_at_same_path() {
     std::fs::copy(&v1_lib, &staged).unwrap();
     let r1 = h.load_one_transactional_at(&staged, &beh_id);
     assert!(
-        matches!(r1, Ok(TransactionalActivationOutcome::Committed { generation: 1, .. })),
+        matches!(
+            r1,
+            Ok(TransactionalActivationOutcome::Committed { generation: 1, .. })
+        ),
         "v1 must commit at generation 1, got {r1:?}"
     );
     let v1_behavior_id = h.component_id_by_type_path("beh_Behavior");
@@ -162,7 +168,10 @@ fn behavior_reload_v1_then_v2_produce_distinct_writes_at_same_path() {
     std::fs::copy(&v2_lib, &staged).unwrap();
     let r2 = h.load_one_transactional_at(&staged, &beh_id);
     assert!(
-        matches!(r2, Ok(TransactionalActivationOutcome::Committed { generation: 2, .. })),
+        matches!(
+            r2,
+            Ok(TransactionalActivationOutcome::Committed { generation: 2, .. })
+        ),
         "v2 must commit at generation 2 at same canonical identity, got {r2:?}"
     );
     let v2_behavior_id = h.component_id_by_type_path("beh_Behavior");
@@ -302,9 +311,7 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
     let v2_lib_res = h.try_compile_source_to_cdylib(&v2_src, "iff_v2_fail");
     let v2_lib = match v2_lib_res {
         Some(p) => p,
-        None => panic!(
-            "iff_v2_fail cdylib compile failed; inspect {v2_src} for compile errors"
-        ),
+        None => panic!("iff_v2_fail cdylib compile failed; inspect {v2_src} for compile errors"),
     };
     std::fs::copy(&v2_lib, &staged).unwrap();
     let r2 = h.load_one_transactional_at(&staged, &iff_id);
@@ -321,10 +328,11 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
     // After rollback, the candidate-only component must be gone from
     // PluginComponents / PluginComponentSchemas.
     assert!(
-        !h.observe::<PluginComponents, _>(|c| c
-            .0
-            .iter()
-            .any(|(_, cid)| format!("<id-{}>", cid.index()).contains("NewProbe"))),
+        !h.observe::<PluginComponents, _>(|c| c.0.iter().any(|(_, cid)| format!(
+            "<id-{}>",
+            cid.index()
+        )
+        .contains("NewProbe"))),
         "candidate-only component must be removed from PluginComponents after rollback"
     );
     assert!(
@@ -484,9 +492,8 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
     }
     // (a) the ORIGINAL resource bytes are restored from the pre-init
     //     snapshot.
-    let after_bytes =
-        renzora_plugin::host::read_resource_bytes_safe(h.app_mut().world(), probe_id)
-            .expect("ProbeRes bytes after failed candidate");
+    let after_bytes = renzora_plugin::host::read_resource_bytes_safe(h.app_mut().world(), probe_id)
+        .expect("ProbeRes bytes after failed candidate");
     assert_eq!(
         after_bytes, prior_bytes,
         "pre-existing resource must keep its prior bytes after the failed candidate overwrote them"
@@ -503,10 +510,7 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
     );
     // (c) v1's ProbeRes metadata is intact.
     assert!(
-        schemas
-            .0
-            .iter()
-            .any(|s| s.type_path.contains("ProbeRes")),
+        schemas.0.iter().any(|s| s.type_path.contains("ProbeRes")),
         "v1's ProbeRes schema must remain after the failed candidate"
     );
     // (d) the slot's loaded_at stays at 1 — no successful commit happened.
@@ -580,10 +584,7 @@ renzora_plugin::add!(Good, Runtime);
                 .map(|r| format!("{:?}", r.kind))
                 .unwrap_or_else(|| "<none>".to_string())
         });
-        if staged.is_file()
-            && h.slot_loaded_at(&staged) > 0
-            && inv_kind.contains("Active")
-        {
+        if staged.is_file() && h.slot_loaded_at(&staged) > 0 && inv_kind.contains("Active") {
             break;
         }
         last_diag = format!(
@@ -649,7 +650,10 @@ renzora_plugin::add!(Good, Runtime);
         )
     });
     match outcome2 {
-        renzora_compiler_cache::BuildOutcome::CompileFailed { diagnostics, request_revision } => {
+        renzora_compiler_cache::BuildOutcome::CompileFailed {
+            diagnostics,
+            request_revision,
+        } => {
             // Capture diagnostic details (compiler stdout/stderr
             // lines) for any future assertion failure context.
             let _ = (diagnostics, request_revision);
@@ -704,10 +708,7 @@ fn synthetic_three_compiled_cdylibs_load_via_load_dir() {
         );
         let crate_name = format!("p{i}");
         let built = h.compile_source_to_cdylib(&src, &crate_name);
-        let final_name = format!(
-            "lib{crate_name}.{}",
-            std::env::consts::DLL_EXTENSION
-        );
+        let final_name = format!("lib{crate_name}.{}", std::env::consts::DLL_EXTENSION);
         std::fs::rename(&built, plugins_dir.join(&final_name)).unwrap();
     }
     let results = h.load_dir(&plugins_dir);
@@ -759,10 +760,7 @@ renzora_plugin::add!(Toggle, Runtime);
         "pending receiver must be dropped after disable"
     );
     assert!(
-        h.observe_pending(|p| p
-            .staged_for_activation
-            .iter()
-            .all(|(qid, _, _)| qid != &id)),
+        h.observe_pending(|p| p.staged_for_activation.iter().all(|(qid, _, _)| qid != &id)),
         "staged_for_activation must not contain id after disable"
     );
 
@@ -958,7 +956,10 @@ fn interleaved_prior_and_candidate_custom_materials_rollback_removes_only_candid
         .materials
         .len();
     assert_eq!(pre_init_pm, 2, "two prior `PendingMaterial` rows seeded");
-    assert_eq!(pre_init_mats, 2, "two prior `MaterialSlot::Custom` rows seeded");
+    assert_eq!(
+        pre_init_mats, 2,
+        "two prior `MaterialSlot::Custom` rows seeded"
+    );
 
     // Snapshot before the candidate pushes anything — this is the
     // `before` the production `activate_with_transaction` would have
@@ -982,8 +983,14 @@ fn interleaved_prior_and_candidate_custom_materials_rollback_removes_only_candid
         .resource::<renzora_plugin::host::PluginAssets>()
         .materials
         .len();
-    assert_eq!(pre_rollback_pm, 5, "two prior + three candidate pending rows");
-    assert_eq!(pre_rollback_mats, 5, "two prior + three candidate material slots");
+    assert_eq!(
+        pre_rollback_pm, 5,
+        "two prior + three candidate pending rows"
+    );
+    assert_eq!(
+        pre_rollback_mats, 5,
+        "two prior + three candidate material slots"
+    );
 
     // 3. Drive the production rollback path. `diff_registrations`
     //    filters by `(owner=0, owner_generation=2)`, so only the
@@ -1022,8 +1029,14 @@ fn interleaved_prior_and_candidate_custom_materials_rollback_removes_only_candid
         .resource::<renzora_plugin::host::PluginAssets>()
         .materials
     {
-        assert_ne!(*gen, 2, "candidate-generation row must be removed: {owner}/{gen}");
-        assert_eq!(*gen, 1, "only prior-generation rows may survive: {owner}/{gen}");
+        assert_ne!(
+            *gen, 2,
+            "candidate-generation row must be removed: {owner}/{gen}"
+        );
+        assert_eq!(
+            *gen, 1,
+            "only prior-generation rows may survive: {owner}/{gen}"
+        );
     }
 }
 
@@ -1168,10 +1181,7 @@ renzora_plugin::add!(AbcC, Runtime);
                 .map(|r| format!("{:?}", r.kind))
                 .unwrap_or_else(|| "<none>".to_string())
         });
-        if staged.is_file()
-            && h.slot_loaded_at(&staged) > 0
-            && inv_kind.contains("Active")
-        {
+        if staged.is_file() && h.slot_loaded_at(&staged) > 0 && inv_kind.contains("Active") {
             break;
         }
         last_diag = format!(
@@ -1491,10 +1501,16 @@ renzora_plugin::add!(PersistPlugin, Runtime);
             .type_path
             .clone()
     };
-    assert_ne!(a_durable, b_durable, "two distinct identities must produce two distinct durable paths");
+    assert_ne!(
+        a_durable, b_durable,
+        "two distinct identities must produce two distinct durable paths"
+    );
     let a_id = h.app.world().resource::<PluginComponents>().0[&a_durable];
     let b_id = h.app.world().resource::<PluginComponents>().0[&b_durable];
-    assert_ne!(a_id, b_id, "distinct durable paths must produce distinct ComponentIds");
+    assert_ne!(
+        a_id, b_id,
+        "distinct durable paths must produce distinct ComponentIds"
+    );
 
     // Spawn one entity per archetype. A's entity holds value 0xA1;
     // B's holds 0xB1. The scene format stores these as raw bytes at
@@ -1535,7 +1551,11 @@ renzora_plugin::add!(PersistPlugin, Runtime);
         "the saved scene must reference B's durable path `{b_durable}`; RON:\n{ron}"
     );
 
-    let raw_registry = h.app.world().resource::<renzora_bsn::RawComponentRegistry>().clone();
+    let raw_registry = h
+        .app
+        .world()
+        .resource::<renzora_bsn::RawComponentRegistry>()
+        .clone();
     assert!(
         raw_registry.0.by_path.contains_key(&a_durable),
         "the fresh RawTypeTable must contain A's durable path `{a_durable}`; got paths: {:?}",
@@ -1547,8 +1567,14 @@ renzora_plugin::add!(PersistPlugin, Runtime);
     );
     let raw_a_id = raw_registry.0.by_path[&a_durable].component_id;
     let raw_b_id = raw_registry.0.by_path[&b_durable].component_id;
-    assert_eq!(raw_a_id, a_id, "the scene registry's id for A must equal the host's id");
-    assert_eq!(raw_b_id, b_id, "the scene registry's id for B must equal the host's id");
+    assert_eq!(
+        raw_a_id, a_id,
+        "the scene registry's id for A must equal the host's id"
+    );
+    assert_eq!(
+        raw_b_id, b_id,
+        "the scene registry's id for B must equal the host's id"
+    );
 
     // ── Drop the original World/App and construct a genuinely
     // fresh one. New `App` => new `ComponentId` numbering; the
@@ -1583,9 +1609,18 @@ renzora_plugin::add!(PersistPlugin, Runtime);
     // ids fresh).
     let fresh_a_id = h2.app.world().resource::<PluginComponents>().0[&a_durable];
     let fresh_b_id = h2.app.world().resource::<PluginComponents>().0[&b_durable];
-    assert_ne!(fresh_a_id, a_id, "fresh Bevy must allocate a different numeric id");
-    assert_ne!(fresh_b_id, b_id, "fresh Bevy must allocate a different numeric id");
-    assert_ne!(fresh_a_id, fresh_b_id, "distinct durable paths must still be distinct ids in the fresh host");
+    assert_ne!(
+        fresh_a_id, a_id,
+        "fresh Bevy must allocate a different numeric id"
+    );
+    assert_ne!(
+        fresh_b_id, b_id,
+        "fresh Bevy must allocate a different numeric id"
+    );
+    assert_ne!(
+        fresh_a_id, fresh_b_id,
+        "distinct durable paths must still be distinct ids in the fresh host"
+    );
 
     // Refresh the registry from the fresh host's schemas — the
     // exact same production function as the original host. Both
@@ -1602,7 +1637,11 @@ renzora_plugin::add!(PersistPlugin, Runtime);
     // both plugins ship the same local type name `State`.
     renzora_engine::scene_io::load_scene_from_string(h2.app.world_mut(), &ron);
 
-    let fresh_registry = h2.app.world().resource::<renzora_bsn::RawComponentRegistry>().clone();
+    let fresh_registry = h2
+        .app
+        .world()
+        .resource::<renzora_bsn::RawComponentRegistry>()
+        .clone();
     assert_eq!(
         fresh_registry.0.by_path[&a_durable].component_id, fresh_a_id,
         "the fresh host's scene registry must resolve A's durable path to its own ComponentId"
@@ -1632,10 +1671,8 @@ renzora_plugin::add!(PersistPlugin, Runtime);
             }
         }
     }
-    let restored_a =
-        restored_a.expect("the fresh host must contain an entity named `persist_a`");
-    let restored_b =
-        restored_b.expect("the fresh host must contain an entity named `persist_b`");
+    let restored_a = restored_a.expect("the fresh host must contain an entity named `persist_a`");
+    let restored_b = restored_b.expect("the fresh host must contain an entity named `persist_b`");
 
     // Cross-isolation: the fresh host's A-id is on the A entity,
     // the fresh host's B-id is on the B entity, and neither id
@@ -1665,10 +1702,22 @@ renzora_plugin::add!(PersistPlugin, Runtime);
         .entity(restored_b)
         .get_by_id(fresh_a_id)
         .is_ok();
-    assert!(a_has_a, "the restored `persist_a` entity must carry A's fresh `ComponentId`");
-    assert!(!a_has_b, "the restored `persist_a` must NOT carry B's fresh `ComponentId` (schemas exchanged)");
-    assert!(b_has_b, "the restored `persist_b` entity must carry B's fresh `ComponentId`");
-    assert!(!b_has_a, "the restored `persist_b` must NOT carry A's fresh `ComponentId` (schemas exchanged)");
+    assert!(
+        a_has_a,
+        "the restored `persist_a` entity must carry A's fresh `ComponentId`"
+    );
+    assert!(
+        !a_has_b,
+        "the restored `persist_a` must NOT carry B's fresh `ComponentId` (schemas exchanged)"
+    );
+    assert!(
+        b_has_b,
+        "the restored `persist_b` entity must carry B's fresh `ComponentId`"
+    );
+    assert!(
+        !b_has_a,
+        "the restored `persist_b` must NOT carry A's fresh `ComponentId` (schemas exchanged)"
+    );
 
     // The saved values must round-trip through the fresh host's
     // new `ComponentId`s. 0xA1 was written through A's id in the
@@ -1888,12 +1937,24 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
     let id_a = comps
         .0
         .iter()
-        .find_map(|(name, id)| if name.ends_with("/amb_a::Foo") { Some(*id) } else { None })
+        .find_map(|(name, id)| {
+            if name.ends_with("/amb_a::Foo") {
+                Some(*id)
+            } else {
+                None
+            }
+        })
         .expect("`amb_a::Foo` must be in PluginComponents under the durable prefix");
     let id_b = comps
         .0
         .iter()
-        .find_map(|(name, id)| if name.ends_with("/amb_b::Foo") { Some(*id) } else { None })
+        .find_map(|(name, id)| {
+            if name.ends_with("/amb_b::Foo") {
+                Some(*id)
+            } else {
+                None
+            }
+        })
         .expect("`amb_b::Foo` must be in PluginComponents under the durable prefix");
     assert_ne!(
         id_a, id_b,
@@ -2018,7 +2079,13 @@ renzora_plugin::add!(TxnValid, Runtime);
         .resource::<PluginComponents>()
         .0
         .iter()
-        .find_map(|(name, id)| if name.ends_with("::Foo") { Some(*id) } else { None })
+        .find_map(|(name, id)| {
+            if name.ends_with("::Foo") {
+                Some(*id)
+            } else {
+                None
+            }
+        })
         .expect("the valid candidate's Foo must be registered in PluginComponents");
     let e = h.spawn_entity_with_raw_component(valid_id, &0u32);
     h.update();
@@ -2278,7 +2345,10 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
             manual_paths[1].clone(),
         )
     };
-    assert_ne!(id_for_a, id_for_b, "two durable paths must produce two distinct ComponentIds");
+    assert_ne!(
+        id_for_a, id_for_b,
+        "two durable paths must produce two distinct ComponentIds"
+    );
 
     // Reloading either canonical plugin reuses ITS OWN existing
     // durable name and id — not the other plugin's. A's v2 reload
@@ -2288,7 +2358,11 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
     assert!(
         matches!(
             r_a2,
-            Ok(TransactionalActivationOutcome::Committed { slot: 0, generation: 2, .. })
+            Ok(TransactionalActivationOutcome::Committed {
+                slot: 0,
+                generation: 2,
+                ..
+            })
         ),
         "A's reload under the same canonical identity must commit at gen 2; got {r_a2:?}"
     );
@@ -2302,7 +2376,6 @@ pub unsafe extern \"C\" fn renzora_plugin_init(
         "B's id must be unchanged after A's reload"
     );
 }
-
 
 /// Companion to the crate-level attribute tests: a real
 /// `BuildService` compile, then a direct read of the wrapper
@@ -2340,7 +2413,10 @@ renzora_plugin::add!(CrateRootProbe, Runtime);
     let outcome = recv_until(&rx, bs.deadline()).expect("outcome");
     let outcome_str = format!("{outcome:?}");
     assert!(
-        matches!(outcome, renzora_compiler_cache::BuildOutcome::Published { .. }),
+        matches!(
+            outcome,
+            renzora_compiler_cache::BuildOutcome::Published { .. }
+        ),
         "the build must publish, not fail; got {outcome_str}"
     );
     // Find the wrapper package's src/lib.rs on disk. The
@@ -2350,7 +2426,8 @@ renzora_plugin::add!(CrateRootProbe, Runtime);
     let partitions = bs.service.partitions().snapshot();
     assert_eq!(partitions.len(), 1, "one partition produced");
     let (pk, target_dir) = &partitions[0];
-    let _lib_name_for_inspect: String = renzora_compiler_cache::compiler::lib_name_for_identity(&id);
+    let _lib_name_for_inspect: String =
+        renzora_compiler_cache::compiler::lib_name_for_identity(&id);
     let _ = _lib_name_for_inspect;
     let pkg_name = renzora_compiler_cache::compiler::stable_partition_package_name(pk);
     let lib_path = target_dir
@@ -2359,7 +2436,10 @@ renzora_plugin::add!(CrateRootProbe, Runtime);
         .join("src")
         .join("lib.rs");
     let on_disk = std::fs::read_to_string(&lib_path).unwrap_or_else(|e| {
-        panic!("cannot read wrapper src/lib.rs at `{}`: {e}", lib_path.display())
+        panic!(
+            "cannot read wrapper src/lib.rs at `{}`: {e}",
+            lib_path.display()
+        )
     });
     // Assert the file starts with the user's attribute (i.e. the
     // user's source is verbatim at the crate root).
@@ -2376,8 +2456,7 @@ renzora_plugin::add!(CrateRootProbe, Runtime);
     // appeared: a source-wrapping regression would prefix the user's
     // source with `pub mod <something> { ... }`.
     assert!(
-        !on_disk.contains("pub mod plugin_")
-            && !on_disk.contains("pub mod renzora_plugin_"),
+        !on_disk.contains("pub mod plugin_") && !on_disk.contains("pub mod renzora_plugin_"),
         "the wrapper's `src/lib.rs` MUST NOT contain a generated `pub mod \
          <name> {{ ... }}` wrapper; got:\n{on_disk}"
     );
@@ -2410,8 +2489,8 @@ renzora_plugin::add!(CrateRootProbe, Runtime);
 fn z3_1_load_dir_logical_identity_is_cross_platform_linux_so() {
     let root = PathBuf::from("/proj/plugins");
     let path = root.join("libfoo.so");
-    let id = renzora_plugin::host::loader::canonical_id_for_path(&path, &root)
-        .expect("path under root");
+    let id =
+        renzora_plugin::host::loader::canonical_id_for_path(&path, &root).expect("path under root");
     assert_eq!(id.to_scheme_path(), "engine://foo");
 }
 
@@ -2419,8 +2498,8 @@ fn z3_1_load_dir_logical_identity_is_cross_platform_linux_so() {
 fn z3_1_load_dir_logical_identity_is_cross_platform_macos_dylib() {
     let root = PathBuf::from("/proj/plugins");
     let path = root.join("libfoo.dylib");
-    let id = renzora_plugin::host::loader::canonical_id_for_path(&path, &root)
-        .expect("path under root");
+    let id =
+        renzora_plugin::host::loader::canonical_id_for_path(&path, &root).expect("path under root");
     assert_eq!(id.to_scheme_path(), "engine://foo");
 }
 
@@ -2428,8 +2507,8 @@ fn z3_1_load_dir_logical_identity_is_cross_platform_macos_dylib() {
 fn z3_1_load_dir_logical_identity_is_cross_platform_windows_dll() {
     let root = PathBuf::from("C:/proj/plugins");
     let path = root.join("foo.dll");
-    let id = renzora_plugin::host::loader::canonical_id_for_path(&path, &root)
-        .expect("path under root");
+    let id =
+        renzora_plugin::host::loader::canonical_id_for_path(&path, &root).expect("path under root");
     assert_eq!(id.to_scheme_path(), "engine://foo");
 }
 
@@ -2474,8 +2553,16 @@ fn z3_1_load_dir_logical_identity_same_crate_all_platforms() {
         (&unix_root, "liblibrary.dylib", "engine://library"),
         (&win_root, "library.dll", "engine://library"),
         // nested versions — parent directories preserved.
-        (&unix_root, "effects/liblibfoo.so", "engine://effects/libfoo"),
-        (&unix_root, "effects/liblibfoo.dylib", "engine://effects/libfoo"),
+        (
+            &unix_root,
+            "effects/liblibfoo.so",
+            "engine://effects/libfoo",
+        ),
+        (
+            &unix_root,
+            "effects/liblibfoo.dylib",
+            "engine://effects/libfoo",
+        ),
         (&win_root, "effects/libfoo.dll", "engine://effects/libfoo"),
     ];
     for (root, rel, expected) in cases {
@@ -2641,7 +2728,10 @@ fn z3_1_load_dir_watcher_reload_reuses_directory_identity_and_component_id() {
     let e = h.spawn_entity_with_raw_component(a_id_before, &0u32);
     h.update();
     let v1_value = h.read_raw_component_u32(e, a_id_before);
-    assert_eq!(v1_value, 1, "v1 system must have written 1; observed {v1_value}");
+    assert_eq!(
+        v1_value, 1,
+        "v1 system must have written 1; observed {v1_value}"
+    );
     let v2_lib = h.compile_source_to_cdylib(v2_src, "wl_dirA_plugin");
     std::fs::copy(&v2_lib, &a_path).unwrap();
     h.drive_reload(&a_path);
@@ -2798,11 +2888,8 @@ fn z3_1_load_dir_identity_independent_of_absolute_path() {
     );
     let rel_alt = PathBuf::from("inner/libfoo.so");
     let path_a_alt = root_a.join(&rel_alt);
-    let id_a_alt = renzora_plugin::host::loader::canonical_id_for_path(
-        &path_a_alt,
-        &root_a,
-    )
-    .expect("path under root");
+    let id_a_alt = renzora_plugin::host::loader::canonical_id_for_path(&path_a_alt, &root_a)
+        .expect("path under root");
     assert_ne!(
         id_a, id_a_alt,
         "different relative paths under the same root must produce different identities"

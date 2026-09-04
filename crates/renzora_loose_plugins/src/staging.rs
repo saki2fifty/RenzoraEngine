@@ -20,8 +20,8 @@
 //!   swap — the host's transactional activation shadow-copies on Windows
 //!   before opening, so the staged file is never mapped.)
 
-use std::path::{Path, PathBuf};
 use renzora_identity::CanonicalId;
+use std::path::{Path, PathBuf};
 
 /// Where loose plugins stage their stable, loader-visible cdylib.
 #[derive(Debug, Clone)]
@@ -101,7 +101,11 @@ impl StableStaging {
             ));
         }
         let dst = self.stable_path_for(id);
-        let previous = if dst.exists() { Some(dst.clone()) } else { None };
+        let previous = if dst.exists() {
+            Some(dst.clone())
+        } else {
+            None
+        };
 
         // Stage next to the destination so the atomic-replace is on the
         // same filesystem (POSIX rename) or so MoveFileExW can target the
@@ -201,10 +205,7 @@ mod tests {
         let src = dir.path().join("gen-N.bin");
         std::fs::write(&src, b"hello").unwrap();
         let p = staging.place(&id("engine://spin.rs"), &src).unwrap();
-        assert_eq!(
-            std::fs::read(&p.stable_path).unwrap(),
-            b"hello".to_vec(),
-        );
+        assert_eq!(std::fs::read(&p.stable_path).unwrap(), b"hello".to_vec(),);
     }
 
     #[test]

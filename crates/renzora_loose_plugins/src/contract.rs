@@ -98,7 +98,9 @@ impl std::error::Error for LoosePluginParseError {}
 /// `add!` declarations are always rejected — one file, one plugin — which is
 /// what the design says authors who want both scopes should split into two
 /// files.
-pub fn parse_loose_plugin_source(source: &[u8]) -> Result<LoosePluginContract, LoosePluginParseError> {
+pub fn parse_loose_plugin_source(
+    source: &[u8],
+) -> Result<LoosePluginContract, LoosePluginParseError> {
     let text = match std::str::from_utf8(source) {
         Ok(s) => s,
         Err(_) => {
@@ -128,11 +130,7 @@ pub fn parse_loose_plugin_source(source: &[u8]) -> Result<LoosePluginContract, L
             // we refuse for the same reason. Distinct scopes are reported
             // with the more specific variant.
             let first = &declarations[0];
-            if declarations
-                .iter()
-                .skip(1)
-                .any(|d| d.scope != first.scope)
-            {
+            if declarations.iter().skip(1).any(|d| d.scope != first.scope) {
                 Err(LoosePluginParseError::ConflictingScopes)
             } else {
                 Err(LoosePluginParseError::ConflictingDeclarations)
@@ -162,10 +160,13 @@ fn find_add_macro(text: &str) -> Option<AddMacroSite> {
     while i + needle.len() <= bytes.len() {
         if &bytes[i..i + needle.len()] == needle.as_bytes() {
             let call_open = i + needle.len() - 1; // position of '('
-            // Find the matching ')' by balanced scan that respects nested
-            // parens, comments, and string literals.
+                                                  // Find the matching ')' by balanced scan that respects nested
+                                                  // parens, comments, and string literals.
             let call_close = find_matching_close(text, call_open)?;
-            return Some(AddMacroSite { call_open, call_close });
+            return Some(AddMacroSite {
+                call_open,
+                call_close,
+            });
         }
         // Skip one character, respecting comments and literals.
         i += skip_one_token(bytes, i);

@@ -5,52 +5,23 @@
 //! inside `target/export-src/`, the throwaway workspace copy an export compiles.
 //! Editing it here changes nothing about an export.
 //!
-//! ## Why scripts are compiled in rather than loaded
-//!
-//! In the editor a `.rs` script is built into a dylib and `dlopen`'d, which is
-//! sound only because script and engine share one `bevy_dylib` — one `World`
-//! type, one set of `TypeId`s. A lean export links Bevy statically and has no
-//! shared image, so a script dylib would carry its own copy of Bevy and calling
-//! into it would be memory corruption with no diagnostic. `RustScriptPlugin`
-//! refuses to register a backend in that build, which is why an exported game
-//! reports `No backend for Some("rs")`.
-//!
-//! Compiling the source into the binary removes the boundary rather than trying
-//! to make it safe: there is no library, no symbol lookup and no ABI question,
-//! because the script is part of the same compilation as everything it touches.
-//!
-//! ## What stays identical
-//!
-//! The dispatcher does not change. `renzora_rust_script` fills `LoadedScripts`
-//! from [`scripts()`] instead of from loaded libraries, and everything after
-//! that — one `fn(&mut World, Entity)` per entity per frame, keyed by canonical
-//! identity, wrapped in a panic guard — is the same code. A script must behave
-//! the same in the editor and in an export, or the export cannot be tested by
-//! playing it.
-//!
-//! Every script in `scripts/` is compiled in, not only those some scene
-//! references: a scene can be loaded at runtime and a `ScriptComponent` added at
-//! runtime, so any "which are actually used" analysis would eventually be wrong
-//! in the direction that breaks a game silently. An unused script costs bytes in
-//! `.text`, never cycles — the dispatcher only ever looks up identities that a
-//! live entity asked for.
-
-use bevy::ecs::entity::Entity;
-use bevy::ecs::world::World;
+//! Phase 4 swaps the entry type for the versioned Tier 1 C-ABI: each
+//! generated script module emits, through the
+//! `renzora_plugin::rust_script!` macro, a per-cdylib
+//! `unsafe extern "C" fn renzora_plugin_tier1_script_call` whose
+//! pointer is what the descriptor's `entry` field carries. The
+//! static-link variant collects those function pointers here and the
+//! loader registers each one against its canonical id.
 
 use renzora_identity::CanonicalId;
+use renzora_plugin::script::ScriptEntry;
 
-/// A script's entry point: the same signature the dylib path calls through.
-pub type ScriptFn = fn(&mut World, Entity);
-
-/// Every script compiled into this binary, as `(canonical id, entry point)`.
-///
-/// Keyed by canonical id rather than file name. Phase 1 commit 1.3
-/// introduced canonical ids everywhere; the static table follows. Two
-/// scripts that share a leaf name at different paths have distinct
-/// canonical ids and both are registered.
+/// Every script compiled into this binary, as
+/// `(canonical id, ScriptEntry)`. Keyed by canonical id rather than
+/// file name. Two scripts that share a leaf name at different paths
+/// have distinct canonical ids and both are registered.
 ///
 /// Empty in the dev tree.
-pub fn scripts() -> Vec<(CanonicalId, ScriptFn)> {
+pub fn scripts() -> Vec<(CanonicalId, ScriptEntry)> {
     Vec::new()
 }

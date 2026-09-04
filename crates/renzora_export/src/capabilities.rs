@@ -788,8 +788,7 @@ fn detection_extensions(id: &str) -> &'static [&'static str] {
         // Mirrors `image_extra`'s `bevy_features` — an extension listed here that has
         // no decoder behind it would flip the capability on for nothing.
         "image_extra" => &[
-            "dds", "jpg", "jpeg", "jpe", "webp", "basis",
-            "exr", "hdr", "gif", "bmp", "tga",
+            "dds", "jpg", "jpeg", "jpe", "webp", "basis", "exr", "hdr", "gif", "bmp", "tga",
         ],
         // Visual scripting only when the project ships blueprint graphs.
         "blueprint" => &["blueprint", "bp"],
@@ -842,7 +841,9 @@ pub fn defaults(selected_plugins: &[String], project_root: Option<&Path>) -> Has
 fn project_uses_script_http(root: &Path) -> bool {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -853,10 +854,7 @@ fn project_uses_script_http(root: &Path) -> bool {
                 if !dot {
                     stack.push(path);
                 }
-            } else if matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("lua")
-            ) {
+            } else if matches!(path.extension().and_then(|e| e.to_str()), Some("lua")) {
                 if let Ok(src) = std::fs::read_to_string(&path) {
                     if src.contains("http_get") || src.contains("http_post") {
                         return true;
@@ -945,14 +943,30 @@ pub fn disabled_runtime_features(state: &HashMap<String, bool>) -> Vec<String> {
         // particles (bevy_hanabi) references bevy_pbr in its asset path — drop it
         // too in 2D (a dedicated 2D-particle path can re-add it later).
         for f in [
-            "terrain", "water", "particles",
+            "terrain",
+            "water",
+            "particles",
             // former `sky` bundle
-            "atmosphere", "environment_map", "skybox",
+            "atmosphere",
+            "environment_map",
+            "skybox",
             // former `postfx` bundle
-            "bloom", "ssao", "ssr", "dof", "motion_blur", "distance_fog",
-            "volumetric_fog", "lens_distortion", "oit", "antialiasing",
+            "bloom",
+            "ssao",
+            "ssr",
+            "dof",
+            "motion_blur",
+            "distance_fog",
+            "volumetric_fog",
+            "lens_distortion",
+            "oit",
+            "antialiasing",
             // 3D-only extras that build on bevy_pbr
-            "lumen", "cloth", "ragdoll", "parkour", "gaussian_splatting",
+            "lumen",
+            "cloth",
+            "ragdoll",
+            "parkour",
+            "gaussian_splatting",
             "forward_decal",
         ] {
             if !out.iter().any(|x| x == f) {
@@ -1000,7 +1014,9 @@ fn used_extensions(root: &Path) -> std::collections::HashSet<String> {
     let mut exts = std::collections::HashSet::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -1085,7 +1101,10 @@ mod tests {
                 cap.bevy_features.is_empty() && cap.runtime_features.is_empty(),
                 "`{id}` is a build-profile knob, not a feature strip",
             );
-            assert!(cap.default_on, "`{id}` must default to the engine's setting");
+            assert!(
+                cap.default_on,
+                "`{id}` must default to the engine's setting"
+            );
         }
     }
 

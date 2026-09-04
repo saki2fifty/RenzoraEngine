@@ -7,12 +7,12 @@
 //! plugins integration actually uses, plus a thin alias for the
 //! activation outcome.
 
-pub use renzora_plugin::host::{
-    snapshot_registrations, diff_registrations, apply_journal_rollback,
-    JournalEntry, RegistrySnapshot, TransactionJournal,
-};
 pub use renzora_plugin::host::loader::{
-    activate_with_transaction, TransactionalActivationOutcome, ActivationFailure,
+    activate_with_transaction, ActivationFailure, TransactionalActivationOutcome,
+};
+pub use renzora_plugin::host::{
+    apply_journal_rollback, diff_registrations, snapshot_registrations, JournalEntry,
+    RegistrySnapshot, TransactionJournal,
 };
 
 /// Outcome of a transactional activation, with the loose-plugin host's

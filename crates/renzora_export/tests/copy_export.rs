@@ -1,42 +1,111 @@
 //! End-to-end test for copy-based export.
 //!
-//! Tests build a synthetic project, stage it through the production
-//! `stage_prebuilt_scripts`, then parse the resulting manifest using
-//! the same logic the runtime's loader uses. The build-dir hash used
-//! to pre-stage artefacts is `renzora_rust_script::script_resolve::
-//! build_dir_name` — the SAME function the exporter calls — so the
-//! test never reproduces the hash algorithm.
+//! Phase 4 changed the source of compiled script artifacts from the
+//! legacy project-local `<project>/.renzora/scripts/<dir>/` directory
+//! to the shared `renzora_compiler_cache::BuildService` cache. The
+//! export reads the active published artifact for each canonical id
+//! from the cache and copies it into the export's `<output>/scripts/`
+//! directory, recording a `scripts.index` manifest the runtime's
+//! `load_prebuilt_scripts` reads on startup.
+//!
+//! These tests construct a real `BuildService` with a tempdir cache
+//! root, seed the cache with a placeholder artifact for each
+//! canonical id, then drive `stage_prebuilt_scripts` against the
+//! same service. The artifacts are arbitrary bytes — the export
+//! reads them as files without parsing.
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use renzora_identity::CanonicalId;
-use renzora_rust_script::script_resolve::{
-    build_dir_marker_path, build_dir_name, write_build_dir_marker,
+use renzora_compiler_cache::{
+    service::BuildServiceConfig,
+    staging::ActivePointer,
+    types::{ArtifactKind, BuildProfile, PublishedGeneration},
+    BuildService,
 };
+use renzora_identity::CanonicalId;
 
 fn script_body() -> &'static str {
-    "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n"
+    "fn update(_: &renzora_plugin::script::Ctx, _r: &mut renzora_plugin::script::ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n"
 }
 
-fn stage_lib(project: &std::path::Path, id: &CanonicalId, lib_ext: &str) -> PathBuf {
-    // Place a placeholder library inside the editor's build dir for
-    // this id, keyed off the SAME hash the production exporter uses.
-    let dir_name = build_dir_name(id);
-    let dir = project.join(".renzora").join("scripts").join(&dir_name);
-    fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(dir.join("src").join("lib.rs"), script_body()).unwrap();
-    let lib = dir.join(format!("{}-{}.{lib_ext}", id.bare_leaf(), "0"));
-    fs::write(&lib, b"placeholder\n").unwrap();
-    // Marker must match — the exporter verifies it.
-    write_build_dir_marker(project, id).unwrap();
-    lib
+/// Build a `BuildService` against a tempdir cache root. The SDK path
+/// is irrelevant — these tests never trigger an actual compile. They
+/// seed the cache directly.
+fn build_test_service(cache_root: &std::path::Path) -> Arc<BuildService> {
+    let sdk = cache_root.join("sdk");
+    fs::create_dir_all(&sdk).unwrap();
+    let cfg = BuildServiceConfig {
+        cache_root: cache_root.to_path_buf(),
+        profile: BuildProfile::Dist,
+        sdk_path: sdk,
+        toolchain_stamp: "test".into(),
+        compiler_service_schema: renzora_compiler_cache::types::COMPILER_SERVICE_SCHEMA,
+        n_workers: Some(1),
+        n_children: Some(1),
+        shutdown_deadline: std::time::Duration::from_secs(5),
+        required_symbols_by_kind: std::collections::HashMap::from([(
+            ArtifactKind::Tier1Script,
+            vec![b"renzora_plugin_tier1_script_desc\0".to_vec()],
+        )]),
+    };
+    BuildService::new(cfg).expect("BuildService::new")
+}
+
+/// Seed the cache with an `active.bin` pointer and a placeholder
+/// artifact. The export reads the active pointer via the public
+/// `BuildService::cache::read_active` API and resolves the artifact
+/// path via `BuildService::cache::artifact_path`, so we must use the
+/// same encoding for the active pointer the cache expects.
+fn seed_cache(
+    cache: &renzora_compiler_cache::ArtifactCache,
+    id: &CanonicalId,
+    lib_ext: &str,
+) -> PathBuf {
+    let active = ActivePointer {
+        generation: PublishedGeneration(1),
+        fingerprint_hash: [0; 32],
+        compiler_service_schema: renzora_compiler_cache::types::COMPILER_SERVICE_SCHEMA,
+    };
+    cache.write_active(id, &active, true).expect("write_active");
+
+    let artifact_path = cache.artifact_path(id, PublishedGeneration(1), lib_ext);
+    if let Some(parent) = artifact_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&artifact_path, b"placeholder artifact\n").unwrap();
+    artifact_path
+}
+
+#[allow(dead_code)]
+fn safe_dir_name(id: &CanonicalId) -> String {
+    let mut out = String::new();
+    for ch in id.to_scheme_path().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn stage_lib_in_cache(
+    service: &BuildService,
+    _cache_root: &std::path::Path,
+    id: &CanonicalId,
+    lib_ext: &str,
+) {
+    let artifact = seed_cache(service.cache(), id, lib_ext);
+    assert!(artifact.is_file());
 }
 
 #[test]
 fn copy_export_round_trip_with_duplicate_leaf_names() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(project.join("enemies")).unwrap();
     fs::create_dir_all(project.join("props")).unwrap();
     fs::write(project.join("enemies/spin.rs"), script_body()).unwrap();
@@ -44,26 +113,24 @@ fn copy_export_round_trip_with_duplicate_leaf_names() {
     fs::create_dir_all(project.join("unrelated")).unwrap();
     fs::write(project.join("unrelated/other.rs"), "fn helper() {}\n").unwrap();
 
-    let enemy_id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "enemies/spin.rs",
-    )
-    .unwrap();
-    let props_id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "props/spin.rs",
-    )
-    .unwrap();
-    stage_lib(project, &enemy_id, "so");
-    stage_lib(project, &props_id, "so");
+    let cache_root = tmp.path().join("cache");
+    let service = build_test_service(&cache_root);
+
+    let enemy_id =
+        CanonicalId::from_rooted(renzora_identity::RootKind::Project, "enemies/spin.rs").unwrap();
+    let props_id =
+        CanonicalId::from_rooted(renzora_identity::RootKind::Project, "props/spin.rs").unwrap();
+    stage_lib_in_cache(&service, &cache_root, &enemy_id, "so");
+    stage_lib_in_cache(&service, &cache_root, &props_id, "so");
 
     let output = tempfile::tempdir().unwrap();
     let mut progress_log: Vec<String> = Vec::new();
     let mut progress = |s: String| progress_log.push(s);
     let staged = renzora_export::build::stage_prebuilt_scripts(
-        project,
+        &project,
         output.path(),
         "so",
+        &service,
         &mut progress,
     )
     .expect("stage_prebuilt_scripts ok");
@@ -79,8 +146,14 @@ fn copy_export_round_trip_with_duplicate_leaf_names() {
 
     let enemy_key = enemy_id.to_scheme_path();
     let props_key = props_id.to_scheme_path();
-    assert!(manifest.contains(&enemy_key), "manifest must contain {enemy_key}: {manifest}");
-    assert!(manifest.contains(&props_key), "manifest must contain {props_key}: {manifest}");
+    assert!(
+        manifest.contains(&enemy_key),
+        "manifest must contain {enemy_key}: {manifest}"
+    );
+    assert!(
+        manifest.contains(&props_key),
+        "manifest must contain {props_key}: {manifest}"
+    );
 
     // Correction H: no bare-leaf rows for ambiguous leaves.
     let bare_lines: Vec<&str> = manifest
@@ -96,23 +169,25 @@ fn copy_export_round_trip_with_duplicate_leaf_names() {
 #[test]
 fn copy_export_unique_leaf_emits_only_canonical_row() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(project.join("enemy")).unwrap();
     fs::write(project.join("enemy/spin.rs"), script_body()).unwrap();
 
-    let id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "enemy/spin.rs",
-    )
-    .unwrap();
-    stage_lib(project, &id, "so");
+    let cache_root = tmp.path().join("cache");
+    let service = build_test_service(&cache_root);
+
+    let id =
+        CanonicalId::from_rooted(renzora_identity::RootKind::Project, "enemy/spin.rs").unwrap();
+    stage_lib_in_cache(&service, &cache_root, &id, "so");
 
     let output = tempfile::tempdir().unwrap();
     let mut progress = |_s: String| {};
     let staged = renzora_export::build::stage_prebuilt_scripts(
-        project,
+        &project,
         output.path(),
         "so",
+        &service,
         &mut progress,
     )
     .expect("stage ok");
@@ -137,40 +212,32 @@ fn copy_export_unique_leaf_emits_only_canonical_row() {
 }
 
 #[test]
-fn copy_export_refuses_stale_marker() {
-    // Correction K: marker mismatch must be rejected.
+fn copy_export_missing_published_artifact_is_reported() {
+    // A canonical id the editor has never compiled has no active.bin
+    // in the cache; the export must skip it (not fail).
     let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(project.join("enemy")).unwrap();
     fs::write(project.join("enemy/spin.rs"), script_body()).unwrap();
 
-    let id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Project,
-        "enemy/spin.rs",
-    )
-    .unwrap();
-
-    // Build a build dir but write a STALE marker (different id).
-    let dir_name = build_dir_name(&id);
-    let dir = project.join(".renzora").join("scripts").join(&dir_name);
-    fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(dir.join("src").join("lib.rs"), script_body()).unwrap();
-    fs::write(dir.join(format!("spin-0.so")), b"placeholder\n").unwrap();
-    let stale_marker = build_dir_marker_path(project, &id);
-    fs::create_dir_all(stale_marker.parent().unwrap()).unwrap();
-    fs::write(&stale_marker, "project://other/path.rs").unwrap();
+    let cache_root = tmp.path().join("cache");
+    let service = build_test_service(&cache_root);
+    // Note: no stage_lib_in_cache — the script has no compiled artifact.
 
     let output = tempfile::tempdir().unwrap();
-    let mut progress = |_s: String| {};
+    let mut progress_log: Vec<String> = Vec::new();
+    let mut progress = |s: String| progress_log.push(s);
     let staged = renzora_export::build::stage_prebuilt_scripts(
-        project,
+        &project,
         output.path(),
         "so",
+        &service,
         &mut progress,
     )
     .expect("stage ok");
-    assert_eq!(staged, 0, "stale-marker directory must be refused");
-
-    let scripts_dir = output.path().join("scripts");
-    assert!(!scripts_dir.join(renzora_rust_script::PREBUILT_MANIFEST).exists());
+    assert_eq!(staged, 0, "uncompiled script must not be staged");
+    assert!(progress_log
+        .iter()
+        .any(|s| s.contains("no compiled library") || s.contains("no published artifact")));
 }

@@ -55,10 +55,14 @@ pub mod worker;
 
 pub use fingerprint::{BuildFingerprint, BuildKey};
 pub use loader::{LoadError, LoadedLibrary, Loader};
+pub use staging::ArtifactCache;
 pub use scheduler::{ReadyScheduler, SchedulerConfig};
 pub use service::{BuildService, BuildServiceConfig, BuildServiceError, ShutdownReport};
+pub use shared::SharedBuildService;
 pub use staging::{from_safe_id_dir_name, safe_id_dir_name};
 pub use types::{
     ArtifactKind, BuildOutcome, BuildRequest, BuildResult, CancelCause, Diagnostic, FingerprintInputs,
     Revision, Severity,
 };
+
+pub mod shared;

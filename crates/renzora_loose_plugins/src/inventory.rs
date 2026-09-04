@@ -47,7 +47,9 @@ impl LoosePluginStatusKind {
             LoosePluginStatusKind::CompileFailed => "compile failed",
             LoosePluginStatusKind::LoadFailed => "load failed",
             LoosePluginStatusKind::AbiRejected => "ABI rejected",
-            LoosePluginStatusKind::LayoutChangeRequiresRestart => "layout change (restart required)",
+            LoosePluginStatusKind::LayoutChangeRequiresRestart => {
+                "layout change (restart required)"
+            }
             LoosePluginStatusKind::WrongScope => "wrong scope",
             LoosePluginStatusKind::MalformedContract => "malformed contract",
             LoosePluginStatusKind::Disabled => "disabled",
@@ -223,12 +225,15 @@ impl LoosePluginInventory {
         } else {
             LoosePluginStatusKind::AwaitingTrustConsent
         };
-        let entry = self.rows.entry(id.clone()).or_insert_with(|| LoosePluginRow {
-            scope,
-            kind: trust,
-            source_path: Some(source_path.clone()),
-            ..Default::default()
-        });
+        let entry = self
+            .rows
+            .entry(id.clone())
+            .or_insert_with(|| LoosePluginRow {
+                scope,
+                kind: trust,
+                source_path: Some(source_path.clone()),
+                ..Default::default()
+            });
         // Refresh the source path and re-derive the trust state on every
         // re-discovery; a user who deleted a file and re-saved it expects
         // the trust gate to fire again unless they have already consented.
@@ -343,8 +348,7 @@ impl LoosePluginInventory {
         self.rows
             .iter()
             .filter(|(_, r)| {
-                r.kind.is_active()
-                    && matches!(r.scope, crate::contract::LoosePluginScope::Runtime)
+                r.kind.is_active() && matches!(r.scope, crate::contract::LoosePluginScope::Runtime)
             })
             .filter_map(|(id, r)| r.stable_staged_path.clone().map(|p| (id.clone(), p)))
             .collect()
@@ -376,15 +380,30 @@ mod tests {
     fn upsert_discovered_requires_consent_for_unconsented() {
         let mut inv = LoosePluginInventory::default();
         let i = id("engine://spin.rs");
-        inv.upsert_discovered(i.clone(), crate::contract::LoosePluginScope::Runtime, "/x.rs".into(), false, false);
-        assert_eq!(inv.row(&i).unwrap().kind, LoosePluginStatusKind::AwaitingTrustConsent);
+        inv.upsert_discovered(
+            i.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/x.rs".into(),
+            false,
+            false,
+        );
+        assert_eq!(
+            inv.row(&i).unwrap().kind,
+            LoosePluginStatusKind::AwaitingTrustConsent
+        );
     }
 
     #[test]
     fn upsert_discovered_with_consent_marks_discovered() {
         let mut inv = LoosePluginInventory::default();
         let i = id("engine://spin.rs");
-        inv.upsert_discovered(i.clone(), crate::contract::LoosePluginScope::Runtime, "/x.rs".into(), true, false);
+        inv.upsert_discovered(
+            i.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/x.rs".into(),
+            true,
+            false,
+        );
         assert_eq!(inv.row(&i).unwrap().kind, LoosePluginStatusKind::Discovered);
     }
 
@@ -392,7 +411,13 @@ mod tests {
     fn set_enabled_round_trip() {
         let mut inv = LoosePluginInventory::default();
         let i = id("engine://spin.rs");
-        inv.upsert_discovered(i.clone(), crate::contract::LoosePluginScope::Runtime, "/x.rs".into(), true, false);
+        inv.upsert_discovered(
+            i.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/x.rs".into(),
+            true,
+            false,
+        );
         inv.set_enabled(&i, false);
         assert!(inv.is_disabled(&i));
         assert_eq!(inv.row(&i).unwrap().kind, LoosePluginStatusKind::Disabled);
@@ -405,11 +430,20 @@ mod tests {
     fn source_removed_preserves_active_generation() {
         let mut inv = LoosePluginInventory::default();
         let i = id("engine://spin.rs");
-        inv.upsert_discovered(i.clone(), crate::contract::LoosePluginScope::Runtime, "/x.rs".into(), true, false);
+        inv.upsert_discovered(
+            i.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/x.rs".into(),
+            true,
+            false,
+        );
         inv.transition(&i, LoosePluginStatusKind::Active);
         inv.set_active_generation(&i, Some(7), None);
         inv.mark_source_removed(&i);
-        assert_eq!(inv.row(&i).unwrap().kind, LoosePluginStatusKind::SourceRemoved);
+        assert_eq!(
+            inv.row(&i).unwrap().kind,
+            LoosePluginStatusKind::SourceRemoved
+        );
         assert_eq!(inv.row(&i).unwrap().active_generation, Some(7));
     }
 
@@ -417,8 +451,17 @@ mod tests {
     fn grant_consent_promotes_awaiting_to_discovered() {
         let mut inv = LoosePluginInventory::default();
         let i = id("engine://spin.rs");
-        inv.upsert_discovered(i.clone(), crate::contract::LoosePluginScope::Runtime, "/x.rs".into(), false, false);
-        assert_eq!(inv.row(&i).unwrap().kind, LoosePluginStatusKind::AwaitingTrustConsent);
+        inv.upsert_discovered(
+            i.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/x.rs".into(),
+            false,
+            false,
+        );
+        assert_eq!(
+            inv.row(&i).unwrap().kind,
+            LoosePluginStatusKind::AwaitingTrustConsent
+        );
         inv.grant_consent(i.clone());
         assert_eq!(inv.row(&i).unwrap().kind, LoosePluginStatusKind::Discovered);
     }
@@ -429,9 +472,27 @@ mod tests {
         let a = id("engine://a.rs");
         let b = id("engine://b.rs");
         let c = id("engine://c.rs");
-        inv.upsert_discovered(a.clone(), crate::contract::LoosePluginScope::Runtime, "/a.rs".into(), true, false);
-        inv.upsert_discovered(b.clone(), crate::contract::LoosePluginScope::Editor, "/b.rs".into(), true, false);
-        inv.upsert_discovered(c.clone(), crate::contract::LoosePluginScope::Runtime, "/c.rs".into(), true, false);
+        inv.upsert_discovered(
+            a.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/a.rs".into(),
+            true,
+            false,
+        );
+        inv.upsert_discovered(
+            b.clone(),
+            crate::contract::LoosePluginScope::Editor,
+            "/b.rs".into(),
+            true,
+            false,
+        );
+        inv.upsert_discovered(
+            c.clone(),
+            crate::contract::LoosePluginScope::Runtime,
+            "/c.rs".into(),
+            true,
+            false,
+        );
         inv.transition(&a, LoosePluginStatusKind::Active);
         inv.transition(&b, LoosePluginStatusKind::Active);
         inv.transition(&c, LoosePluginStatusKind::CompileFailed);

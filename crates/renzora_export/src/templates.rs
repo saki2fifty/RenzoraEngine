@@ -286,7 +286,11 @@ pub fn user_source_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)?;
-    Some(home.join(".renzora").join("src").join(renzora::version::ENGINE_VERSION))
+    Some(
+        home.join(".renzora")
+            .join("src")
+            .join(renzora::version::ENGINE_VERSION),
+    )
 }
 
 /// The release asset holding the engine source, published beside the runtime
@@ -544,8 +548,10 @@ mod tests {
 
     #[test]
     fn template_filenames_are_unique_runtime_artifacts() {
-        let names: std::collections::HashSet<&str> =
-            Platform::ALL.iter().map(|p| p.template_filename()).collect();
+        let names: std::collections::HashSet<&str> = Platform::ALL
+            .iter()
+            .map(|p| p.template_filename())
+            .collect();
         assert_eq!(names.len(), Platform::ALL.len());
         for &p in Platform::ALL {
             assert!(p.template_filename().starts_with("renzora-runtime-"));
@@ -611,7 +617,11 @@ mod tests {
         // Mobile: packaged artifact FLAT in dist/<platform>/ (no runtime/ subdir).
         let apk_dir = dist.join(Platform::AndroidArm64.dist_dir_name());
         fs::create_dir_all(&apk_dir).unwrap();
-        fs::write(apk_dir.join(Platform::AndroidArm64.template_filename()), b"apk").unwrap();
+        fs::write(
+            apk_dir.join(Platform::AndroidArm64.template_filename()),
+            b"apk",
+        )
+        .unwrap();
 
         let mut mgr = TemplateManager {
             dist_dir: dist.clone(),

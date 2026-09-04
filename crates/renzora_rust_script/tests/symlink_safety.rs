@@ -22,7 +22,7 @@ mod unix_only {
         fs::create_dir_all(&inside).unwrap();
         fs::write(
             inside.join("script.rs"),
-            "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n",
+            "fn update(_: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n",
         )
         .unwrap();
 
@@ -30,7 +30,7 @@ mod unix_only {
         let external = tempfile::tempdir().unwrap();
         fs::write(
             external.path().join("external.rs"),
-            "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n",
+            "fn update(_: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n",
         )
         .unwrap();
 
@@ -65,7 +65,7 @@ mod unix_only {
         // Add a real script for the walker to find.
         fs::write(
             project.path().join("script.rs"),
-            "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n",
+            "fn update(_: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n",
         )
         .unwrap();
         // The walker does not follow loops, so the symlink is skipped

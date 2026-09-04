@@ -176,6 +176,44 @@ pub struct FrameContext {
 }
 
 impl FrameContext {
+    /// Build a fully-default frame context. Used when the host sends
+    /// no frame blob (a non-hook call, or a hook that does not need
+    /// the frame).
+    pub fn empty() -> Self {
+        Self {
+            time: ScriptTime {
+                elapsed: 0.0,
+                delta: 0.0,
+                fixed_delta: 0.0,
+                frame_count: 0,
+            },
+            input_movement: [0.0; 2],
+            mouse_position: [0.0; 2],
+            mouse_delta: [0.0; 2],
+            mouse_scroll: 0.0,
+            camera_yaw: 0.0,
+            keys_pressed: Vec::new(),
+            keys_just_pressed: Vec::new(),
+            keys_just_released: Vec::new(),
+            mouse_buttons_pressed: [false; 5],
+            mouse_buttons_just_pressed: [false; 5],
+            camera_ev: 0.0,
+            project_width: 0.0,
+            project_height: 0.0,
+            net_is_server: false,
+            net_is_connected: false,
+            net_player_count: 0,
+            gamepads: Vec::new(),
+            actions_pressed: Vec::new(),
+            actions_just_pressed: Vec::new(),
+            actions_just_released: Vec::new(),
+            action_axis_1d: Vec::new(),
+            action_axis_2d: Vec::new(),
+            named_entities: Vec::new(),
+            timers_just_finished: Vec::new(),
+        }
+    }
+
     pub fn encode(&self, w: &mut Writer) {
         w.u64(self.time.elapsed.to_bits());
         w.f32(self.time.delta);
@@ -337,6 +375,36 @@ pub struct EntityContext {
 }
 
 impl EntityContext {
+    /// Build a fully-default entity context. Used when the host
+    /// sends no entity blob.
+    pub fn empty() -> Self {
+        Self {
+            entity_id: 0,
+            name: String::new(),
+            position: [0.0; 3],
+            rotation: [0.0; 4],
+            rotation_euler: [0.0; 3],
+            scale: [0.0; 3],
+            has_parent: false,
+            parent_entity: None,
+            parent_position: [0.0; 3],
+            parent_rotation: [0.0; 3],
+            parent_scale: [0.0; 3],
+            children: Vec::new(),
+            collisions_entered: Vec::new(),
+            collisions_exited: Vec::new(),
+            active_collisions: Vec::new(),
+            raycast_results: Vec::new(),
+            health: 0.0,
+            max_health: 0.0,
+            health_percent: 0.0,
+            is_invincible: false,
+            light_intensity: 0.0,
+            light_color: [0.0; 3],
+            material_color: [0.0; 4],
+        }
+    }
+
     pub fn encode(&self, w: &mut Writer) {
         w.u64(self.entity_id);
         w.str(&self.name);

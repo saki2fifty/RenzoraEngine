@@ -24,23 +24,24 @@
 //!   completions and reload requests.
 
 pub mod contract;
+pub mod host_plugin;
 pub mod inventory;
 pub mod staging;
 pub mod transaction;
-pub mod host_plugin;
 
-pub use contract::{parse_loose_plugin_source, LoosePluginContract, LoosePluginScope, LoosePluginParseError};
+pub use contract::{
+    parse_loose_plugin_source, LoosePluginContract, LoosePluginParseError, LoosePluginScope,
+};
+pub use host_plugin::{
+    apply_loose_plugin_toggle, CompilerMode, LooseBuildService, LoosePendingBuilds,
+    LoosePluginHost, LoosePluginReloadRequests, PendingBuild,
+};
 pub use inventory::{
-    LoosePluginInventory, LoosePluginRow, LoosePluginStatus, LoosePluginStatusKind,
-    LoosePluginTrust, LoosePluginConsent, parse_canonical_id,
+    parse_canonical_id, LoosePluginConsent, LoosePluginInventory, LoosePluginRow,
+    LoosePluginStatus, LoosePluginStatusKind, LoosePluginTrust,
 };
 pub use staging::{StableStaging, StableStagingPlacement};
 pub use transaction::{
-    JournalEntry, RegistrySnapshot, TransactionJournal, ActivationOutcome, ActivationFailure,
-    snapshot_registrations, diff_registrations, apply_journal_rollback,
-    activate_with_transaction,
-};
-pub use host_plugin::{
-    apply_loose_plugin_toggle, LoosePluginHost, LoosePendingBuilds, LoosePluginReloadRequests,
-    PendingBuild,
+    activate_with_transaction, apply_journal_rollback, diff_registrations, snapshot_registrations,
+    ActivationFailure, ActivationOutcome, JournalEntry, RegistrySnapshot, TransactionJournal,
 };

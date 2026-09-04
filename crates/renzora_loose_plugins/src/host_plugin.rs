@@ -40,9 +40,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::contract::{parse_loose_plugin_source, LoosePluginScope};
-use crate::inventory::{
-    LoosePluginInventory, LoosePluginStatusKind, LoosePluginTrust,
-};
+use crate::inventory::{LoosePluginInventory, LoosePluginStatusKind, LoosePluginTrust};
 use crate::staging::StableStaging;
 
 /// Mirror a `LoosePluginStatusKind` to the editor-facing
@@ -59,15 +57,16 @@ fn mirror_to_plugin_state(
             PluginState::Skipped("wrong scope for this binary".to_string())
         }
         LoosePluginStatusKind::MalformedContract => {
-            let msg = diagnostics.first().cloned().unwrap_or_else(|| "contract error".to_string());
+            let msg = diagnostics
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "contract error".to_string());
             PluginState::Skipped(format!("malformed contract: {msg}"))
         }
         LoosePluginStatusKind::AwaitingTrustConsent => {
             PluginState::Skipped("awaiting trust consent".to_string())
         }
-        LoosePluginStatusKind::SourceRemoved => {
-            PluginState::Skipped("source removed".to_string())
-        }
+        LoosePluginStatusKind::SourceRemoved => PluginState::Skipped("source removed".to_string()),
         LoosePluginStatusKind::CompileFailed
         | LoosePluginStatusKind::LoadFailed
         | LoosePluginStatusKind::AbiRejected
@@ -75,7 +74,10 @@ fn mirror_to_plugin_state(
         | LoosePluginStatusKind::Compiling
         | LoosePluginStatusKind::Superseded
         | LoosePluginStatusKind::Discovered => {
-            let msg = diagnostics.first().cloned().unwrap_or_else(|| kind.to_string());
+            let msg = diagnostics
+                .first()
+                .cloned()
+                .unwrap_or_else(|| kind.to_string());
             PluginState::Failed(msg)
         }
     }
@@ -143,7 +145,10 @@ impl Default for LoosePluginHostConfig {
                 n_workers: Some(1),
                 n_children: Some(1),
                 shutdown_deadline: std::time::Duration::from_secs(5),
-                required_symbols: vec![b"renzora_plugin_init\0".to_vec()],
+                required_symbols_by_kind: std::collections::HashMap::from([(
+                    ArtifactKind::Tier1Plugin,
+                    vec![b"renzora_plugin_init\0".to_vec()],
+                )]),
             },
             abi_version: sys::VERSION_MAJOR,
             interface_prefix_hashes: sys::INTERFACE_PREFIX_HASHES
@@ -229,6 +234,7 @@ pub struct LooseWatcher {
 /// Add to the editor app via `RenzoraPluginHostPlugin::build` (see the
 /// integration site). The plugin does not call `cargo` itself — that is
 /// the shared `BuildService`'s job.
+#[derive(Clone)]
 pub struct LoosePluginHost {
     pub config: LoosePluginHostConfig,
     pub is_editor: bool,
@@ -244,11 +250,60 @@ pub struct LoosePluginHost {
     /// `LoosePluginTrust` resource on plugin install so the watcher and
     /// `initial_scan` see the user's prior consent before any event fires.
     pub trusted_plugin_ids: Vec<String>,
-    /// Optional BuildService override. When `Some`, the loose host
-    /// installs THIS BuildService as `LooseBuildService` instead of
-    /// constructing its own. Used by tests to share one BuildService
-    /// between the harness driver and the host's drain systems.
-    pub shared_build_service: Option<std::sync::Arc<renzora_compiler_cache::BuildService>>,
+    /// How the loose host resolves its `BuildService`. U4-1
+    /// distinguishes three explicit modes; the old `Option<Arc>`
+    /// overloading "self-owned" and "unavailable" was the
+    /// fourth-review blocker.
+    ///
+    /// - `Shared(Arc)` — the editor's host assembly constructed the
+    ///   shared `Arc`; the loose host installs IT (the SAME Arc
+    ///   the `RustScriptBuildService` resource wraps). Loose
+    ///   recompiles go through this service's worker pool.
+    /// - `Unavailable { diagnostic }` — the editor's host assembly
+    ///   could not construct a compiler. Neither loose plugins nor
+    ///   Rust scripts can compile source this session. The loose
+    ///   host installs WITHOUT `LooseBuildService`; the watchdog
+    ///   and inventory systems refuse to submit work. Pre-built C-ABI
+    ///   cdylibs are unaffected and can still load.
+    /// - `SelfOwned` — the loose host constructs its own service
+    ///   inside `build`. Reserved for legacy harness/test callers
+    ///   that intentionally request self-owned compilation. Production
+    ///   editor entry points and tests use `Shared` or `Unavailable`.
+    pub compiler_mode: CompilerMode,
+}
+
+/// The three explicit modes the loose host can run under. See
+/// [`LoosePluginHost::compiler_mode`] (U4-1).
+#[derive(Clone)]
+pub enum CompilerMode {
+    /// A caller-supplied `Arc<BuildService>` is installed into
+    /// `LooseBuildService`. Production editor sessions use this.
+    Shared(std::sync::Arc<renzora_compiler_cache::BuildService>),
+    /// The compiler is unavailable. No `LooseBuildService` is
+    /// installed; submitting source-build work is disallowed. The
+    /// diagnostic is surfaced through the editor's diagnostic
+    /// channels.
+    Unavailable { diagnostic: String },
+    /// The loose host constructs its own private `BuildService`
+    /// inside `build`. Retained for legacy test callers that
+    /// explicitly need a self-owned service.
+    SelfOwned,
+}
+
+impl std::fmt::Debug for CompilerMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompilerMode::Shared(arc) => f
+                .debug_tuple("Shared")
+                .field(&Arc::strong_count(arc))
+                .finish(),
+            CompilerMode::Unavailable { diagnostic } => f
+                .debug_struct("Unavailable")
+                .field("diagnostic", diagnostic)
+                .finish(),
+            CompilerMode::SelfOwned => f.debug_tuple("SelfOwned").finish(),
+        }
+    }
 }
 
 impl LoosePluginHost {
@@ -265,7 +320,15 @@ impl LoosePluginHost {
             linked_plugin_ids: Vec::new(),
             disabled_plugin_ids,
             trusted_plugin_ids: Vec::new(),
-            shared_build_service: None,
+            // U4-1: explicit default is `Unavailable`, never
+            // self-owned. A fresh host without injected compiler mode
+            // neither constructs another service nor falls back to
+            // one — loose recompiles simply do not happen, which is
+            // the editor's correct behavior for a session without
+            // the source-modding infrastructure.
+            compiler_mode: CompilerMode::Unavailable {
+                diagnostic: "no compiler mode selected by the host assembly".to_string(),
+            },
         }
     }
 
@@ -290,38 +353,60 @@ impl LoosePluginHost {
             linked_plugin_ids: Vec::new(),
             disabled_plugin_ids,
             trusted_plugin_ids,
-            shared_build_service: None,
+            // U4-1: explicit `Unavailable` default for a fresh host.
+            compiler_mode: CompilerMode::Unavailable {
+                diagnostic: "no compiler mode selected by the host assembly".to_string(),
+            },
         }
     }
 
     /// Construct an editor host that uses a caller-supplied
-    /// `BuildService` instance instead of constructing its own. The
-    /// acceptance harness uses this to share one BuildService between
-    /// the harness's `BuildServiceDriver` (which submits sources and
-    /// reads outcomes) and the loose host's drain systems (which
-    /// stage the published artifact and activate it). Without a
-    /// shared service, the host's `LooseBuildService` resource is a
-    /// second, independent BuildService instance — submissions made
-    /// against the harness's service never reach the host's drain.
+    /// `BuildService` instance. The acceptance harness and editor
+    /// entry points call this so the loose host installs the SAME
+    /// `Arc` as `RustScriptBuildService`. U4-1: this is the ONLY
+    /// way the editor reaches the `Shared` mode; a runtime host
+    /// has no compiler mode at all (source compilation is out of
+    /// scope for a shipped runtime).
     pub fn editor_with_shared_build_service(
         plugins_dir: &std::path::Path,
         disabled_plugin_ids: Vec<String>,
         trusted_plugin_ids: Vec<String>,
         shared_build_service: std::sync::Arc<renzora_compiler_cache::BuildService>,
     ) -> Self {
-        let mut host = Self::editor_with_trust(
-            plugins_dir,
-            disabled_plugin_ids,
-            trusted_plugin_ids,
-        );
-        host.shared_build_service = Some(shared_build_service);
+        let mut host =
+            Self::editor_with_trust(plugins_dir, disabled_plugin_ids, trusted_plugin_ids);
+        host.compiler_mode = CompilerMode::Shared(shared_build_service);
         host
     }
 
-    /// Construct a runtime host (no source watcher, no source polling).
-    /// A runtime host is responsible only for activating loose plugins a
-    /// user dropped into `plugins/` — the discovery step is what
-    /// `crates/renzora_runtime` did before Phase 3.
+    /// Switch the host to `Shared(Arc)` mode (U4-1). Used by the
+    /// production assembly function that hands the SAME `Arc` to
+    /// both `RustScriptPlugin` and the loose host. Replaces any
+    /// previous mode.
+    pub fn inject_shared_build_service(
+        &mut self,
+        shared: std::sync::Arc<renzora_compiler_cache::BuildService>,
+    ) {
+        self.compiler_mode = CompilerMode::Shared(shared);
+    }
+
+    /// Switch the host to explicit `Unavailable` mode (U4-1). The
+    /// host installs WITHOUT a `LooseBuildService` resource; loose
+    /// plugin source compilation is disabled for the session.
+    /// Prebuilt C-ABI cdylibs remain loadable.
+    pub fn mark_compiler_unavailable(&mut self, diagnostic: impl Into<String>) {
+        self.compiler_mode = CompilerMode::Unavailable {
+            diagnostic: diagnostic.into(),
+        };
+    }
+
+    /// Construct a runtime host (no source watcher, no source polling,
+    /// no compiler). A runtime host is responsible only for activating
+    /// loose plugins a user dropped into `plugins/` — prebuilt C-ABI
+    /// cdylibs only; source compilation is out of scope for a shipped
+    /// runtime. The runtime host is in `Unavailable` mode by
+    /// definition; `compiler_mode` cannot transition to `Shared` on a
+    /// non-editor session.
     pub fn runtime(plugins_dir: &std::path::Path, disabled_plugin_ids: Vec<String>) -> Self {
         Self {
             config: LoosePluginHostConfig {
@@ -333,8 +418,45 @@ impl LoosePluginHost {
             linked_plugin_ids: Vec::new(),
             disabled_plugin_ids,
             trusted_plugin_ids: Vec::new(),
-            shared_build_service: None,
+            compiler_mode: CompilerMode::Unavailable {
+                diagnostic: "runtime hosts never compile source".to_string(),
+            },
         }
+    }
+
+    /// Borrow the current compiler mode as a labeled enum. U4-1
+    /// helper used by the editor's host assembly and by tests to
+    /// distinguish `Shared`, `Unavailable`, and `SelfOwned` without
+    /// reaching into private fields.
+    pub fn compiler_mode(&self) -> &CompilerMode {
+        &self.compiler_mode
+    }
+
+    /// Convenience: true when the host has a `BuildService` it can
+    /// submit loose-plugin source work to (U4-1's "compilation is
+    /// available" predicate). `Shared` returns `true`; `Unavailable`
+    /// and `SelfOwned` are decided by the host assembly.
+    pub fn is_compilation_available(&self) -> bool {
+        matches!(self.compiler_mode, CompilerMode::Shared(_))
+    }
+
+    /// Construct a host that explicitly owns its own `BuildService`,
+    /// bypassing the editor's shared service. Reserved for the
+    /// acceptance harness's Phase 3 regression tests; the editor
+    /// never calls this. U4-1: a separate, explicit constructor
+    /// rather than an overload of `editor_with_shared_build_service`
+    /// — the distinction is load-bearing for unavailable detection.
+    pub fn editor_with_self_owned_build_service(
+        plugins_dir: &std::path::Path,
+        disabled_plugin_ids: Vec<String>,
+        trusted_plugin_ids: Vec<String>,
+        build_service_config: renzora_compiler_cache::service::BuildServiceConfig,
+    ) -> Self {
+        let _ = build_service_config;
+        let mut host =
+            Self::editor_with_trust(plugins_dir, disabled_plugin_ids, trusted_plugin_ids);
+        host.compiler_mode = CompilerMode::SelfOwned;
+        host
     }
 
     /// Look up the source `PathBuf` for a canonical id by reading the
@@ -359,16 +481,35 @@ impl Plugin for LoosePluginHost {
             );
         }
 
-        let build_service = if let Some(shared) = self.shared_build_service.clone() {
-            shared
-        } else {
-            match BuildService::new(cfg.build_service.clone()) {
-                Ok(s) => s,
+        // U4-1: resolve the host's `BuildService` according to the
+        // explicit `CompilerMode`. Three cases:
+        //
+        // 1. `Shared(Arc)` — install the supplied Arc into
+        //    `LooseBuildService`. Production editor sessions.
+        // 2. `Unavailable { .. }` — install NO `LooseBuildService`
+        //    resource. Loose-plugin source compilation is disabled
+        //    for the session. Prebuilt C-ABI cdylibs can still load
+        //    because their load path does NOT touch the build
+        //    service. The diagnostic is logged so the editor's
+        //    settings panel can see it.
+        // 3. `SelfOwned` — construct a private service inside
+        //    `build`. Reserved for the Phase 3 acceptance harness.
+        let build_service = match &self.compiler_mode {
+            CompilerMode::Shared(arc) => Some(arc.clone()),
+            CompilerMode::Unavailable { diagnostic } => {
+                warn!(
+                    "[loose-plugin] compiler unavailable; loose-plugin source compilation is disabled: {}",
+                    diagnostic
+                );
+                None
+            }
+            CompilerMode::SelfOwned => match BuildService::new(cfg.build_service.clone()) {
+                Ok(s) => Some(s),
                 Err(e) => {
                     error!("[loose-plugin] BuildService::new failed: {e}");
                     return;
                 }
-            }
+            },
         };
 
         app.insert_resource({
@@ -398,7 +539,6 @@ impl Plugin for LoosePluginHost {
             trust
         })
         .insert_resource(LoosePendingBuilds::default())
-        .insert_resource(LooseBuildService(build_service))
         .insert_resource(LooseStagingHandle(staging))
         .insert_resource(LoosePluginReloadRequests::default())
         .insert_resource(LoosePluginHostMeta {
@@ -408,6 +548,24 @@ impl Plugin for LoosePluginHost {
             disabled_plugin_ids: self.disabled_plugin_ids.clone(),
             build_request_template: make_request_template(&cfg),
         });
+
+        // U4-1: install `LooseBuildService` ONLY when the host is in
+        // `Shared` mode. An `Unavailable` host installs nothing; the
+        // drain systems below have to gate every `LooseBuildService`
+        // access behind `Option<Res<LooseBuildService>>` so the drain
+        // gracefully skips source-build work in unavailable mode.
+        if let Some(arc) = build_service.clone() {
+            app.insert_resource(LooseBuildService(arc));
+        } else {
+            // Explicitly mark the resource as absent (Bevy cannot
+            // install an `Option<Resource>` directly, but we record
+            // the unavailability reason in
+            // `LoosePluginHostMeta.unavailable_diagnostic` so the
+            // settings panel and tests can inspect it).
+            warn!(
+                "[loose-plugin] editor session without a shared compiler; loose-plugin source compilation is disabled"
+            );
+        }
 
         // Watcher: only the editor watches the source root. A shipped
         // game has no toolchain and no source to compile, so the
@@ -538,8 +696,8 @@ fn build_request(
 fn install_watcher(
     root: &std::path::Path,
 ) -> Result<LooseWatcher, notify_debouncer_full::notify::Error> {
-    use notify_debouncer_full::notify::RecursiveMode;
     use notify_debouncer_full::new_debouncer;
+    use notify_debouncer_full::notify::RecursiveMode;
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut debouncer = new_debouncer(std::time::Duration::from_millis(300), None, tx)?;
@@ -560,11 +718,22 @@ fn drain_watcher_events(
     mut inventory: ResMut<LoosePluginInventory>,
     trust: Res<LoosePluginTrust>,
     meta: Res<LoosePluginHostMeta>,
-    build_service: Res<LooseBuildService>,
+    build_service: Option<Res<LooseBuildService>>,
     mut pending: ResMut<LoosePendingBuilds>,
 ) {
+    // U4-1: an editor session with `Unavailable` compiler mode
+    // installs no `LooseBuildService`. The watcher can still see
+    // file events; we just skip every submit. Inventory rows
+    // transition to `Compiling` → `CompileFailed` with an actionable
+    // diagnostic so the editor's settings panel reflects the truth.
     let Some(watcher) = watcher else { return };
     let Ok(rx) = watcher.rx.lock() else { return };
+    let Some(build_service) = build_service else {
+        // Drain pending events to keep the rx channel from filling,
+        // but skip the source-build side effects.
+        for _ in rx.try_iter() {}
+        return;
+    };
 
     let mut events: Vec<notify_debouncer_full::DebouncedEvent> = Vec::new();
     for batch in rx.try_iter() {
@@ -639,10 +808,8 @@ fn drain_watcher_events(
                                 &canonical_id,
                                 LoosePluginStatusKind::MalformedContract,
                             );
-                            inventory.record_diagnostics(
-                                &canonical_id,
-                                vec![format!("contract: {e}")],
-                            );
+                            inventory
+                                .record_diagnostics(&canonical_id, vec![format!("contract: {e}")]);
                             continue;
                         }
                     };
@@ -654,10 +821,8 @@ fn drain_watcher_events(
                         disabled,
                     );
                     if !consented {
-                        inventory.transition(
-                            &canonical_id,
-                            LoosePluginStatusKind::AwaitingTrustConsent,
-                        );
+                        inventory
+                            .transition(&canonical_id, LoosePluginStatusKind::AwaitingTrustConsent);
                         continue;
                     }
                     if disabled {
@@ -687,10 +852,8 @@ fn drain_watcher_events(
                             );
                         }
                         Err(e) => {
-                            inventory.transition(
-                                &canonical_id,
-                                LoosePluginStatusKind::CompileFailed,
-                            );
+                            inventory
+                                .transition(&canonical_id, LoosePluginStatusKind::CompileFailed);
                             inventory.record_diagnostics(
                                 &canonical_id,
                                 vec![format!("submit failed: {e}")],
@@ -729,11 +892,7 @@ fn classify_path(root: &std::path::Path, path: &std::path::Path) -> Option<Watch
     // Map to a CanonicalId rooted at the engine plugin root.
     let file_name = path.file_name()?.to_string_lossy().into_owned();
     let id_path = file_name.clone();
-    let id = CanonicalId::from_rooted(
-        renzora_identity::RootKind::Engine,
-        &id_path,
-    )
-    .ok()?;
+    let id = CanonicalId::from_rooted(renzora_identity::RootKind::Engine, &id_path).ok()?;
     Some(WatcherEvent::LooseFileChanged {
         canonical_id: id,
         path: path.to_path_buf(),
@@ -747,9 +906,18 @@ fn initial_scan(
     meta: Res<LoosePluginHostMeta>,
     mut inventory: ResMut<LoosePluginInventory>,
     trust: Res<LoosePluginTrust>,
-    build_service: Res<LooseBuildService>,
+    // U4-1: optional build service. With `Unavailable` compiler mode
+    // the resource is absent and the scan only updates the
+    // inventory; submit step is skipped.
+    build_service: Option<Res<LooseBuildService>>,
     mut pending: ResMut<LoosePendingBuilds>,
 ) {
+    // No `BuildService` installed → skip the submit side of the scan.
+    // Inventory rows still get discovered so the Settings UI reflects
+    // whatever prebuilt C-ABI cdylibs are present.
+    let Some(build_service) = build_service else {
+        return initial_scan_inventory_only(&meta, &mut inventory, &trust);
+    };
     if !meta.is_editor {
         return;
     }
@@ -764,10 +932,9 @@ fn initial_scan(
         let Some(file_name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
-        let Ok(canonical_id) = CanonicalId::from_rooted(
-            renzora_identity::RootKind::Engine,
-            &file_name,
-        ) else {
+        let Ok(canonical_id) =
+            CanonicalId::from_rooted(renzora_identity::RootKind::Engine, &file_name)
+        else {
             continue;
         };
         let bytes = match std::fs::read(&path) {
@@ -825,6 +992,82 @@ fn initial_scan(
     }
 }
 
+/// U4-1: inventory-only initial scan used when `CompilerMode` is
+/// `Unavailable` and no `LooseBuildService` resource exists. The
+/// scan still walks the source root so the Settings UI sees every
+/// discovered `.rs` file, but no `BuildRequest` is submitted — the
+/// diagnostic was already handed to the editor by the host
+/// assembly.
+fn initial_scan_inventory_only(
+    meta: &LoosePluginHostMeta,
+    inventory: &mut LoosePluginInventory,
+    trust: &LoosePluginTrust,
+) {
+    if !meta.is_editor {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&meta.source_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Some(file_name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let Ok(canonical_id) =
+            CanonicalId::from_rooted(renzora_identity::RootKind::Engine, &file_name)
+        else {
+            continue;
+        };
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let consented = trust.has_consent(&canonical_id);
+        let disabled = inventory.is_disabled(&canonical_id);
+        let parsed = match parse_loose_plugin_source(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                inventory.upsert_discovered(
+                    canonical_id.clone(),
+                    LoosePluginScope::Runtime,
+                    path.clone(),
+                    consented,
+                    disabled,
+                );
+                inventory.transition(&canonical_id, LoosePluginStatusKind::CompileFailed);
+                inventory.record_diagnostics(
+                    &canonical_id,
+                    vec![format!(
+                        "contract: {e}; compiler unavailable, cannot recompile"
+                    )],
+                );
+                continue;
+            }
+        };
+        inventory.upsert_discovered(
+            canonical_id.clone(),
+            parsed.scope,
+            path.clone(),
+            consented,
+            disabled,
+        );
+        if !consented {
+            inventory.transition(&canonical_id, LoosePluginStatusKind::AwaitingTrustConsent);
+            continue;
+        }
+        if disabled {
+            inventory.transition(&canonical_id, LoosePluginStatusKind::Disabled);
+            continue;
+        }
+        inventory.transition(&canonical_id, LoosePluginStatusKind::CompileFailed);
+        inventory.record_diagnostics(
+            &canonical_id,
+            vec!["compiler unavailable; loose-plugin source compilation is disabled".to_string()],
+        );
+    }
+}
+
 /// Drain completed `BuildOutcome`s. On `Published` / `CacheHit`, take the
 /// exact `immutable_artifact_path` the service published, copy it into the
 /// stable staging directory, and queue an activation request. On
@@ -877,11 +1120,7 @@ fn drain_pending_builds(
                     to_stage.push((id.clone(), generation, immutable_artifact_path));
                 }
                 BuildOutcome::Superseded { .. } => {
-                    diagnostics.push((
-                        id.clone(),
-                        LoosePluginStatusKind::Superseded,
-                        Vec::new(),
-                    ));
+                    diagnostics.push((id.clone(), LoosePluginStatusKind::Superseded, Vec::new()));
                     to_remove.push(id.clone());
                 }
                 BuildOutcome::CompileFailed { diagnostics: d, .. } => {
@@ -987,11 +1226,7 @@ fn drain_activation_queue(world: &mut World) {
             return;
         }
     }
-    let linked: Vec<&str> = meta
-        .linked_plugin_ids
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let linked: Vec<&str> = meta.linked_plugin_ids.iter().map(|s| s.as_str()).collect();
     let disabled: Vec<String> = meta.disabled_plugin_ids.clone();
     let result = loader::load_one_transactional(
         world,
@@ -1016,9 +1251,10 @@ fn drain_activation_queue(world: &mut World) {
                     LoosePluginStatusKind::LoadFailed,
                     "plugin init returned Failed".to_string(),
                 ),
-                loader::ActivationFailure::VersionTooOld => {
-                    (LoosePluginStatusKind::AbiRejected, "version too old".to_string())
-                }
+                loader::ActivationFailure::VersionTooOld => (
+                    LoosePluginStatusKind::AbiRejected,
+                    "version too old".to_string(),
+                ),
                 loader::ActivationFailure::AbiMismatch => (
                     LoosePluginStatusKind::AbiRejected,
                     "plugin was built against a differently-shaped interface table".to_string(),
@@ -1031,9 +1267,10 @@ fn drain_activation_queue(world: &mut World) {
                     LoosePluginStatusKind::LayoutChangeRequiresRestart,
                     format!("layout conflict: {why}"),
                 ),
-                loader::ActivationFailure::OpenFailed(s) => {
-                    (LoosePluginStatusKind::LoadFailed, format!("open failed: {s}"))
-                }
+                loader::ActivationFailure::OpenFailed(s) => (
+                    LoosePluginStatusKind::LoadFailed,
+                    format!("open failed: {s}"),
+                ),
             };
             inventory.transition(&id, kind);
             inventory.record_diagnostics(&id, vec![msg]);
@@ -1070,9 +1307,35 @@ fn process_reload_requests(
     mut inventory: ResMut<LoosePluginInventory>,
     trust: Res<LoosePluginTrust>,
     meta: Res<LoosePluginHostMeta>,
-    build_service: Res<LooseBuildService>,
+    // U4-1: optional build service. `None` means compiler is
+    // unavailable; the reload request is dropped after recording
+    // its diagnostic on the inventory row.
+    build_service: Option<Res<LooseBuildService>>,
     mut pending: ResMut<LoosePendingBuilds>,
 ) {
+    // U4-1: drain-mode compiler unavailable. The reload request is
+    // consumed; the inventory row records the diagnostic so the
+    // settings panel reflects the truth.
+    let Some(build_service) = build_service else {
+        let ids = std::mem::take(&mut reloads.0);
+        for id in ids {
+            let Some(row) = inventory.row(&id).cloned() else {
+                continue;
+            };
+            if inventory.is_disabled(&id) {
+                continue;
+            }
+            let _ = row;
+            inventory.transition(&id, LoosePluginStatusKind::CompileFailed);
+            inventory.record_diagnostics(
+                &id,
+                vec![
+                    "compiler unavailable; loose-plugin source compilation is disabled".to_string(),
+                ],
+            );
+        }
+        return;
+    };
     let ids = std::mem::take(&mut reloads.0);
     for id in ids {
         let Some(row) = inventory.row(&id).cloned() else {
@@ -1081,7 +1344,9 @@ fn process_reload_requests(
         if inventory.is_disabled(&id) {
             continue;
         }
-        if !trust.has_consent(&id) && matches!(row.kind, LoosePluginStatusKind::AwaitingTrustConsent) {
+        if !trust.has_consent(&id)
+            && matches!(row.kind, LoosePluginStatusKind::AwaitingTrustConsent)
+        {
             // Reload refused without consent. A trust grant will trigger
             // the initial build via `initial_scan`; this path is for
             // re-loading an already-trusted plugin.
@@ -1146,7 +1411,9 @@ pub fn apply_loose_plugin_toggle(
     if !enable {
         inventory.transition(id, LoosePluginStatusKind::Disabled);
         pending.pending.remove(id);
-        pending.staged_for_activation.retain(|(qid, _, _)| qid != id);
+        pending
+            .staged_for_activation
+            .retain(|(qid, _, _)| qid != id);
     } else {
         reloads.0.push(id.clone());
     }

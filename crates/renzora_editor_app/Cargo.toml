@@ -61,6 +61,10 @@ renzora_editor = { path = "../renzora_editor" }
 renzora_plugin = { path = "../renzora_plugin", features = ["host"] }
 # Phase 3: Tier-1 single-file hot Rust plugins. Editor-only.
 renzora_loose_plugins = { path = "../renzora_loose_plugins" }
+# F4-3: the neutral owner of the editor's shared `BuildService`.
+renzora_compiler_cache = { path = "../renzora_compiler_cache" }
+# Phase 4: per-entity Tier-1 Rust scripts.
+renzora_rust_script = { path = "../renzora_rust_script" }
 # Native plugins. Depended on here only for `prebuild`, which runs BEFORE the
 # `App` exists: the SDK has to be unpacked and every stale plugin compiled before
 # the loader (which runs during `App` assembly) goes looking for them.

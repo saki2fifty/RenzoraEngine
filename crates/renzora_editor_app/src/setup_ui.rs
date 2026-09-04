@@ -142,7 +142,11 @@ fn spawn_ui(mut commands: Commands) {
                     // several lines and shove the progress bar down the window
                     // as the text changed.
                     bevy::text::TextLayout::no_wrap(),
-                    Node { width: px(420), overflow: Overflow::clip(), ..default() },
+                    Node {
+                        width: px(420),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
                 ),
                 // The track. The fill is a child so its width can be a
                 // percentage of it rather than of the window.
@@ -254,9 +258,7 @@ fn tick(
         // skipped", never "nothing runs".
         let frac = match p {
             Progress::Unpacking { done, total } => Some(*done as f32 / (*total).max(1) as f32),
-            Progress::Building { index, total, .. } => {
-                Some(*index as f32 / (*total).max(1) as f32)
-            }
+            Progress::Building { index, total, .. } => Some(*index as f32 / (*total).max(1) as f32),
             // A compiler line reports what is happening, not how far along it
             // is — the bar stays where `Building` put it and only the caption
             // moves. Same reasoning as `Failed`: no fraction is not zero.

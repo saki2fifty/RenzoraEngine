@@ -7,6 +7,11 @@
 //! - [`crate::watch::watch`] when the watcher reconciles a debouncer batch
 //! - (Phase 1 commit 1.3) the copy-based exporter when it stages scripts
 //!
+//! Phase 4 recognises the new `renzora_plugin::rust_script!` token as
+//! the script declaration. The old `renzora::script!` form is
+//! recognised as a migration diagnostic only — never loaded through
+//! the unsafe old ABI.
+//!
 //! The SKIP list mirrors the one used before Phase 1 (see commit message
 //! for `crates/renzora_rust_script/src/lib.rs:396-423` history). Every
 //! further call site must use this list and not roll its own.
@@ -25,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use renzora::CurrentProject;
-use renzora_identity::RootKind;
+use renzora_identity::{Declaration, RootKind};
 
 /// Names of directories that must never be walked. Already-normalised;
 /// case is matched byte-exact against the bytes the filesystem reported.
@@ -147,18 +152,30 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        // Phase 1 commit 1.4: the recogniser reads the file's bytes into
-        // a `&str` (which is always valid UTF-8 — Rust source files are
-        // UTF-8 by convention) and asks the lexer-based scanner whether
-        // the file declares itself a script. Truncated source returns
-        // `NotRecognised` and is treated as a non-script.
+        // Phase 4 declaration recognition: the recogniser reads the
+        // file's bytes into a `&str` (always valid UTF-8 — Rust source
+        // files are UTF-8 by convention) and asks the lexer-based
+        // scanner whether the file declares itself a Tier 1 script.
+        // The legacy `renzora::script!(...)` form is recognised as
+        // `LegacyRecognised` and a migration diagnostic is surfaced —
+        // those files are NEVER loaded through the unsafe old ABI.
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if !crate::declaration_recognised(&text) {
-            continue;
+
+        match renzora_identity::Recogniser::new().scan(&text) {
+            Declaration::Recognised => out.push(path),
+            Declaration::LegacyRecognised => {
+                eprintln!(
+                    "[rust-script] {} still uses `renzora::script!`; \
+                     the Phase 4 Tier 1 form is `renzora_plugin::rust_script!`. \
+                     Compile-time Bevy access moved to the restart-required \
+                     engine-plugin tier.",
+                    path.display()
+                );
+            }
+            Declaration::NotRecognised => continue,
         }
-        out.push(path);
     }
 }
 
@@ -177,7 +194,7 @@ mod tests {
     }
 
     fn script_body() -> &'static str {
-        "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n"
+        "fn update(_: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n"
     }
 
     #[test]

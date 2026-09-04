@@ -61,7 +61,12 @@ pub struct BuildServiceConfig {
     pub n_workers: Option<usize>,
     pub n_children: Option<usize>,
     pub shutdown_deadline: Duration,
-    pub required_symbols: Vec<Vec<u8>>,
+    /// Required exported symbols keyed by artifact kind. The loader
+    /// verifies each kind's symbol set against the corresponding
+    /// loaded image; a Tier-1 plugin is not rejected for missing
+    /// script symbols, and a Tier-1 script is not rejected for
+    /// missing plugin symbols.
+    pub required_symbols_by_kind: std::collections::HashMap<crate::types::ArtifactKind, Vec<Vec<u8>>>,
 }
 
 impl Default for BuildServiceConfig {
@@ -75,7 +80,7 @@ impl Default for BuildServiceConfig {
             n_workers: None,
             n_children: None,
             shutdown_deadline: Duration::from_secs(5),
-            required_symbols: vec![crate::types::default_script_symbol().to_vec()],
+            required_symbols_by_kind: std::collections::HashMap::new(),
         }
     }
 }
@@ -241,8 +246,15 @@ impl BuildService {
         let cache = ArtifactCache::new(config.cache_root.clone());
         cache.rebuild_index_from_disk();
         let loader = Arc::new(Loader::new(cache.clone()));
-        for sym in &config.required_symbols {
-            loader.require_symbol(sym);
+        // S4-2: required-symbol policy is artifact-kind-specific. The
+        // previous combined-list policy required every configured
+        // symbol for every loaded image, which was wrong: a normal
+        // loose plugin does not export the script descriptor and a
+        // normal script does not export the loose-plugin initializer.
+        for (kind, names) in &config.required_symbols_by_kind {
+            for name in names {
+                loader.require_symbol_for(*kind, name);
+            }
         }
 
         let pool = WorkerPool::spawn(
@@ -526,8 +538,9 @@ impl BuildService {
         self: &Arc<Self>,
         id: &CanonicalId,
         fingerprint: &BuildFingerprint,
+        artifact_kind: crate::types::ArtifactKind,
     ) -> Result<LoadedLibrary, LoadError> {
-        self.loader.load(id, fingerprint)
+        self.loader.load(id, fingerprint, artifact_kind)
     }
 
     pub fn loader(&self) -> &Arc<Loader> {
@@ -991,7 +1004,7 @@ mod tests {
             n_workers: Some(1),
             n_children: Some(1),
             shutdown_deadline: Duration::from_secs(1),
-            required_symbols: vec![],
+            required_symbols_by_kind: std::collections::HashMap::new(),
         }
     }
 

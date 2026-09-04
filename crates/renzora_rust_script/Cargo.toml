@@ -33,16 +33,31 @@ static_scripts = ["dep:renzora_static_scripts"]
 renzora_static_scripts = { path = "../renzora_static_scripts", optional = true }
 bevy = { workspace = true }
 renzora = { path = "../renzora", default-features = false }
-# The same compiler driver the native-plugin loader uses. A script and a plugin
-# are built identically — the difference is only what the engine does with the
-# result.
-renzora_plugin_build = { path = "../renzora_plugin_build" }
+# The C-ABI contract a compiled Rust script targets. Phase 4: a script is
+# a small cdylib that depends only on `renzora_plugin`; this crate's
+# runtime adapter (`compiled_runtime`) is the editor's half.
+renzora_plugin = { path = "../renzora_plugin", default-features = false, features = ["script"] }
+# The shared `BuildService`. Phase 4 wires `renzora_rust_script` and
+# `renzora_loose_plugins` to the SAME `Arc<BuildService>` so scripts
+# reuse the compiler cache, supersession, last-good-preservation, and
+# stable-staging the plugin host already proved. The neutral owner of
+# that Arc lives in `renzora_compiler_cache` (see `SharedBuildService`).
+renzora_compiler_cache = { path = "../renzora_compiler_cache" }
+# U4-3: cross-feature orchestration moved to `renzora_runtime::host_assembly`
+# so this crate no longer depends on `renzora_loose_plugins`. The
+# editor entry points and the acceptance harness call
+# `host_assembly::install_extension_host` once; the loose host and
+# the script plugin then share the same `Arc<BuildService>`. This
+# crate re-exports the host-assembly's `CompilerService` shape for
+# backwards compatibility with the previous `assembly.rs` API.
 # For `ScriptComponent` and `ScriptBackend`. A Rust script is attached exactly
 # like a Lua one — same component, routed by file extension — so this crate has
 # to speak the scripting layer's vocabulary even though it bypasses its
 # execution model.
 renzora_scripting = { path = "../renzora_scripting", default-features = false }
 libloading = "0.8"
+# Crossbeam channel for BuildService receivers.
+crossbeam-channel = "0.5"
 # Canonical plugin/script identity. Used by Phase 1 commits 1.2-1.4
 # (recursive walk, watcher reconciliation, alias-aware dispatch,
 # rustc_lexer-backed declaration recogniser). `discovery` enabled so
@@ -55,20 +70,32 @@ renzora_identity = { path = "../renzora_identity", features = ["discovery", "rus
 # `notify_debouncer_full`, matching the C-ABI plugin hot-reload path's
 # mechanism. `0.7` matches the version used by `renzora_plugin::host::dev`.
 notify-debouncer-full = "0.7"
-# Explicitly-specified stable hash for the build directory key. Phase 1
-# correction 14 swaps `DefaultHasher` (not specified stable across Rust
-# releases) for `sha2::Sha256` truncated to 16 hex characters.
+# Used by the SDK install path resolver.
+renzora_plugin_build = { path = "../renzora_plugin_build" }
+# Stable hash for build directory keys (exporter still uses these
+# when reading legacy .renzora/scripts/ directories staged by earlier
+# builds). The active Phase 4 path uses BuildService.
 sha2 = "0.10"
 
 [dev-dependencies]
 # Tests in `src/discovery.rs` build synthetic project trees under a tempdir.
 tempfile = "3"
+# Phase 4 acceptance tests compile cdylibs in tempdirs.
+libloading = "0.8"
 # Pull `renzora_runtime` so the `dynamic_linking` feature on this crate
 # is enabled when the lib's tests run in isolation. Production pulls
 # `renzora_runtime` through the binary crate, so the dev-dep is
 # strictly test-time and does not affect any shipped build.
 renzora_runtime = { path = "../renzora_runtime" }
 renzora = { path = "../renzora", features = ["editor"] }
+renzora_engine = { path = "../renzora_engine" }
+# Phase 4 acceptance harness parses a minimal `project.toml` so the
+# production watcher sees a real `CurrentProject`.
+toml = "0.8"
+# notify_debouncer_full is a normal dependency already, but the test
+# harness uses its `DebouncedEvent` type directly. Listed here for
+# clarity (the dependency is satisfied through the regular path).
+notify-debouncer-full = "0.7"
 
 [lints]
 workspace = true

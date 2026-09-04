@@ -122,9 +122,9 @@ pub fn fetch_release_info() -> Result<ReleaseInfo, String> {
                 name: a.name,
                 size: a.size,
                 url: a.browser_download_url,
-                sha256: a.digest.and_then(|d| {
-                    d.strip_prefix("sha256:").map(|h| h.to_ascii_lowercase())
-                }),
+                sha256: a
+                    .digest
+                    .and_then(|d| d.strip_prefix("sha256:").map(|h| h.to_ascii_lowercase())),
             })
             .collect(),
     })
@@ -245,7 +245,10 @@ pub fn spawn_source_download(platform: Platform, release: ReleaseInfo) -> Downlo
             }
         }
     });
-    DownloadTask { platform, rx: Mutex::new(rx) }
+    DownloadTask {
+        platform,
+        rx: Mutex::new(rx),
+    }
 }
 
 fn download_and_install_source(
@@ -282,10 +285,15 @@ fn download_and_install_source(
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("Failed to create {}: {e}", dest.display()))?;
 
-    let _ = tx.send(DownloadProgress::Fetching(format!("Extracting into {}...", dest.display())));
+    let _ = tx.send(DownloadProgress::Fetching(format!(
+        "Extracting into {}...",
+        dest.display()
+    )));
     let cursor = std::io::Cursor::new(&bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Bad zip: {e}"))?;
-    archive.extract(&dest).map_err(|e| format!("Extract failed: {e}"))?;
+    archive
+        .extract(&dest)
+        .map_err(|e| format!("Extract failed: {e}"))?;
 
     Ok(format!("Installed engine source from {}", release.tag_name))
 }

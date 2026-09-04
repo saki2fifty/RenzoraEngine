@@ -136,9 +136,8 @@ pub fn compress_to_temp(upx: &Path, src: &Path, tmp: &Path) -> Result<(PathBuf, 
     // A stale temp from a cancelled export would already be packed, so start from
     // a fresh copy every time rather than trusting whatever is there.
     let _ = std::fs::remove_file(tmp);
-    std::fs::copy(src, tmp).map_err(|e| {
-        format!("copy {} → {}: {e}", src.display(), tmp.display())
-    })?;
+    std::fs::copy(src, tmp)
+        .map_err(|e| format!("copy {} → {}: {e}", src.display(), tmp.display()))?;
     match compress_in_place(upx, tmp) {
         Ok((before, after)) => Ok((tmp.to_path_buf(), before, after)),
         Err(e) => {

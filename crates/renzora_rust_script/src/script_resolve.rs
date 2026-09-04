@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 use renzora_identity::{AliasLookup, BareAliasIndex, CanonicalId, RootKind};
 
+/// The manifest a copy-based export ships beside the script
+/// libraries. Re-exported at the crate root.
+pub const PREBUILT_MANIFEST: &str = "scripts.index";
+
 /// What dispatch turned the user's `script_path` into.
 #[derive(Debug, Clone)]
 pub enum ResolvedScript {
@@ -83,11 +87,17 @@ fn canonical_for_path(rel: &Path) -> Option<CanonicalId> {
 /// algorithm; this implementation uses `sha2::Sha256` truncated to 16
 /// hex characters. The function does NOT claim collisions are
 /// impossible — a 64-bit hash of a 256-bit space has a non-zero
-/// collision probability over large sets. Collision detection lives in
-/// [`build_dir_marker_path`]: each build directory contains a marker
-/// file holding the canonical id it was generated for; consumers
-/// (editor and exporter) verify the marker matches before accepting
-/// the directory's contents.
+/// collision probability over large sets. Collision detection lives
+/// in [`build_dir_marker_path`]: each build directory contains a
+/// marker file holding the canonical id it was generated for;
+/// consumers (editor and exporter) verify the marker matches before
+/// accepting the directory's contents.
+///
+/// **Phase 4 note**: the editor's `BuildService` writes its own cache
+/// layout; the script export still reads legacy `.renzora/scripts/`
+/// directories staged by earlier builds (or by the exporter in
+/// standalone mode). This helper exists so the exporter can read
+/// those legacy directories; new builds go through `BuildService`.
 pub fn build_dir_name(id: &CanonicalId) -> String {
     use sha2::{Digest, Sha256};
     let s = id.to_scheme_path();
@@ -100,10 +110,7 @@ pub fn build_dir_name(id: &CanonicalId) -> String {
     out
 }
 
-/// Path to the marker file inside a build directory. The marker holds
-/// the canonical id the directory was generated for, so the editor can
-/// detect a hash collision or a stale directory before trusting its
-/// contents.
+/// Path to the marker file inside a build directory.
 pub fn build_dir_marker_path(project_root: &Path, id: &CanonicalId) -> PathBuf {
     project_root
         .join(".renzora")
@@ -112,24 +119,25 @@ pub fn build_dir_marker_path(project_root: &Path, id: &CanonicalId) -> PathBuf {
         .join(".renzora_script_id")
 }
 
-/// Write or read the marker file in a build directory. The marker file
-/// is `.renzora_script_id` inside the directory; its contents are the
-/// canonical id's scheme-path. Consumers can verify the directory
-/// matches the expected identity before relying on its artifact.
-pub fn write_build_dir_marker(project_root: &Path, id: &CanonicalId) -> std::io::Result<()> {
-    let path = build_dir_marker_path(project_root, id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, id.to_scheme_path())
-}
-
+/// Read the marker file in a build directory.
 pub fn read_build_dir_marker(path: &Path) -> std::io::Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Write the marker file in a build directory. The Phase 4 production
+/// path does not write these directly — `BuildService` owns the cache
+/// layout — but the exporter still uses this helper when staging
+/// legacy `.renzora/scripts/` directories from earlier builds.
+pub fn write_build_dir_marker(project_root: &Path, id: &CanonicalId) -> std::io::Result<()> {
+    let path = build_dir_marker_path(project_root, id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, id.to_scheme_path())
 }
 
 /// Convenience: produce a build artifact path under the project's

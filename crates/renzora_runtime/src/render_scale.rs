@@ -128,10 +128,7 @@ fn apply_render_scale(
             Option<&RenderLayers>,
             &RenderTarget,
         ),
-        (
-            Without<RsBlitCamera>,
-            Or<(With<Camera3d>, With<Camera2d>)>,
-        ),
+        (Without<RsBlitCamera>, Or<(With<Camera3d>, With<Camera2d>)>),
     >,
     mut blit: Query<(&mut Sprite, &mut Transform), With<RsBlitSprite>>,
     mut resize_events: MessageReader<WindowResized>,

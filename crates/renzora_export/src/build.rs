@@ -103,9 +103,15 @@ fn patch_cross_cargo_config(
         );
     }
 
-    std::fs::write(&path, out)
-        .map_err(|e| format!("Could not patch {} for a container build: {e}", path.display()))?;
-    progress(format!("Prepared cargo config for a container build ({removed} dynamic-link flags removed)"));
+    std::fs::write(&path, out).map_err(|e| {
+        format!(
+            "Could not patch {} for a container build: {e}",
+            path.display()
+        )
+    })?;
+    progress(format!(
+        "Prepared cargo config for a container build ({removed} dynamic-link flags removed)"
+    ));
     Ok(())
 }
 
@@ -158,10 +164,14 @@ pub fn lean_cargo_args(
         "--no-default-features",
     ])
     .arg("--features")
-    .arg(if features.is_empty() { "runtime" } else { features });
+    .arg(if features.is_empty() {
+        "runtime"
+    } else {
+        features
+    });
     if cross {
-        let triple = crate::docker::rust_triple(platform)
-            .expect("No Rust target for lean build target");
+        let triple =
+            crate::docker::rust_triple(platform).expect("No Rust target for lean build target");
         cmd.args(["--target", triple]);
     }
     if !cross && matches!(platform, Platform::LinuxX64) {
@@ -218,7 +228,10 @@ impl LeanProfileArg {
 /// another platform it stopped being true — and a lean build never reads the
 /// template anyway, since it recompiles the engine from source.
 pub fn editor_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
 }
 
 /// The engine source a lean build compiles: the checkout the editor runs from
@@ -428,9 +441,8 @@ pub fn build_lean(
         c.arg("cargo");
         c
     } else {
-        let tc = toolchain.ok_or(
-            "Internal error: a same-OS lean build was started without a Rust toolchain.",
-        )?;
+        let tc = toolchain
+            .ok_or("Internal error: a same-OS lean build was started without a Rust toolchain.")?;
         let mut c = tc.cargo_command();
         c.current_dir(&ws);
         c
@@ -438,7 +450,15 @@ pub fn build_lean(
     if !cross {
         cmd.env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(platform));
     }
-    lean_cargo_args(&mut cmd, &ws, platform, cross, LeanProfileArg::DistLean, &features, "build");
+    lean_cargo_args(
+        &mut cmd,
+        &ws,
+        platform,
+        cross,
+        LeanProfileArg::DistLean,
+        &features,
+        "build",
+    );
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
@@ -509,7 +529,10 @@ pub fn build_lean(
     if !status.success() {
         return Err(format!(
             "Lean build failed (cargo exited with {}):\n{}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into()),
             tail.join("\n")
         ));
     }
@@ -519,9 +542,14 @@ pub fn build_lean(
     let bin = if cross {
         let triple = crate::docker::rust_triple(platform)
             .ok_or_else(|| format!("No Rust target for {}", platform.display_name()))?;
-        ws.join("target").join(triple).join("dist-lean").join(bin_filename(platform))
+        ws.join("target")
+            .join(triple)
+            .join("dist-lean")
+            .join(bin_filename(platform))
     } else {
-        ws.join("target").join("dist-lean").join(bin_filename(platform))
+        ws.join("target")
+            .join("dist-lean")
+            .join(bin_filename(platform))
     };
     if !bin.is_file() {
         return Err(format!(
@@ -547,8 +575,7 @@ fn sync_export_workspace(
     progress: &mut dyn FnMut(String),
 ) -> Result<PathBuf, String> {
     let dest = engine_src.join("target").join("export-src");
-    std::fs::create_dir_all(&dest)
-        .map_err(|e| format!("create export workspace: {e}"))?;
+    std::fs::create_dir_all(&dest).map_err(|e| format!("create export workspace: {e}"))?;
     progress("Syncing engine source into the isolated export workspace…".into());
 
     // Top-level dirs that are never part of a build. Matched ONLY at the root, so
@@ -563,15 +590,28 @@ fn sync_export_workspace(
     // their manifests, which a blanket copy-if-newer would keep undoing). See
     // `stage_static_plugins`.
     const TOP_SKIP: &[&str] = &[
-        "target", ".git", ".github", ".vscode", ".idea", "dist", "docs",
-        "node_modules", "templates", "disabled", "docker", ".claude", ".devcontainer",
+        "target",
+        ".git",
+        ".github",
+        ".vscode",
+        ".idea",
+        "dist",
+        "docs",
+        "node_modules",
+        "templates",
+        "disabled",
+        "docker",
+        ".claude",
+        ".devcontainer",
         "plugins",
     ];
     // cdylib crates are never linked into the lean binary, so leave them out of
     // the copy entirely.
     let drop_plugins = cdylib_crates(engine_src);
     let mut copied = 0usize;
-    for entry in std::fs::read_dir(engine_src).map_err(|e| format!("read {}: {e}", engine_src.display()))? {
+    for entry in
+        std::fs::read_dir(engine_src).map_err(|e| format!("read {}: {e}", engine_src.display()))?
+    {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
         let ft = entry.file_type().map_err(|e| e.to_string())?;
@@ -751,7 +791,10 @@ fn strip_bevy_features(
     });
     std::fs::write(&manifest, doc.to_string())
         .map_err(|e| format!("write {}: {e}", manifest.display()))?;
-    progress(format!("Stripping {} unused Bevy feature(s)", disabled.len()));
+    progress(format!(
+        "Stripping {} unused Bevy feature(s)",
+        disabled.len()
+    ));
     Ok(())
 }
 
@@ -1144,8 +1187,7 @@ pub fn stage_modding_sdk(
     // it — and a game with modding enabled and no `plugins/` anywhere looks like
     // modding was not enabled at all.
     let plugins = output_dir.join("plugins");
-    std::fs::create_dir_all(&plugins)
-        .map_err(|e| format!("create {}: {e}", plugins.display()))?;
+    std::fs::create_dir_all(&plugins).map_err(|e| format!("create {}: {e}", plugins.display()))?;
 
     // The archive first: smaller, and the game unpacks it on first launch behind
     // the same progress window the editor uses.
@@ -1169,7 +1211,9 @@ pub fn stage_modding_sdk(
 
     progress("Copying the plugin SDK for modding (this is ~1.5 GB)…".to_string());
     let copied = copy_dir(&sdk, &output_dir.join("sdk"))?;
-    progress(format!("Shipped the plugin SDK for modding ({copied} files)"));
+    progress(format!(
+        "Shipped the plugin SDK for modding ({copied} files)"
+    ));
     Ok(true)
 }
 
@@ -1177,11 +1221,12 @@ pub fn stage_modding_sdk(
 fn copy_dir(from: &Path, to: &Path) -> Result<usize, String> {
     std::fs::create_dir_all(to).map_err(|e| format!("create {}: {e}", to.display()))?;
     let mut count = 0;
-    let entries =
-        std::fs::read_dir(from).map_err(|e| format!("read {}: {e}", from.display()))?;
+    let entries = std::fs::read_dir(from).map_err(|e| format!("read {}: {e}", from.display()))?;
     for entry in entries.flatten() {
         let src = entry.path();
-        let Some(name) = src.file_name() else { continue };
+        let Some(name) = src.file_name() else {
+            continue;
+        };
         let dst = to.join(name);
         if src.is_dir() {
             count += copy_dir(&src, &dst)?;
@@ -1255,8 +1300,13 @@ pub fn stage_runtime_native_plugins(
         let dest = output_dir.join("plugins").join(&name).join("build");
         std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
         let dest_lib = dest.join(format!("{}.{lib_ext}", name.replace('-', "_")));
-        std::fs::copy(&plugin.lib, &dest_lib)
-            .map_err(|e| format!("copy {} → {}: {e}", plugin.lib.display(), dest_lib.display()))?;
+        std::fs::copy(&plugin.lib, &dest_lib).map_err(|e| {
+            format!(
+                "copy {} → {}: {e}",
+                plugin.lib.display(),
+                dest_lib.display()
+            )
+        })?;
         shipped.push(name);
     }
 
@@ -1326,12 +1376,8 @@ pub fn stage_loose_plugins_from(
         // leaf (e.g. `engine://spin.rs` and `market://spin.rs`) export
         // to two distinct directories under different safe names.
         let safe_name = canonical_to_safe_dir_name(name);
-        let dest = output_dir
-            .join("plugins")
-            .join(&safe_name)
-            .join("build");
-        std::fs::create_dir_all(&dest)
-            .map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let dest = output_dir.join("plugins").join(&safe_name).join("build");
+        std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
         // The staged file's filename already encodes the canonical id
         // through the same safe-name encoder (see
         // `StableStaging::stable_name_for`); we copy it under that
@@ -1379,11 +1425,12 @@ pub fn canonical_to_safe_dir_name(canonical: &str) -> String {
 /// boundary is one type and they load exactly as they do in the editor. The
 /// player needs no SDK and no Rust toolchain — the compiling already happened.
 ///
-/// Copies rather than recompiles. The editor builds every script on project open
-/// and again on save, so `<project>/.renzora/scripts/<dir>/` already holds a
-/// current library; building a second time would only produce the same bytes
-/// more slowly. A script that never compiled has nothing there and is reported
-/// rather than silently omitted.
+/// Copies rather than recompiles. Phase 4 reads the compiled
+/// libraries from the shared `BuildService`'s cache (where every
+/// successful editor build lands), not from
+/// `<project>/.renzora/scripts/<dir>/`. The exporter takes a
+/// `BuildService` and walks its cache. A script that never compiled
+/// has nothing there and is reported rather than silently omitted.
 ///
 /// **Host platform only.** These are host-shaped libraries, so they belong with
 /// an export for the machine that built them. Staging them into an export for
@@ -1404,12 +1451,13 @@ pub fn stage_prebuilt_scripts(
     project_dir: &Path,
     output_dir: &Path,
     lib_ext: &str,
+    build_service: &std::sync::Arc<renzora_compiler_cache::BuildService>,
     progress: &mut dyn FnMut(String),
 ) -> Result<usize, String> {
-    // The exporter and the editor MUST use the same canonical-id discovery.
-    // `renzora_rust_script::discovery::collect_canonical_scripts` is the
-    // single source of truth (correction J): one walker, one SKIP list,
-    // one declaration recognition, one symlink policy.
+    // The exporter and the editor MUST use the same canonical-id
+    // discovery. `renzora_rust_script::discovery::collect_canonical_scripts`
+    // is the single source of truth: one walker, one SKIP list, one
+    // declaration recognition, one symlink policy.
     let canonical_ids: Vec<renzora_identity::CanonicalId> =
         renzora_rust_script::discovery::collect_canonical_scripts(project_dir);
     if canonical_ids.is_empty() {
@@ -1422,44 +1470,25 @@ pub fn stage_prebuilt_scripts(
     let mut index = String::new();
     let mut staged = 0usize;
     let mut missing: Vec<String> = Vec::new();
+    let cache = build_service.cache();
     for (i, id) in canonical_ids.iter().enumerate() {
-        // Correction G: share the editor's build-dir derivation.
-        let dir_name = renzora_rust_script::script_resolve::build_dir_name(id);
-        let build_dir = project_dir.join(".renzora").join("scripts").join(&dir_name);
-        // Correction K: verify the marker before trusting the directory.
-        let marker = renzora_rust_script::script_resolve::build_dir_marker_path(project_dir, id);
-        let marker_ok = match renzora_rust_script::script_resolve::read_build_dir_marker(&marker) {
-            Ok(Some(text)) => text == id.to_scheme_path(),
-            Ok(None) => false,
-            Err(e) => {
-                return Err(format!("read marker {marker:?}: {e}"));
-            }
+        // The Phase 4 production path: the BuildService owns the
+        // cache layout. The exporter reads the latest published
+        // artifact for this identity directly from the cache.
+        let artifact = read_active_artifact(cache, id, lib_ext);
+        let Some(lib) = artifact else {
+            missing.push(id.path().to_string());
+            continue;
         };
-        if !marker_ok {
+        if !lib.is_file() {
             missing.push(id.path().to_string());
             continue;
         }
-        let newest = std::fs::read_dir(&build_dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(lib_ext))
-            .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-
-        let Some(lib) = newest else {
-            missing.push(id.path().to_string());
-            continue;
-        };
 
         let file = format!("script_{i}.{lib_ext}");
         std::fs::copy(&lib, dest.join(&file))
             .map_err(|e| format!("copy {} → {}: {e}", lib.display(), file))?;
 
-        // Correction H: exactly one canonical row per script. Bare-leaf
-        // aliases are derived by LoadedScripts::insert, never emitted as
-        // a competing canonical id.
         let scheme_path = id.to_scheme_path();
         index.push_str(&format!("{scheme_path}\t{file}\n"));
 
@@ -1468,7 +1497,7 @@ pub fn stage_prebuilt_scripts(
 
     if !missing.is_empty() {
         progress(format!(
-            "WARN: {} script(s) have no compiled library or stale marker and were not shipped ({}). \
+            "WARN: {} script(s) have no published artifact and were not shipped ({}). \
              Open the project in the editor so they build, then export again.",
             missing.len(),
             missing.join(", ")
@@ -1484,6 +1513,23 @@ pub fn stage_prebuilt_scripts(
     Ok(staged)
 }
 
+/// Read the active published artifact path for `id` from the
+/// `BuildService`'s `ArtifactCache`. Returns `None` when no
+/// generation has been published for `id`.
+fn read_active_artifact(
+    cache: &std::sync::Arc<renzora_compiler_cache::ArtifactCache>,
+    id: &renzora_identity::CanonicalId,
+    lib_ext: &str,
+) -> Option<std::path::PathBuf> {
+    let active = cache.read_active(id)?;
+    let path = cache.artifact_path(id, active.generation, lib_ext);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// The project's scripts, as the EDITOR defines them.
 ///
 /// Delegated rather than reimplemented. The two had their own scans for a while
@@ -1492,7 +1538,7 @@ pub fn stage_prebuilt_scripts(
 /// having never run in the editor once. Sharing the definition means an export
 /// can only ever ship what the editor would have built.
 fn collect_scripts(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    out.extend(renzora_rust_script::collect_project_scripts(dir));
+    out.extend(renzora_rust_script::discovery::collect_rust_scripts(dir));
     Ok(())
 }
 
@@ -1563,8 +1609,8 @@ fn stage_static_scripts(
         // Staged under an index, not its leaf, or two `spin.rs` would overwrite
         // each other in `src/` and one script would silently become the other.
         let staged_name = format!("script_{i}.rs");
-        let text = std::fs::read_to_string(src)
-            .map_err(|e| format!("read {}: {e}", src.display()))?;
+        let text =
+            std::fs::read_to_string(src).map_err(|e| format!("read {}: {e}", src.display()))?;
         write_if_changed(&crate_dir.join("src").join(&staged_name), &text)?;
 
         mods.push_str(&format!("#[path = \"{staged_name}\"]\nmod script_{i};\n"));
@@ -1572,15 +1618,12 @@ fn stage_static_scripts(
         // derives the bare-leaf alias from the canonical id; a duplicate
         // bare row would create a second competing canonical id and make
         // the bare alias ambiguous.
-        renzora_identity::CanonicalId::from_rooted(
-            renzora_identity::RootKind::Project,
-            &rel,
-        )
-        .map_err(|e| format!("bad script relpath {rel:?}: {e}"))?;
+        renzora_identity::CanonicalId::from_rooted(renzora_identity::RootKind::Project, &rel)
+            .map_err(|e| format!("bad script relpath {rel:?}: {e}"))?;
         entries.push_str(&format!(
             "        (renzora_identity::CanonicalId::from_rooted(\
              renzora_identity::RootKind::Project, \"{rel}\").unwrap(), \
-             script_{i}::renzora_script_update as ScriptFn),\n"
+             script_{i}::renzora_plugin_tier1_script_call),\n"
         ));
         if leaf_counts.get(leaf).copied().unwrap_or(0) != 1
             && !ambiguous.contains(&leaf.to_string())
@@ -1601,10 +1644,12 @@ fn stage_static_scripts(
         ));
     }
 
-    // Correction I: declare renzora_identity so the generated crate
-    // compiles. Bevy is taken from the workspace; the generated
-    // workspace's [workspace.dependencies] entry provides the
-    // resolved Bevy version.
+    // Phase 4: the generated scripts target the versioned Tier 1
+    // C-ABI in `renzora_plugin::script`. Each `script_<i>.rs`
+    // imports `renzora_plugin::script::*` and emits
+    // `pub fn __tier1_entry(...) -> Result<(), String>` so the
+    // generated aggregator can collect them as a `CompiledScript`
+    // table without linking Bevy, the engine, or the editor.
     let manifest = String::from(
         "# GENERATED by the lean exporter — see `renzora_export::build`.\n\
          # The project's Rust scripts, compiled into this build's binary.\n\
@@ -1614,12 +1659,8 @@ fn stage_static_scripts(
          edition = \"2021\"\n\
          \n\
          [dependencies]\n\
-         # `static_scripts` drops `#[no_mangle]` from what `renzora::script!`\n\
-         # emits, so the scripts below can share one binary. Cargo unifies\n\
-         # features per package, so naming it once here applies it to all.\n\
-         renzora = { path = \"../renzora\", features = [\"static_scripts\"] }\n\
+         renzora_plugin = { path = \"../renzora_plugin\", default-features = false, features = [\"script\"] }\n\
          renzora_identity = { path = \"../renzora_identity\" }\n\
-         bevy = { workspace = true }\n\
          \n\
          [lints]\n\
          workspace = true\n"
@@ -1632,15 +1673,12 @@ fn stage_static_scripts(
          //! The project's Rust scripts, compiled into this binary. Overwritten on\n\
          //! every lean export; edits here do not survive one.\n\
          \n\
-         use bevy::ecs::entity::Entity;\n\
-         use bevy::ecs::world::World;\n\
          use renzora_identity::{{CanonicalId, RootKind}};\n\
-         \n\
-         pub type ScriptFn = fn(&mut World, Entity);\n\
+         use renzora_plugin::script::ScriptEntry;\n\
          \n\
          {mods}\n\
-         /// Every script compiled in, as `(canonical id, entry point)`.\n         /// Phase 1 commit 1.3 widened the key from a file name to a canonical id.\n\
-         pub fn scripts() -> Vec<(CanonicalId, ScriptFn)> {{\n\
+         /// Every script compiled in, as `(canonical id, ScriptEntry)`.\n         /// F4-1: the typed user fn never crosses the dynamic-library\n         /// boundary; the per-cdylib entry is what the host sees, and\n         /// `LoadedScripts::insert_borrowed` registers it.\n\
+         pub fn scripts() -> Vec<(CanonicalId, ScriptEntry)> {{\n\
          \x20   vec![\n{entries}    ]\n\
          }}\n"
     );
@@ -1706,8 +1744,7 @@ fn sync_dir_except(
 /// versions differ in size and the sync would keep clobbering it.
 fn patch_plugin_manifest(src_dir: &Path, dest_manifest: &Path) -> Result<(), String> {
     let src = src_dir.join("Cargo.toml");
-    let text = std::fs::read_to_string(&src)
-        .map_err(|e| format!("read {}: {e}", src.display()))?;
+    let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let mut doc: toml_edit::DocumentMut = text
         .parse()
         .map_err(|e| format!("parse {}: {e}", src.display()))?;
@@ -1730,9 +1767,9 @@ fn patch_plugin_manifest(src_dir: &Path, dest_manifest: &Path) -> Result<(), Str
 mod tests {
     use super::*;
 
-    /// The minimum that counts as a script: it calls `renzora::script!`, which
-    /// is what `collect_project_scripts` looks for.
-    const SCRIPT: &str = "fn update(_c: &mut ScriptCtx) {}\nrenzora::script!(update);\n";
+    /// The minimum that counts as a script: it calls `renzora_plugin::rust_script!`,
+    /// which is what `collect_project_scripts` looks for.
+    const SCRIPT: &str = "use renzora_plugin::script::*;\nfn update(_c: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n";
 
     /// A project with two scripts produces a module and a table entry for each,
     /// and copies the sources beside the generated lib.
@@ -1742,8 +1779,8 @@ mod tests {
     /// `static_scripts`) and both may define their own `Spin` component.
     #[test]
     fn static_scripts_generate_a_module_and_entry_per_file() {
-        let project = std::env::temp_dir()
-            .join(format!("renzora_static_scripts_{}", std::process::id()));
+        let project =
+            std::env::temp_dir().join(format!("renzora_static_scripts_{}", std::process::id()));
         let scripts = project.join("scripts");
         std::fs::create_dir_all(&scripts).unwrap();
         // Written out of order to prove the sort: `orbit` must come first, so a
@@ -1763,15 +1800,33 @@ mod tests {
 
         let crate_dir = ws.join("crates").join("renzora_static_scripts");
         let lib = std::fs::read_to_string(crate_dir.join("src").join("lib.rs")).unwrap();
-        assert!(lib.contains("#[path = \"script_0.rs\"]\nmod script_0;"), "{lib}");
-        assert!(lib.contains("#[path = \"script_1.rs\"]\nmod script_1;"), "{lib}");
+        assert!(
+            lib.contains("#[path = \"script_0.rs\"]\nmod script_0;"),
+            "{lib}"
+        );
+        assert!(
+            lib.contains("#[path = \"script_1.rs\"]\nmod script_1;"),
+            "{lib}"
+        );
         // Correction H: the generator emits exactly one canonical row per
         // script. Bare-leaf aliases are derived by LoadedScripts::insert
         // at load time, so no second canonical row is written here.
-        assert!(lib.contains("\"scripts/orbit.rs\").unwrap(), script_0::"), "{lib}");
-        assert!(!lib.contains("(\"orbit.rs\","), "bare-leaf row must NOT be emitted (correction H): {lib}");
-        assert!(lib.contains("\"scripts/spin.rs\").unwrap(), script_1::"), "{lib}");
-        assert!(!lib.contains("notes"), "non-scripts must not be linked in: {lib}");
+        assert!(
+            lib.contains("\"scripts/orbit.rs\").unwrap(), script_0::"),
+            "{lib}"
+        );
+        assert!(
+            !lib.contains("(\"orbit.rs\","),
+            "bare-leaf row must NOT be emitted (correction H): {lib}"
+        );
+        assert!(
+            lib.contains("\"scripts/spin.rs\").unwrap(), script_1::"),
+            "{lib}"
+        );
+        assert!(
+            !lib.contains("notes"),
+            "non-scripts must not be linked in: {lib}"
+        );
 
         // Sources copied beside the generated lib under their index, so the
         // export copy stays self-contained and two same-named scripts in
@@ -1783,12 +1838,19 @@ mod tests {
         // Rust that is not a script stays out — a lean export compiles every
         // collected file into the binary, so one non-script would fail the whole
         // build rather than be skipped.
-        assert!(!lib.contains("helper"), "non-scripts must not be linked in: {lib}");
+        assert!(
+            !lib.contains("helper"),
+            "non-scripts must not be linked in: {lib}"
+        );
 
-        // The manifest must turn the feature on, or every script keeps its
-        // `#[no_mangle]` and the binary fails to link.
+        // The manifest must turn the `script` feature on for
+        // `renzora_plugin`, or the script cdylib won't compile against
+        // the `renzora_plugin::script::*` surface.
         let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml")).unwrap();
-        assert!(manifest.contains("features = [\"static_scripts\"]"), "{manifest}");
+        assert!(
+            manifest.contains("features = [\"script\"]"),
+            "F4-1: manifest must enable the `script` feature on `renzora_plugin`: {manifest}"
+        );
 
         let _ = std::fs::remove_dir_all(&project);
     }
@@ -1798,8 +1860,8 @@ mod tests {
     /// silently becoming the other.
     #[test]
     fn static_scripts_scan_the_whole_project() {
-        let project = std::env::temp_dir()
-            .join(format!("renzora_scan_project_{}", std::process::id()));
+        let project =
+            std::env::temp_dir().join(format!("renzora_scan_project_{}", std::process::id()));
         for sub in ["scripts", "enemies", "props", ".renzora/scripts", "target"] {
             std::fs::create_dir_all(project.join(sub)).unwrap();
         }
@@ -1816,10 +1878,8 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         assert!(stage_static_scripts(&project, &ws, &mut |_| {}).unwrap());
 
-        let lib = std::fs::read_to_string(
-            ws.join("crates/renzora_static_scripts/src/lib.rs"),
-        )
-        .unwrap();
+        let lib =
+            std::fs::read_to_string(ws.join("crates/renzora_static_scripts/src/lib.rs")).unwrap();
 
         // Found outside `scripts/`.
         assert!(lib.contains("\"enemies/spin.rs\").unwrap(),"), "{lib}");
@@ -1827,8 +1887,14 @@ mod tests {
         // Correction H: bare-leaf rows are never emitted. The bare
         // alias for `orbit.rs` is derived from the canonical row by
         // LoadedScripts::insert at load time.
-        assert!(!lib.contains("(\"spin.rs\""), "ambiguous leaf must not resolve: {lib}");
-        assert!(!lib.contains("(\"orbit.rs\""), "bare-leaf row must NOT be emitted (correction H): {lib}");
+        assert!(
+            !lib.contains("(\"spin.rs\""),
+            "ambiguous leaf must not resolve: {lib}"
+        );
+        assert!(
+            !lib.contains("(\"orbit.rs\""),
+            "bare-leaf row must NOT be emitted (correction H): {lib}"
+        );
         // Build output excluded.
         assert!(!lib.contains("leftover"), "{lib}");
         assert!(!lib.contains(".renzora"), "{lib}");
@@ -1840,8 +1906,8 @@ mod tests {
     /// feature off rather than compiling an empty aggregator.
     #[test]
     fn no_scripts_generates_nothing() {
-        let project = std::env::temp_dir()
-            .join(format!("renzora_no_scripts_{}", std::process::id()));
+        let project =
+            std::env::temp_dir().join(format!("renzora_no_scripts_{}", std::process::id()));
         std::fs::create_dir_all(project.join("scripts")).unwrap();
         let ws = project.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -1909,8 +1975,10 @@ strip = \"symbols\"
     /// `panic = "abort"` silently applies to a build that asked for unwinding.
     #[test]
     fn turning_a_knob_back_off_reverts_the_manifest() {
-        let dir = std::env::temp_dir()
-            .join(format!("renzora_lean_profile_revert_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "renzora_lean_profile_revert_{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Cargo.toml"), MANIFEST).unwrap();
 
@@ -1944,7 +2012,7 @@ mod lean_assembly_tests {
     use super::*;
 
     fn script_body() -> &'static str {
-        "fn update(_: &mut renzora::ScriptCtx) {}\nrenzora::script!(update);\n"
+        "use renzora_plugin::script::*;\nfn update(_: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n"
     }
 
     /// Find the engine workspace root by walking up from this crate's
@@ -2063,5 +2131,3 @@ mod lean_assembly_tests {
         );
     }
 }
-
-

@@ -53,8 +53,16 @@ fn export_canonical_collision_produces_two_directories() {
         .join("plugins")
         .join(canonical_to_safe_dir_name(&id_b))
         .join("build");
-    assert!(dir_a.is_dir(), "engine safe dir must exist: {}", dir_a.display());
-    assert!(dir_b.is_dir(), "market safe dir must exist: {}", dir_b.display());
+    assert!(
+        dir_a.is_dir(),
+        "engine safe dir must exist: {}",
+        dir_a.display()
+    );
+    assert!(
+        dir_b.is_dir(),
+        "market safe dir must exist: {}",
+        dir_b.display()
+    );
     // Walk the export tree and assert no directory name contains `:` or `/`.
     let mut bad: HashSet<String> = HashSet::new();
     fn walk(p: &Path, bad: &mut HashSet<String>) {
@@ -86,8 +94,14 @@ fn export_safe_name_is_windows_safe() {
     let id_a = canonical_to_safe_dir_name("engine://spin.rs");
     let id_b = canonical_to_safe_dir_name("market://spin.rs");
     let id_c = canonical_to_safe_dir_name("engine://other_plugin.rs");
-    assert_ne!(id_a, id_b, "different canonical ids must produce different safe names");
-    assert_ne!(id_a, id_c, "same scheme, different leaf must produce different safe names");
+    assert_ne!(
+        id_a, id_b,
+        "different canonical ids must produce different safe names"
+    );
+    assert_ne!(
+        id_a, id_c,
+        "same scheme, different leaf must produce different safe names"
+    );
     for n in [&id_a, &id_b, &id_c] {
         assert!(!n.contains(':'), "safe name must not contain `:` ({n})");
         assert!(!n.contains('/'), "safe name must not contain `/` ({n})");

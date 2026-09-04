@@ -64,9 +64,15 @@ pub mod value;
 pub use crate::wire;
 
 mod backend;
+pub mod compiled;
 mod reply;
 
 pub use backend::{desc_for, dispatch, Backend, BackendState, Ctx, Hook, HostCalls, ScriptRef};
+pub use compiled::{
+    check_compat, descriptor_size, noop_script_entry, script_call_prefix_hashes,
+    script_host_calls_prefix_hashes, CompatError, CompiledScriptBackend,
+    CompiledScriptCapabilities, CompiledScriptDesc, COMPILED_SCRIPT_ABI,
+};
 pub use command::{decode_list, encode_list, ScriptCommand, VARIANT_COUNT};
 pub use context::{
     decode_bindings, encode_bindings, AssetProgress, Binding, BindingKind, ChildNode,

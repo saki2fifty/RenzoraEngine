@@ -253,17 +253,25 @@ pub fn load(project_root: &Path) -> Vec<ExportPreset> {
     let file: PresetFile = match toml::from_str(&text) {
         Ok(f) => f,
         Err(e) => {
-            warn!("export presets at {} could not be read: {e}", path.display());
+            warn!(
+                "export presets at {} could not be read: {e}",
+                path.display()
+            );
             return Vec::new();
         }
     };
-    file.projects.get(&project_key(project_root)).map(|p| p.presets.clone()).unwrap_or_default()
+    file.projects
+        .get(&project_key(project_root))
+        .map(|p| p.presets.clone())
+        .unwrap_or_default()
 }
 
 /// Replace this project's presets, leaving every other project's alone.
 pub fn save(project_root: &Path, presets: &[ExportPreset]) -> std::io::Result<()> {
     let Some(path) = presets_path() else {
-        return Err(std::io::Error::other("no home directory to write export presets to"));
+        return Err(std::io::Error::other(
+            "no home directory to write export presets to",
+        ));
     };
 
     // Read-modify-write: the file holds every project, so serialising only this
@@ -277,7 +285,12 @@ pub fn save(project_root: &Path, presets: &[ExportPreset]) -> std::io::Result<()
     if presets.is_empty() {
         file.projects.remove(&key);
     } else {
-        file.projects.insert(key, ProjectPresets { presets: presets.to_vec() });
+        file.projects.insert(
+            key,
+            ProjectPresets {
+                presets: presets.to_vec(),
+            },
+        );
     }
 
     if let Some(dir) = path.parent() {
@@ -286,7 +299,6 @@ pub fn save(project_root: &Path, presets: &[ExportPreset]) -> std::io::Result<()
     let text = toml::to_string_pretty(&file).map_err(std::io::Error::other)?;
     std::fs::write(&path, text)
 }
-
 
 /// A name not already taken, as `base`, `base 2`, `base 3`, … — used by both
 /// "add" and "duplicate", so neither can produce two presets the UI cannot tell

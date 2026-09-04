@@ -2,19 +2,21 @@
 
 Scripting is how you give things in your game *behavior* — make a door open, a coin spin, an enemy chase the player. The good news: it's completely optional, and you can mix and match the approach that feels best to you.
 
-Renzora gives you two ways to add logic, and they work together:
+Renzora gives you three ways to add logic, and they work together:
 
 - **Blueprints** — a no-code, drag-and-connect visual system. Great if you'd rather not write code.
 - **Lua** — a friendly, popular scripting language, with the full set of built-in functions.
+- **Rust** — native code that targets the small Tier 1 C-ABI in `renzora_plugin::script`, hot-reloaded through the shared compiler cache.
 
-You can use either, or both at once, even on the same object. Start wherever
+You can use any, or all of them, even on the same object. Start wherever
 you're comfortable.
 
 > **Scripting languages are plugins.** Lua arrives as `plugins/lua`, which the
 > editor ships with. That is why a language can be added without touching the
 > engine — see
 > [Script Backends](/docs/r1-alpha7/extending/script-backends) if you want to
-> bring your own.
+> bring your own. Rust scripts run through the same scripting layer but are
+> discovered by file extension; see [Rust Scripts](./rust-scripts).
 
 ## Prefer no code? Use Blueprints
 
@@ -112,5 +114,6 @@ plugin and its extension starts working alongside Lua, on the same project.
 This page is just the warm-up. When you're ready for the full toolbox:
 
 - **[Lua reference](./lua)** — every lifecycle hook and built-in function, with examples.
+- **[Rust scripts](./rust-scripts)** — when Lua's sandbox is what is stopping you, with full native speed.
 - **[Scripting API](/docs/r1-alpha7/api/scripting)** — the complete function catalog.
 - **[Blueprints](./blueprints)** — the no-code visual option.

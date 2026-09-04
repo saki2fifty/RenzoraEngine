@@ -341,6 +341,15 @@ renzora_rust_script = { path = "../renzora_rust_script" }
 renzora_wind = { path = "../renzora_wind" }
 # ── end generated ──
 
+# Cross-feature orchestration: the editor's source-modding host
+# (loose plugins + Rust scripts). The host assembly that owns the
+# `Arc<BuildService>` lives in `src/host_assembly.rs`, which depends
+# on both feature crates. Routing the dependency through here keeps
+# `renzora_rust_script` from depending on `renzora_loose_plugins`
+# and vice versa (U4-3).
+renzora_loose_plugins = { path = "../renzora_loose_plugins" }
+renzora_compiler_cache = { path = "../renzora_compiler_cache" }
+
 # Loading the editor image beside the executable — see `src/editor_image.rs`.
 # Target-scoped because wasm has no dynamic linking at all: there the editor is
 # compiled into its own bundle and installed by a direct call, so pulling

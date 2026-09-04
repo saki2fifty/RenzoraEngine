@@ -7309,10 +7309,12 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "log",
+ "renzora_compiler_cache",
  "renzora_loose_plugins",
  "renzora_plugin",
  "renzora_postprocess",
  "renzora_runtime",
+ "renzora_rust_script",
  "renzora_static_plugins",
  "toml 0.8.23",
  "uuid",
@@ -7696,12 +7698,14 @@ dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "log",
+ "renzora_compiler_cache",
  "renzora_editor",
  "renzora_loose_plugins",
  "renzora_native_plugin",
  "renzora_plugin",
  "renzora_postprocess",
  "renzora_runtime",
+ "renzora_rust_script",
  "toml 0.8.23",
  "winres",
 ]
@@ -7832,6 +7836,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rcgen",
  "renzora",
+ "renzora_compiler_cache",
  "renzora_ember",
  "renzora_identity",
  "renzora_import",
@@ -8525,6 +8530,7 @@ dependencies = [
  "renzora_bloom_effect",
  "renzora_blueprint",
  "renzora_cloth",
+ "renzora_compiler_cache",
  "renzora_distance_fog",
  "renzora_dof",
  "renzora_dylib",
@@ -8540,6 +8546,7 @@ dependencies = [
  "renzora_lens_distortion",
  "renzora_light2d",
  "renzora_lighting",
+ "renzora_loose_plugins",
  "renzora_lumen",
  "renzora_motion_blur",
  "renzora_native_plugin",
@@ -8575,16 +8582,21 @@ name = "renzora_rust_script"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "crossbeam-channel",
  "libloading 0.8.9",
  "notify-debouncer-full",
  "renzora",
+ "renzora_compiler_cache",
+ "renzora_engine",
  "renzora_identity",
+ "renzora_plugin",
  "renzora_plugin_build",
  "renzora_runtime",
  "renzora_scripting",
  "renzora_static_scripts",
  "sha2",
  "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -8822,9 +8834,8 @@ dependencies = [
 name = "renzora_static_scripts"
 version = "0.1.0"
 dependencies = [
- "bevy",
- "renzora",
  "renzora_identity",
+ "renzora_plugin",
  "tempfile",
 ]
 

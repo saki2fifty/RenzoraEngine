@@ -455,6 +455,10 @@ renzora_plugin = { path = "crates/renzora_plugin", features = ["host"] }
 # (no source watcher, no editor-only features); a runtime host activates
 # loose plugins a user dropped into `plugins/`.
 renzora_loose_plugins = { path = "crates/renzora_loose_plugins" }
+# F4-3: the neutral owner of the editor's shared `BuildService`.
+renzora_compiler_cache = { path = "crates/renzora_compiler_cache" }
+# Phase 4: per-entity Tier-1 Rust scripts.
+renzora_rust_script = { path = "crates/renzora_rust_script" }
 # The generated list of plugins linked into the binary. Optional because it is
 # empty (and so pure overhead) in every build but a lean export that asked for
 # static plugins — see the `static_plugins` feature above.

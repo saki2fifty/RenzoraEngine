@@ -11,7 +11,7 @@ The scripting core is language-agnostic. `crates/renzora_scripting` owns the hoo
 | Extension | Backend | Where it comes from |
 |-----------|---------|---------------------|
 | `.lua` | Lua (mlua, Lua 5.4, vendored) | `plugins/lua` — a standalone C-ABI plugin |
-| `.rs` | Rust | `crates/renzora_rust_script` — compiled to a native plugin per script |
+| `.rs` | Rust | `crates/renzora_rust_script` — compiled to a small `cdylib` per script, dispatched through the same `ScriptEngine` Lua uses |
 
 Which language a game can be scripted in is decided by **which plugin is present**, not by how the engine was compiled. Removing `plugins/lua` removes Lua; adding a backend plugin adds a language. Two languages coexist in one project.
 
@@ -545,9 +545,9 @@ The `ScriptCommand` enum (`command.rs`) defines engine verbs that have **no name
 
 ## Rust scripts
 
-A `<project>/scripts/*.rs` file is not this API at all. It is compiled into a [native plugin](../extending/native-plugins.md) and called once per frame per entity with `&mut World` — full Bevy, no command vocabulary, no queue.
+A `<project>/**/*.rs` file uses the same vocabulary on this page — `Ctx`, `ScriptReply`, `ScriptCommand`, `ScriptHostCalls`, the same hooks. The host compiles it into a small `cdylib` linked only against `renzora_plugin`, validates the per-cdylib `CompiledScriptDesc` (version, descriptor size, prefix-hash chains, capability mask) through `check_compat`, and registers the per-cdylib `unsafe extern "C" fn` `ScriptEntry` against the script's canonical identity in the shared slot. Dispatch goes through `renzora_scripting::run_scripts` → `PluginScriptBackend::call_on_update` → per-cdylib trampoline → typed user function — exactly the same path Lua uses. The author's typed function never crosses the dynamic-library boundary; only the per-cdylib trampoline (an `unsafe extern "C"` function) does. See [Rust Scripts](../scripting/rust-scripts.md).
 
-`RustScriptBackend` claims the `.rs` extension so the Scripts component accepts one and the execution loop does not flag it as broken, but it returns no `ScriptCommand`s, because there genuinely are none: the whole reason to write Rust is the `&mut World` that no command vocabulary can stand in for. Gated on play mode exactly like Lua; recompiles on save, off the main thread. See [Rust Scripts](../scripting/rust-scripts.md).
+The legacy `renzora::script!(update)` shape (`fn update(_: &mut renzora::ScriptCtx) {}`) is recognised but rejected at load time with a clear migration diagnostic; the new author form is `renzora_plugin::rust_script!(update)` with `fn update(ctx: &Ctx, reply: &mut ScriptReply) -> Result<(), String>`.
 
 ## Blueprints
 

@@ -161,7 +161,7 @@ fn cfg_with(cache_root: &Path, sdk: &Path, n_workers: usize, n_children: usize) 
         n_workers: Some(n_workers),
         n_children: Some(n_children),
         shutdown_deadline: Duration::from_secs(5),
-        required_symbols: vec![b"renzora_script_update\0".to_vec()],
+        required_symbols_by_kind: std::collections::HashMap::new(),
     }
 }
 
@@ -473,7 +473,7 @@ fn prod_real_source_compiles_publishes_loads() {
         unreachable!()
     };
     // Now load the artifact via the real Tier-1 loader.
-    let lib = svc.load_published(&id, &fingerprint).expect("load_published");
+    let lib = svc.load_published(&id, &fingerprint, ArtifactKind::Tier1Script).expect("load_published");
     assert_eq!(lib.generation().0, 1, "first publish is gen-1");
     let sym_ptr = unsafe { lib.symbol(b"renzora_script_update\0") }.expect("symbol");
     assert!(!sym_ptr.is_null(), "symbol pointer non-null");
@@ -571,7 +571,7 @@ fn prod_compile_error_preserves_last_good_loaded_generation() {
         other => panic!("expected CompileFailed, got {other:?}"),
     }
     // The good generation must still be active and loadable.
-    let lib = svc.load_published(&id, &good_fp).expect("load good generation");
+    let lib = svc.load_published(&id, &good_fp, ArtifactKind::Tier1Script).expect("load good generation");
     let sym = unsafe { lib.symbol(b"renzora_script_update\0") }.expect("good symbol");
     assert!(!sym.is_null());
     drop(lib);
@@ -988,7 +988,7 @@ fn prod_loaded_library_mapping_protection_survives_owner_transfer() {
         other => panic!("expected Published, got {other:?}"),
     };
     // First scope: load, prove the symbol resolves.
-    let lib = svc.load_published(&id, &fingerprint).expect("load");
+    let lib = svc.load_published(&id, &fingerprint, ArtifactKind::Tier1Script).expect("load");
     let sym = unsafe { lib.symbol(b"renzora_script_update\0") }.expect("symbol");
     assert!(!sym.is_null(), "symbol must resolve while library is held");
     // Move the LoadedLibrary into a second scope. The mapping guard
@@ -1506,7 +1506,7 @@ fn prod_active_generation_is_never_removed_while_loaded() {
         other => panic!("expected Published, got {other:?}"),
     };
     // Load the artifact so it is in MappedSet.
-    let lib = svc.load_published(&id, &fp).expect("load");
+    let lib = svc.load_published(&id, &fp, ArtifactKind::Tier1Script).expect("load");
     let gen = lib.generation();
     // The cache must contain gen-<N>/... while lib is mapped.
     let gen_dir = svc

@@ -167,7 +167,14 @@ impl CrateTypeName {
 }
 
 /// Allow-listed capabilities the editor may request.
-pub const ALLOWED_CAPABILITIES: &[&str] = &["runtime", "static_plugins", "static_scripts"];
+pub const ALLOWED_CAPABILITIES: &[&str] = &[
+    "runtime",
+    "static_plugins",
+    "static_scripts",
+    // F4-1: scripts target the small `script` feature of
+    // `renzora_plugin` so `renzora_plugin::script::*` is in the SDK.
+    "script",
+];
 
 /// The authoritative, fully-resolved build configuration.
 #[derive(Clone, Debug)]

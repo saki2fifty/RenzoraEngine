@@ -189,8 +189,10 @@ impl rcgen::RemoteKeyPair for P256RemoteKey {
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
         // rcgen hands us the raw TBSCertificate; ECDSA-with-SHA256 hashes it
         // internally and the X.509 signature value is the ASN.1 DER Sig-Value.
-        let sig: p256::ecdsa::Signature =
-            self.key.try_sign(msg).map_err(|_| rcgen::Error::RemoteKeyError)?;
+        let sig: p256::ecdsa::Signature = self
+            .key
+            .try_sign(msg)
+            .map_err(|_| rcgen::Error::RemoteKeyError)?;
         Ok(sig.to_der().as_bytes().to_vec())
     }
 

@@ -54,11 +54,9 @@ fn marker_round_trip_per_id() {
     let ids = ["enemy/spin.rs", "props/spin.rs", "alone/script.rs"];
     let tmp = tempfile::tempdir().unwrap();
     for rel in ids {
-        let id = renzora_identity::CanonicalId::from_rooted(
-            renzora_identity::RootKind::Project,
-            rel,
-        )
-        .unwrap();
+        let id =
+            renzora_identity::CanonicalId::from_rooted(renzora_identity::RootKind::Project, rel)
+                .unwrap();
         renzora_rust_script::script_resolve::write_build_dir_marker(tmp.path(), &id).unwrap();
         let path = renzora_rust_script::script_resolve::build_dir_marker_path(tmp.path(), &id);
         let read = renzora_rust_script::script_resolve::read_build_dir_marker(&path).unwrap();

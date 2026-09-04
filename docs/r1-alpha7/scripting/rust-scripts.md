@@ -1,115 +1,267 @@
 # Rust Scripts
 
-A `.rs` file in your project's `scripts/` directory is compiled on the machine that opens the project and called once per frame for each entity carrying it — with the same `&mut World` an exclusive system gets.
+A `.rs` file anywhere under your project is compiled on the machine that opens it and run once per frame for each entity carrying it — through the same `ScriptEngine` Lua uses, via the versioned Tier 1 C-ABI in `renzora_plugin::script`. A Rust script does **not** link Bevy.
 
 ```rust
 // <project>/scripts/spin.rs
-use bevy::prelude::*;
-use renzora::ScriptCtx;
+use renzora_plugin::script::*;
 
-fn update(ctx: &mut ScriptCtx) {
-    let dt = ctx.delta();
-    if let Some(mut t) = ctx.get_mut::<Transform>() {
-        t.rotate_y(dt);
-    }
+fn update(ctx: &Ctx, _reply: &mut ScriptReply) -> Result<(), String> {
+    let _ = ctx.entity();
+    Ok(())
 }
 
-renzora::script!(update);
+renzora_plugin::rust_script!(update);
 ```
 
 Attach it exactly like a Lua script: drop it into the entity's **Scripts** component. Routing is by file extension, so `.rs`, `.lua` and `.blueprint` scripts coexist on the same entity.
 
 ## What you get
 
-Everything Bevy allows. Spawn hierarchies, build UI, insert and remove components, mutate assets, reach other entities, read and write resources. There is no vocabulary in the way, because the script and the engine share one Bevy.
+The same hook vocabulary Lua uses, plus the small Tier 1 `Ctx` API on top of it. Update-only scripts — the common case — declare a single `update` function and the dispatcher invokes it for `OnUpdate`; every other hook returns `NoHook` so the engine treats the script as a no-op rather than logging a missing hook every frame. A script that wants `OnReady`, `OnRpc`, etc. extends the dispatcher in `renzora_plugin::script::compiled` — keeping the contract identical to the other languages.
 
-That is the trade against Lua. A Lua script is sandboxed, hot-reloads instantly, and cannot take the editor down. A Rust script is native code with full access, costs about a second to compile, and a segfault in it is a segfault in the editor. Reach for one when the sandbox is what is stopping you.
+The full hook vocabulary:
 
-## `ScriptCtx`
+| Hook | Runs |
+|---|---|
+| `on_ready` | once, when the entity's scripts start |
+| `on_update` | every frame; the most common hook |
+| `on_rpc(name, from, args)` | an RPC targeted at this script |
+| `on_ui(name, entity, args)` | a UI event targeted at this script |
+| `on_draw(w, h)` | the script's draw callback |
+| `on_animation_event(name, entity)` | an animation event |
+| `on_http(callback, status, body)` | an HTTP response |
+| `on_player_event(id, joined)` | a player joined or left |
+| `on_scene_event(path, error)` | a scene finished loading, or failed |
+| `on_event(name, args)` | a broadcast game event |
 
-The context is your own entity plus the world. The short methods act on **yourself**, with no argument:
+The `Ctx` exposes the entity the script is attached to, the frame
+context (time, input, named entities, gamepads, action axes), and a
+small set of host calls for reading other components and entities.
+Mutations happen through `ScriptReply`: the hook returns `Result<(), String>`
+and the reply carries commands the host applies after the hook returns —
+the same model Lua uses.
+
+## The `Ctx` API
 
 | | |
 |---|---|
-| `ctx.get::<T>()` / `get_mut::<T>()` | a component on this entity |
-| `ctx.has::<T>()` | does this entity have it |
-| `ctx.insert(bundle)` / `remove::<T>()` | add or remove components on this entity |
-| `ctx.name()` | this entity's `Name`, if any |
-| `ctx.entity()` | this entity's id, for handing to something else |
-| `ctx.children()` / `ctx.parent()` | the hierarchy around it |
-| `ctx.delta()` / `ctx.elapsed()` | seconds since last frame / since startup |
-| `ctx.get_on::<T>(e)` / `get_mut_on::<T>(e)` | a component on some *other* entity |
-| `ctx.get_resource::<T>()` / `get_resource_mut::<T>()` | a resource, if it exists |
-| **`ctx.world()`** | the whole `&mut World` |
+| `ctx.frame.time.delta` | seconds since last frame |
+| `ctx.frame.time.elapsed` | seconds since startup |
+| `ctx.frame.input_movement` / `mouse_position` / `mouse_delta` | last frame's input |
+| `ctx.frame.keys_pressed` / `keys_just_pressed` / `keys_just_released` | sparse key tables |
+| `ctx.frame.gamepads` | connected gamepads and their state |
+| `ctx.frame.action_*` / `action_axis_*` | input action bindings |
+| `ctx.frame.named_entities` | `&str -> Entity` table |
+| `ctx.entity.entity_id` / `name` / `position` / `rotation` / `scale` | this entity |
+| `ctx.entity.parent_entity` / `children` | the hierarchy around it |
+| `ctx.entity.collisions_entered` / `collisions_exited` / `active_collisions` | collision events for this entity |
+| `ctx.entity.health` / `max_health` / `is_invincible` | gameplay state |
+| `ctx.entity.light_intensity` / `light_color` / `material_color` | visuals |
+| `ctx.host.get(entity, component, field)` | read one reflected field |
+| `ctx.host.get_component(entity, component)` | read every field of a component |
+| `ctx.host.get_components(entity)` | list the components on an entity |
+| `ctx.host.asset_progress()` | asset-loading progress for a loading-screen script |
+| `ctx.host.scene_load_state()` | the currently-loading scene |
+| `ctx.host.translate(key)` | localize a key |
 
-`world()` is not a last resort. Spawning, querying and asset access all go through it:
+## Returning commands
+
+A hook fills a `ScriptReply`:
 
 ```rust
-fn update(ctx: &mut ScriptCtx) {
-    let me = ctx.entity();
-    let world = ctx.world();
-    let count = world.query::<&Transform>().iter(world).count();
-    world.spawn((Name::new("spawned by a script"), ChildOf(me)));
+fn update(ctx: &Ctx, reply: &mut ScriptReply) -> Result<(), String> {
+    // Move the entity by its input axis.
+    let dx = ctx.frame.input_movement[0] * 5.0 * ctx.frame.time.delta;
+    let dy = ctx.frame.input_movement[1] * 5.0 * ctx.frame.time.delta;
+    reply.commands.push(ScriptCommand::Translate { dx, dy, dz: 0.0 });
+    Ok(())
 }
 ```
 
-`insert` and `remove` silently do nothing if the entity has been despawned — by an earlier script this frame, or by this one. You do not have to check you still exist before every write.
+A reply can hold commands, prop writes (`vars: Vec<(String, ScriptValue)>`),
+draw commands (`draws: Vec<DrawCmd>`), and an optional text payload
+(`text: Option<String>` for the REPL). The host applies commands after
+the hook returns; var writes are folded back into the script's
+`ScriptVariables`.
 
 ## When it runs
 
-Exactly when a Lua script does: in play mode, in Simulate, or when that script's **play button** in the inspector is on. Nothing runs while you are arranging the scene in edit mode — a script that spawns or despawns would otherwise start doing so the moment you dropped it on an entity.
+Exactly when a Lua script does: in play mode, in Simulate, or when that
+script's **play button** in the inspector is on. Nothing runs while you
+are arranging the scene in edit mode — a script that spawns or
+despawns would otherwise start doing so the moment you dropped it on
+an entity.
 
 ## Recompiling
 
-Saving a script rebuilds it. The compile runs off the main thread, so the editor does not freeze; only the load and pointer swap happen on the main thread. Compile errors, panics and a missing SDK all appear in the **Console** panel as well as the log — with diagnostics pointing at `scripts/foo.rs`, not at the staged copy the compiler actually saw.
+Saving a script rebuilds it through the shared `renzora_compiler_cache::BuildService`,
+the same one loose plugins use. The compile runs off the main thread; only the
+descriptor load and pointer swap happen on the main thread. Compile errors,
+panics and a missing SDK all appear in the **Console** panel — with diagnostics
+pointing at the user's source path, not at the staged copy.
 
-A script that fails to compile is not retried until you edit it again, so one error does not become a scrolling wall.
+A script that fails to compile is not retried until you edit it again, so one
+error does not become a scrolling wall. Multiple file events received before
+submission are combined into one build. When a newer edit is submitted while
+an older build is running, the older request is marked superseded and only the
+newest successful version can become active.
 
-Every reload leaks its old image, roughly 200 KB. It has to: components the script inserted carry `Drop` impls and vtables living in that image, so unmapping it would turn a later despawn into a jump through freed memory. A restart reclaims all of it.
+The watcher reconciles a debouncer batch against the canonical identity
+index: a remove-then-create on the same path is a rename; a bare remove is a
+deletion; a bare create is a new compile. The watcher can attach after the
+editor has started. Switching projects retires the previous project's scripts,
+moves the watcher to the new project, and cancels old in-flight builds without
+waiting for them. Closing the project detaches its watcher.
 
-The watcher keeps a per-id build state: each in-flight build is one entry holding its `Task`. A Rust compilation can take many editor frames to finish; while it is in flight, edits to the same script set a dirty flag rather than starting a parallel build. When the old task completes with the dirty flag set, its result is discarded and a single replacement build is spawned immediately — no wait for another save. Deletions retire the script straight away, even when no SDK is installed — retirement is independent of building.
+## The compiled-script boundary
 
-Switching to a different project retires the previous project's scripts and clears any in-flight builds belonging to it; a project with no scripts leaves no script ids behind. A project that contains the same relative filename as the previous one resolves the leaf to the new project's id only.
+A `.rs` script compiles to a small `cdylib`. The host first asks the library for
+the descriptor size, validates it, allocates host-owned storage, and then asks
+the library to copy its descriptor into that storage. This prevents the host
+from reading a foreign structure before its size is known. The copied
+C-compatible descriptor has this shape:
+
+```text
+#[repr(C)]
+pub struct CompiledScriptDesc {
+    pub abi_version: u32,                   // == COMPILED_SCRIPT_ABI (currently 1)
+    pub descriptor_size: u32,               // mem::size_of::<CompiledScriptDesc>()
+    pub required_capabilities: u32,         // bitmask of capability bits the script needs
+    pub _pad: u32,                          // reserved
+    pub call_prefix_hashes: *const u64,    // append-stable hash chain over ScriptCall's fields
+    pub call_prefix_count: usize,
+    pub host_prefix_hashes: *const u64,    // append-stable hash chain over ScriptHostCalls's fields
+    pub host_prefix_count: usize,
+    pub entry: ScriptEntry,                 // unsafe extern "C" fn(*const ScriptCall) -> ScriptStatus
+}
+```
+
+The loader validates all of `abi_version`, `descriptor_size`, the prefix-hash
+chains, and the capability mask through [`CompiledScriptDesc::check_compat`](../../api/scripting.md)
+before publishing the descriptor. A malformed or version-skewed
+artifact is refused with a clear diagnostic; the previous good
+generation stays active.
+
+The descriptor's `entry` is the per-cdylib trampoline — also
+`unsafe extern "C" fn(*const ScriptCall) -> ScriptStatus` — generated
+inline by the `rust_script!` macro inside the cdylib itself. The
+trampoline decodes the call, statically invokes the author's typed
+`update(ctx, reply) -> Result<(), String>` by name (compiled into
+the same cdylib), and writes the reply through the call's `out`
+sink. Calling the typed function does **not** cross the C ABI,
+**does not** carry a `Result`, `String`, `Vec`, or trait object
+across the dynamic-library boundary, and **does not** require the
+host to know about Rust-ABI types. The compiler never has to be
+the same `rustc` as the host's.
+
+The author-facing macro emits the descriptor, the trampoline, and
+the typed entry. A `pub fn __tier1_entry` is also emitted so the
+lean exporter's aggregator can collect the typed entry without
+linking Bevy or the editor.
 
 ## Requirements
 
-A Rust script is a [native plugin](../extending/native-plugins.md) with a per-entity convention on top — same compiler driver, same SDK, same loading. So the requirements are the plugin requirements:
+- The shared compiler cache — see [Build Cache](../editor-dev/build-cache.md).
 
-- The **plugin SDK** must be installed (**Settings → Plugins**). Without it, nothing compiles and the Console says so once.
-- The pinned `rustc` must be present. The editor names the version and offers to install it.
-- The editor must have been **built on the platform you are running it on**. An editor cross-built for another operating system carries an SDK whose proc macros are for the machine that compiled it, and no Rust script will compile against it. The tell is `can't find crate for bevy_derive`, followed by every name in `bevy::prelude` reported missing at once — a script that looks broken but is not. See [The SDK cannot be cross-built](../extending/native-plugins.md#the-sdk-cannot-be-cross-built).
+A Rust script is a small `cdylib` that depends only on `renzora_plugin`. The
+crate compiles in a second or two on a warm cache and in tens of seconds on
+a cold one. There is no separate plugin SDK to install; the cache shares
+its compiler with every loose plugin.
 
-Build artifacts land in `<project>/.renzora/scripts/`. They are derived — nothing there needs to be looked at or committed.
+The `BuildService` is shared between loose plugins and Rust scripts: the
+editor constructs one `Arc<BuildService>` and hands it to both consumers.
+The cache key differs (`cdylib-plugin` vs `cdylib-script`), so a plugin
+edit does not invalidate a script cache entry.
+
+Build artifacts land under the shared cache root
+(`<project>/.loose-cache/` or whichever root the editor points the
+`BuildService` at). They are derived — nothing there needs to be looked at
+or committed.
 
 ## In an exported game
 
-Scripts run in exports. How they get there depends on the packaging mode, and neither route asks anything of the player — no SDK, no Rust toolchain, nothing to install.
+Scripts run in exports. How they get there depends on the packaging mode,
+and neither route asks anything of the player — no SDK, no Rust toolchain.
 
 | Packaging | How the script gets in | Compiled by |
 |---|---|---|
-| Separate files / Single binary | shipped as a library beside the game | the editor, at export |
-| Lean single binary | compiled into the executable | the export build |
+| Copy-based | shipped as a library beside the game, with a `scripts.index` manifest | the editor, at export |
+| Lean | compiled into the executable via a generated static-script table | the export build |
 
-**Copy-based** exports carry the same `bevy_dylib` and `renzora_dylib` the editor compiled your script against, so it loads exactly as it does in the editor. The export copies the library the editor already built — a script that has never compiled has nothing to ship, and the export says so rather than omitting it quietly.
+**Copy-based** exports carry the latest validated `cdylib` and a
+canonical-id-keyed manifest. A script that has never compiled is reported
+rather than silently omitted; a failed build never ships.
 
-**Lean** exports link Bevy statically and share no image, so there is no library for a script to bind to. Instead each `scripts/*.rs` becomes a module of the binary and its entry point goes into a table the dispatcher reads. Everything after that is identical: one function per entity per frame, keyed by **canonical project-relative identity** (`project://enemy/spin.rs`), inside the same panic guard. A script behaves the same in the editor and in an export, or an export could not be tested by playing it. The lean exporter writes exactly one canonical row per script — bare-leaf aliases are derived by `LoadedScripts::insert` from the canonical id at load time, so the alias index never sees two competing ids for one script. The lean-export workspace assembly (source sync, feature/profile patches, static-plugin and static-script staging) lives in `renzora_export::assemble_lean_export_workspace` and is exercised end-to-end by `cargo check --profile dist` in the production workspace.
+**Lean** exports link nothing extra — each project's scripts are emitted
+by the lean exporter's generated `renzora_static_scripts` aggregator
+crate, which collects one `pub fn __tier1_entry` per script module and
+publishes them as a `Vec<(CanonicalId, TypedScriptFn)>` table. The
+dispatcher trampoline (`renzora_plugin::script::dispatcher_trampoline`)
+is the same in the editor and in an export. A script behaves the same
+in the editor and in an export, or an export cannot be tested by
+playing it.
 
-Every `.rs` in the project is compiled in, not only the ones a scene currently references — a scene can be loaded at runtime and a script attached at runtime, so any "which are used" analysis would eventually be wrong in the direction that breaks a game silently. An unused script costs bytes, never frame time: the dispatcher only ever looks up identities a live entity asked for.
-
-Scripts may live anywhere in the project, not only in `scripts/`. Where two folders hold the same file name, each is reachable by its full project-relative path. A bare file-name lookup (no separators) is permitted as a compatibility alias **only when it uniquely resolves**; when two scripts share the same leaf name, the editor surfaces the ambiguity at lookup time and the user must specify the full path.
+Scripts may live anywhere in the project, not only in `scripts/`. Where two
+folders hold the same file name, each is reachable by its full
+project-relative path. A bare file-name lookup (no separators) is
+permitted as a compatibility alias **only when it uniquely resolves**;
+when two scripts share the same leaf name, the editor surfaces the
+ambiguity at lookup time and the user must specify the full path.
 
 ## Limits
 
-- **A cross-platform copy-based export ships no scripts.** The libraries it would ship are host-shaped — a `.dll` is no use to a Linux player — and compiling for another OS needs an SDK for that target. Export *lean* for another platform instead, which compiles the scripts into the binary and has no such limit.
-- **No props.** A Lua script declares tunables in a table the backend parses. The Rust equivalent would read attributes off the source; until then, a script's tunables are ordinary components on the entity, which the inspector already edits.
-- **No REPL.** Evaluating a Rust expression would mean invoking the compiler and mapping a library per expression.
-- **One file.** A script is a single `.rs`; a plugin is the answer when you need modules.
+- **No `&mut World`.** A compiled Rust script targets the small Tier 1
+  C-ABI; unrestricted Bevy access belongs to the restart-required
+  engine-plugin tier (see [Native Plugins](../extending/native-plugins.md)).
+- **No props-from-source attributes.** A script's tunables are ordinary
+  components on the entity, which the inspector already edits.
+- **No REPL.** Evaluating a Rust expression would mean invoking the
+  compiler per expression.
+- **One file per script.** A script is a single `.rs`; a plugin is the
+  answer when you need modules.
+
+## The legacy `renzora::script!` form
+
+A source file that still uses `renzora::script!(update)` with a
+`fn update(_: &mut renzora::ScriptCtx) {}` shape is detected by
+`crates/renzora_identity::Recogniser` as `Declaration::LegacyRecognised`.
+The discovery code surfaces a clear migration diagnostic — the file
+is **never** compiled through the unsafe old ABI:
+
+```
+[rust-script] <path> still uses `renzora::script!`; the Phase 4 Tier 1
+form is `renzora_plugin::rust_script!`. Compile-time Bevy access moved
+to the restart-required engine-plugin tier.
+```
+
+Migrate the script in two steps: replace the macro name and the
+function signature:
+
+```rust
+// Before (legacy, no longer loaded)
+use renzora::ScriptCtx;
+fn update(_ctx: &mut ScriptCtx) {}
+renzora::script!(update);
+
+// After (Phase 4 Tier 1)
+use renzora_plugin::script::*;
+fn update(ctx: &Ctx, _reply: &mut ScriptReply) -> Result<(), String> { Ok(()) }
+renzora_plugin::rust_script!(update);
+```
+
+The macro emits the compiled-script descriptor and its `extern "C"`
+entry automatically. A `pub fn __tier1_entry` is also emitted so the
+lean exporter's aggregator can collect the script without linking
+Bevy or the editor.
 
 ## Rust scripts and loose plugins
 
 A loose `<plugin-root>/<name>.rs` plugin and an editor Rust script are
-different features. Loose plugins use the small `renzora_plugin` interface
-and the shared compiler cache. Editor Rust scripts—the files described on
-this page—continue to use the Rust-script compiler and have full Bevy access.
-They will share the cached build service after the script interface migration
-is complete.
+both Tier 1 `cdylib`s against `renzora_plugin`, but they target different
+entry points. A loose plugin registers components, systems, render
+passes, and bindings through `renzora::add!`; a Rust script registers
+a compiled-script descriptor through `renzora_plugin::rust_script!`.
+Both go through the shared `BuildService`; the cache key differs
+(`cdylib-plugin` vs `cdylib-script`) so a plugin edit does not invalidate
+a script cache entry.

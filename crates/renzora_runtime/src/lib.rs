@@ -42,6 +42,14 @@ extern crate renzora_dylib;
 extern crate renzora_ember_dylib;
 
 pub use renzora;
+// Loose-plugin host re-export. The acceptance harness
+// (host_assembly's test code) and the editor entry points
+// both reach `LoosePluginHost` through this crate, so the
+// host-as-host re-exports the type. U4-3: the script feature
+// crate can no longer depend on loose plugins directly; this
+// indirection lets the test harness reach the loose host
+// types via the host crate.
+pub use renzora_loose_plugins;
 
 // Re-exported for the binaries: `src/main.rs` reaches the crash hook and the
 // server plugin through `renzora_runtime::` rather than depending on them
@@ -62,6 +70,11 @@ pub use renzora_native_plugin;
 /// Loading the editor image beside the executable — see the module docs for why
 /// one binary can be both the editor and the game.
 pub mod editor_image;
+/// Editor / runtime extension-host assembly: the single source of
+/// truth for the shared `Arc<BuildService>` between loose plugins and
+/// Rust scripts. U4-3 owns this; the two feature crates depend on
+/// nothing more than `renzora_compiler_cache` types exposed here.
+pub mod host_assembly;
 mod plugins;
 mod render_scale;
 mod viewport_stretch;
@@ -183,7 +196,11 @@ pub fn platform_wgpu_settings() -> bevy::render::settings::WgpuSettings {
 /// same backend the renderer will use and check it reports
 /// `SolariPlugins::required_wgpu_features()`. Any failure ⇒ `false` (Solari
 /// stays inert; the engine boots normally on non-RT GPUs).
-#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32"), feature = "solari"))]
+#[cfg(all(
+    not(target_os = "android"),
+    not(target_arch = "wasm32"),
+    feature = "solari"
+))]
 pub fn raytracing_supported() -> bool {
     use std::sync::OnceLock;
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
@@ -281,13 +298,12 @@ pub fn gpu_is_integrated() -> bool {
             backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let adapter = bevy::tasks::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
+        let adapter =
+            bevy::tasks::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: None,
-            },
-        ));
+            }));
         match adapter {
             Ok(adapter) => {
                 let info = adapter.get_info();
@@ -407,79 +423,79 @@ pub fn add_default_rendering(app: &mut App, is_editor: bool) {
     // race — see the function doc for why the IO workers need a larger stack.
     init_io_task_pool_with_large_stack();
     let plugins = DefaultPlugins
-            .set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(Box::new(platform_wgpu_settings())),
+        .set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(Box::new(platform_wgpu_settings())),
+            ..default()
+        })
+        .set(ImagePlugin {
+            default_sampler: bevy::image::ImageSamplerDescriptor {
+                address_mode_u: bevy::image::ImageAddressMode::Repeat,
+                address_mode_v: bevy::image::ImageAddressMode::Repeat,
+                address_mode_w: bevy::image::ImageAddressMode::Repeat,
+                // Trilinear + 16x anisotropic filtering by default. Bevy's
+                // default sampler runs with `anisotropy_clamp = 1` which
+                // looks blocky on textures viewed at oblique angles
+                // (brick walls, ground planes). Most assets here come from
+                // Sketchfab GLBs without baked mipmaps — anisotropy alone
+                // already cleans up the worst aliasing; full mipmap
+                // generation is a separate piece of work.
+                mag_filter: bevy::image::ImageFilterMode::Linear,
+                min_filter: bevy::image::ImageFilterMode::Linear,
+                mipmap_filter: bevy::image::ImageFilterMode::Linear,
+                anisotropy_clamp: 16,
                 ..default()
-            })
-            .set(ImagePlugin {
-                default_sampler: bevy::image::ImageSamplerDescriptor {
-                    address_mode_u: bevy::image::ImageAddressMode::Repeat,
-                    address_mode_v: bevy::image::ImageAddressMode::Repeat,
-                    address_mode_w: bevy::image::ImageAddressMode::Repeat,
-                    // Trilinear + 16x anisotropic filtering by default. Bevy's
-                    // default sampler runs with `anisotropy_clamp = 1` which
-                    // looks blocky on textures viewed at oblique angles
-                    // (brick walls, ground planes). Most assets here come from
-                    // Sketchfab GLBs without baked mipmaps — anisotropy alone
-                    // already cleans up the worst aliasing; full mipmap
-                    // generation is a separate piece of work.
-                    mag_filter: bevy::image::ImageFilterMode::Linear,
-                    min_filter: bevy::image::ImageFilterMode::Linear,
-                    mipmap_filter: bevy::image::ImageFilterMode::Linear,
-                    anisotropy_clamp: 16,
-                    ..default()
-                },
-            })
-            // Allow loading assets from absolute paths outside a registered
-            // source. Bevy's default (`Deny`) blocks it as a path-traversal
-            // guard, but the editor legitimately loads absolute paths (the
-            // custom `EmbeddedAssetReader` resolves them) — e.g. the marketplace
-            // 3D preview stages a downloaded `.glb` into a temp cache and loads
-            // it by absolute path. Mirrors `renzora_xr`.
-            .set(bevy::asset::AssetPlugin {
-                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+            },
+        })
+        // Allow loading assets from absolute paths outside a registered
+        // source. Bevy's default (`Deny`) blocks it as a path-traversal
+        // guard, but the editor legitimately loads absolute paths (the
+        // custom `EmbeddedAssetReader` resolves them) — e.g. the marketplace
+        // 3D preview stages a downloaded `.glb` into a temp cache and loads
+        // it by absolute path. Mirrors `renzora_xr`.
+        .set(bevy::asset::AssetPlugin {
+            unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
+            ..default()
+        })
+        .set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Renzora".into(),
+                // Initial values — `apply_window_config` overwrites these
+                // from `CurrentProject` once the project is loaded. The
+                // editor draws its own title bar so it wants
+                // `decorations: false`; the runtime uses the OS title
+                // bar and needs decorations on **at creation time** so
+                // winit sizes the inner (renderable) area correctly.
+                // Flipping decorations on after the window exists makes
+                // Windows eat the title-bar height from the existing
+                // outer size, shrinking the render surface and causing
+                // sprites authored against window.width/height to clip
+                // off the right/bottom.
+                // Editor: false (it draws its own chrome). Runtime: true
+                // (OS title bar). Decided at runtime via `is_editor`.
+                decorations: !is_editor,
+                resizable: true,
+                // Web: bind to the canvas in the page and track its size.
+                //
+                // Without `canvas` winit creates its OWN canvas and appends
+                // it, so the page's stylesheet never reaches the surface
+                // Bevy actually draws to. Without `fit_canvas_to_parent`
+                // (default false) the surface keeps its default resolution
+                // regardless of the viewport — the first browser run
+                // rendered the whole editor into a ~1280x720 box in the
+                // corner of a black page.
+                //
+                // The selector must match the `<canvas id="bevy">` the
+                // shell writes (see `xtask::wasm::write_shell` and
+                // `build-all.sh`'s `write_web_shell` — both, they are
+                // duplicated on purpose).
+                #[cfg(target_arch = "wasm32")]
+                canvas: Some("#bevy".into()),
+                #[cfg(target_arch = "wasm32")]
+                fit_canvas_to_parent: true,
                 ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Renzora".into(),
-                    // Initial values — `apply_window_config` overwrites these
-                    // from `CurrentProject` once the project is loaded. The
-                    // editor draws its own title bar so it wants
-                    // `decorations: false`; the runtime uses the OS title
-                    // bar and needs decorations on **at creation time** so
-                    // winit sizes the inner (renderable) area correctly.
-                    // Flipping decorations on after the window exists makes
-                    // Windows eat the title-bar height from the existing
-                    // outer size, shrinking the render surface and causing
-                    // sprites authored against window.width/height to clip
-                    // off the right/bottom.
-                    // Editor: false (it draws its own chrome). Runtime: true
-                    // (OS title bar). Decided at runtime via `is_editor`.
-                    decorations: !is_editor,
-                    resizable: true,
-                    // Web: bind to the canvas in the page and track its size.
-                    //
-                    // Without `canvas` winit creates its OWN canvas and appends
-                    // it, so the page's stylesheet never reaches the surface
-                    // Bevy actually draws to. Without `fit_canvas_to_parent`
-                    // (default false) the surface keeps its default resolution
-                    // regardless of the viewport — the first browser run
-                    // rendered the whole editor into a ~1280x720 box in the
-                    // corner of a black page.
-                    //
-                    // The selector must match the `<canvas id="bevy">` the
-                    // shell writes (see `xtask::wasm::write_shell` and
-                    // `build-all.sh`'s `write_web_shell` — both, they are
-                    // duplicated on purpose).
-                    #[cfg(target_arch = "wasm32")]
-                    canvas: Some("#bevy".into()),
-                    #[cfg(target_arch = "wasm32")]
-                    fit_canvas_to_parent: true,
-                    ..default()
-                }),
-                ..default()
-            });
+            }),
+            ..default()
+        });
     // Log layer:
     // - Desktop ALWAYS installs the Scene Diagnostics capture layer so the
     //   editor's "Recent Runtime Warnings" feed works. In a shipped game the
@@ -489,8 +505,11 @@ pub fn add_default_rendering(app: &mut App, is_editor: bool) {
     //   binary's writer and the bundle's reader touch one buffer.
     // - The fmt layer is the editor's default ANSI formatter (real terminal)
     //   or the exported game's plain, span-free formatter.
-    let fmt_layer: fn(&mut App) -> Option<bevy::log::BoxedFmtLayer> =
-        if is_editor { editor_fmt_layer } else { runtime_fmt_layer };
+    let fmt_layer: fn(&mut App) -> Option<bevy::log::BoxedFmtLayer> = if is_editor {
+        editor_fmt_layer
+    } else {
+        runtime_fmt_layer
+    };
     let plugins = plugins.set(bevy::log::LogPlugin {
         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         custom_layer: renzora::runtime_warnings::runtime_warnings_layer,
@@ -510,7 +529,10 @@ pub fn add_default_rendering(app: &mut App, is_editor: bool) {
         // carries `wgpu=error` among others, and dropping it would swap this
         // flood for a louder one.
         #[cfg(target_arch = "wasm32")]
-        filter: format!("{},bevy_render::error_handler=off", bevy::log::DEFAULT_FILTER),
+        filter: format!(
+            "{},bevy_render::error_handler=off",
+            bevy::log::DEFAULT_FILTER
+        ),
         ..default()
     });
 
@@ -533,16 +555,16 @@ pub fn add_default_rendering(app: &mut App, is_editor: bool) {
         // SteamVR) but isn't using VR would otherwise pay it on every flat editor
         // launch. `RENZORA_NO_XR=1` (or `--no-xr`) opts out: skip the XR plugins
         // entirely and keep pipelined rendering on.
-        let no_xr = std::env::var_os("RENZORA_NO_XR").is_some()
-            || std::env::args().any(|a| a == "--no-xr");
+        let no_xr =
+            std::env::var_os("RENZORA_NO_XR").is_some() || std::env::args().any(|a| a == "--no-xr");
         if is_editor && !no_xr && renzora_xr::runtime_available() {
             info!(
                 "[runtime] OpenXR runtime detected — booting XR-capable editor \
                  (pipelined rendering disabled; set RENZORA_NO_XR=1 for a flat, \
                  pipelined boot if you're not using a headset)"
             );
-            let base = plugins
-                .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
+            let base =
+                plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
             (renzora_xr::xr_plugins(base, false), true)
         } else {
             if is_editor && no_xr && renzora_xr::runtime_available() {
@@ -630,9 +652,9 @@ fn render_error_policy(
         // Recoverable: the device went away (driver reset / GPU hang / XR
         // compositor reset). Re-create the renderer and carry on — this is the
         // one case worth surviving silently.
-        ErrorType::DeviceLost => {
-            RenderErrorPolicy::Recover(RenderCreation::Automatic(Box::new(platform_wgpu_settings())))
-        }
+        ErrorType::DeviceLost => RenderErrorPolicy::Recover(RenderCreation::Automatic(Box::new(
+            platform_wgpu_settings(),
+        ))),
         // Transient surface/swapchain faults are expected during legitimate
         // reconfiguration — entering/leaving play mode, window resize, viewport
         // render-target swaps — where the surface texture is destroyed mid-submit
@@ -668,7 +690,9 @@ fn render_error_policy(
             use std::sync::{Mutex, OnceLock};
             static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-            let cascade = error.description.contains("is invalid due to a previous error");
+            let cascade = error
+                .description
+                .contains("is invalid due to a previous error");
             let first = SEEN
                 .get_or_init(|| Mutex::new(HashSet::new()))
                 .lock()

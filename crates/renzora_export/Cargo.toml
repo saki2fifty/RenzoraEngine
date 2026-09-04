@@ -17,6 +17,12 @@ renzora_rust_script = { path = "../renzora_rust_script" }
 # For `read_scope` — asking a built plugin library whether it belongs in a game,
 # rather than parsing the source for an answer that describes a different build.
 renzora_native_plugin = { path = "../renzora_native_plugin" }
+# Phase 4 cached compilation: the copy-based export reads compiled
+# script artifacts from the BuildService's cache (where the editor
+# writes every successful build) instead of project-local
+# `.renzora/scripts/<dir>/` directories staged by the deprecated
+# private runner. The lean path uses BuildService too.
+renzora_compiler_cache = { path = "../renzora_compiler_cache" }
 # Canonical plugin/script identity used by Phase 1 commit 1.3 (editor/export
 # identity agreement + bare-alias ambiguity reporting). Discovery-enabled
 # since this crate's signature is filesystem-aware.

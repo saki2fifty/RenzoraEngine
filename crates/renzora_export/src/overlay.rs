@@ -249,8 +249,16 @@ impl ExportOverlayState {
         }
         self.presets = crate::presets::load(project_root);
         self.presets_loaded_for = Some(project_root.to_path_buf());
-        self.active_preset = if self.presets.is_empty() { None } else { Some(0) };
-        if let Some(p) = self.active_preset.and_then(|i| self.presets.get(i)).cloned() {
+        self.active_preset = if self.presets.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        if let Some(p) = self
+            .active_preset
+            .and_then(|i| self.presets.get(i))
+            .cloned()
+        {
             p.apply(self);
         }
     }
@@ -264,7 +272,9 @@ impl ExportOverlayState {
     /// the edits: switching preset, closing the modal, starting an export.
     pub fn sync_active_preset(&mut self) {
         let Some(i) = self.active_preset else { return };
-        let Some(name) = self.presets.get(i).map(|p| p.name.clone()) else { return };
+        let Some(name) = self.presets.get(i).map(|p| p.name.clone()) else {
+            return;
+        };
         let updated = crate::presets::ExportPreset::capture(name, self);
         self.presets[i] = updated;
     }
@@ -273,7 +283,9 @@ impl ExportOverlayState {
     /// logged rather than surfaced, because it must not block an export that is
     /// otherwise fine.
     pub fn save_presets(&self) {
-        let Some(root) = self.presets_loaded_for.as_deref() else { return };
+        let Some(root) = self.presets_loaded_for.as_deref() else {
+            return;
+        };
         if let Err(e) = crate::presets::save(root, &self.presets) {
             warn!("could not save export presets: {e}");
         }
@@ -536,9 +548,7 @@ fn export_android_apk(
         .map_err(std::io::Error::other)?;
     writer.write_all(&rpak_bytes)?;
 
-    writer
-        .finish()
-        .map_err(std::io::Error::other)?;
+    writer.finish().map_err(std::io::Error::other)?;
 
     Ok(())
 }
@@ -612,9 +622,7 @@ fn export_ios_app(
         .map_err(std::io::Error::other)?;
     writer.write_all(&rpak_bytes)?;
 
-    writer
-        .finish()
-        .map_err(std::io::Error::other)?;
+    writer.finish().map_err(std::io::Error::other)?;
 
     Ok(())
 }
@@ -740,9 +748,7 @@ fn export_wasm_zip(
         .map_err(std::io::Error::other)?;
     writer.write_all(index_html.as_bytes())?;
 
-    writer
-        .finish()
-        .map_err(std::io::Error::other)?;
+    writer.finish().map_err(std::io::Error::other)?;
 
     info!("[export] WASM zip written to {}", zip_path.display());
 
@@ -850,6 +856,43 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
     // The dedicated server reuses the game binary (run with `--server`), so
     // there's no separate server template to resolve here.
 
+    // Phase 4 cached compilation: the copy-based export reads the
+    // script artifacts from the same `BuildService` cache the editor
+    // writes to. Both loose plugins and scripts share one
+    // `Arc<BuildService>`; we read it from the loose-plugin host's
+    // resource. If neither is installed (a stripped binary that
+    // doesn't carry loose plugins), we construct a fresh one with
+    // a project-local cache root so the export is self-contained.
+    let build_service: std::sync::Arc<renzora_compiler_cache::BuildService> = world
+        .get_resource::<renzora_loose_plugins::LooseBuildService>()
+        .map(|s| s.0.clone())
+        .unwrap_or_else(|| {
+            // Last-ditch fallback: build a private BuildService the
+            // export can read from. Cache root lives next to the
+            // export output so the test/dev path does not require
+            // the editor to have run.
+            let cache_root = output_dir
+                .parent()
+                .map(|p| p.join(".compiler_cache"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".compiler_cache"));
+            let sdk_path = std::path::PathBuf::from("sdk");
+            let cfg = renzora_compiler_cache::BuildServiceConfig {
+                cache_root,
+                profile: renzora_compiler_cache::types::BuildProfile::Dist,
+                sdk_path,
+                toolchain_stamp: "renzora-export".into(),
+                compiler_service_schema: renzora_compiler_cache::types::COMPILER_SERVICE_SCHEMA,
+                n_workers: Some(1),
+                n_children: Some(1),
+                shutdown_deadline: std::time::Duration::from_secs(5),
+                required_symbols_by_kind: std::collections::HashMap::from([(
+                    renzora_compiler_cache::types::ArtifactKind::Tier1Script,
+                    vec![b"renzora_plugin_tier1_script_desc\0".to_vec()],
+                )]),
+            };
+            renzora_compiler_cache::BuildService::new(cfg).expect("BuildService")
+        });
+
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
 
@@ -877,6 +920,7 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
             packaging_mode,
             compression_level,
             output_dir,
+            build_service,
             window_mode,
             window_width,
             window_height,
@@ -914,6 +958,7 @@ fn export_worker(
     packaging_mode: PackagingMode,
     compression_level: i32,
     output_dir: std::path::PathBuf,
+    build_service: std::sync::Arc<renzora_compiler_cache::BuildService>,
     window_mode: WindowMode,
     window_width: u32,
     window_height: u32,
@@ -1097,31 +1142,30 @@ fn export_worker(
     // the output dir so neither the dev runtime nor cargo's build output is ever
     // modified in place. Returns the original path when compression is off or
     // fails, so every caller can use the result unconditionally.
-    let compress_exe = |src: &std::path::Path,
-                        tx: &mpsc::Sender<ExportMsg>|
-     -> std::path::PathBuf {
-        let Some(upx) = upx_tool.as_ref() else {
-            return src.to_path_buf();
+    let compress_exe =
+        |src: &std::path::Path, tx: &mpsc::Sender<ExportMsg>| -> std::path::PathBuf {
+            let Some(upx) = upx_tool.as_ref() else {
+                return src.to_path_buf();
+            };
+            let tmp = output_dir.join(format!("{binary_name}.upx-tmp"));
+            let _ = tx.send(ExportMsg::Progress("Compressing binary with UPX…".into()));
+            match crate::upx::compress_to_temp(upx, src, &tmp) {
+                Ok((packed, before, after)) => {
+                    let _ = tx.send(ExportMsg::Progress(crate::upx::savings_line(
+                        &binary_name,
+                        before,
+                        after,
+                    )));
+                    packed
+                }
+                Err(e) => {
+                    let _ = tx.send(ExportMsg::Progress(format!(
+                        "UPX could not compress the binary ({e}) — shipping it uncompressed"
+                    )));
+                    src.to_path_buf()
+                }
+            }
         };
-        let tmp = output_dir.join(format!("{binary_name}.upx-tmp"));
-        let _ = tx.send(ExportMsg::Progress("Compressing binary with UPX…".into()));
-        match crate::upx::compress_to_temp(upx, src, &tmp) {
-            Ok((packed, before, after)) => {
-                let _ = tx.send(ExportMsg::Progress(crate::upx::savings_line(
-                    &binary_name,
-                    before,
-                    after,
-                )));
-                packed
-            }
-            Err(e) => {
-                let _ = tx.send(ExportMsg::Progress(format!(
-                    "UPX could not compress the binary ({e}) — shipping it uncompressed"
-                )));
-                src.to_path_buf()
-            }
-        }
-    };
 
     let result = if is_ios {
         export_ios_app(
@@ -1158,8 +1202,10 @@ fn export_worker(
         // host-shaped libraries, and the template they sit beside carries the
         // shared images they were compiled against. A lean export takes the other
         // route entirely and compiles them into the binary.
-        if matches!(packaging_mode, PackagingMode::SeparateFiles | PackagingMode::SingleBinary)
-            && Platform::current() == Some(platform)
+        if matches!(
+            packaging_mode,
+            PackagingMode::SeparateFiles | PackagingMode::SingleBinary
+        ) && Platform::current() == Some(platform)
         {
             let tx_s = tx.clone();
             let mut sp = |m: String| {
@@ -1173,9 +1219,13 @@ fn export_worker(
             // Best-effort: a game that ships without its scripts is still a
             // playable game, and failing the whole export over one is a worse
             // trade than saying so.
-            if let Err(e) =
-                crate::build::stage_prebuilt_scripts(&project.path, &output_dir, lib_ext, &mut sp)
-            {
+            if let Err(e) = crate::build::stage_prebuilt_scripts(
+                &project.path,
+                &output_dir,
+                lib_ext,
+                &build_service,
+                &mut sp,
+            ) {
                 let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
             }
             // Same trade for native plugins: a `Runtime`-scope one belongs in
@@ -1232,13 +1282,15 @@ fn export_worker(
 
                 packer
                     .write_to_file(&rpak_path, compression_level)
-                    .and_then(|_| std::fs::copy(&src, &binary_dest).map(|_| ())).map(|_| ())
+                    .and_then(|_| std::fs::copy(&src, &binary_dest).map(|_| ()))
+                    .map(|_| ())
             }
             PackagingMode::SingleBinary => {
                 let binary_dest = output_dir.join(&binary_name);
                 let src = compress_exe(&template_path, &tx);
                 packer
-                    .append_to_binary(&src, &binary_dest, compression_level).map(|_| ())
+                    .append_to_binary(&src, &binary_dest, compression_level)
+                    .map(|_| ())
             }
             PackagingMode::LeanSingleBinary => {
                 // Recompile a lean static binary from the project workspace,
@@ -1253,8 +1305,7 @@ fn export_worker(
                 // for a cross-platform export it is the download store with no
                 // engine source above it. A lean build ignores the template
                 // entirely; it recompiles the engine from source.
-                let editor_dir = crate::build::editor_dir()
-                    .unwrap_or_else(|| runtime_dir.clone());
+                let editor_dir = crate::build::editor_dir().unwrap_or_else(|| runtime_dir.clone());
                 // A local Rust toolchain is only needed for a SAME-OS build,
                 // which compiles natively. A different OS compiles in the
                 // platform's container, which carries the pinned toolchain
@@ -1267,68 +1318,66 @@ fn export_worker(
                 } else {
                     crate::toolchain::ensure_rust(&editor_dir, &mut progress).map(Some)
                 };
-                let built = toolchain
-                    .and_then(|toolchain| {
-                        // A lean build recompiles the ENGINE (the project is just
-                        // assets → rpak), so compile the engine source checkout the
-                        // editor was built from, found by walking up from the
-                        // editor's own dir (e.g. `<engine>/dist/windows-x64/`).
-                        let engine_dir = crate::build::resolve_engine_source()
-                            .ok_or_else(|| {
-                                "No engine source to compile. A lean build recompiles \
+                let built = toolchain.and_then(|toolchain| {
+                    // A lean build recompiles the ENGINE (the project is just
+                    // assets → rpak), so compile the engine source checkout the
+                    // editor was built from, found by walking up from the
+                    // editor's own dir (e.g. `<engine>/dist/windows-x64/`).
+                    let engine_dir = crate::build::resolve_engine_source().ok_or_else(|| {
+                        "No engine source to compile. A lean build recompiles \
                                  the engine, so it needs either a source checkout the \
                                  editor runs from, or the engine source downloaded for \
                                  this version (Packaging → Download engine source)."
-                                    .to_string()
-                            })?;
-                        // Linking a plugin in means COMPILING it, so it needs the
-                        // source that produced the library the UI listed. A
-                        // plugin with no source here (a marketplace download, say)
-                        // is reported and shipped as a file instead — refusing the
-                        // whole export over one would be a poor trade.
-                        let statics = if link_plugins_in {
-                            let wanted: Vec<(String, bool)> = selected_plugins
-                                .iter()
-                                .map(|p| {
-                                    (
-                                        p.id.clone(),
-                                        p.scope == renzora_plugin::sys::PluginScope::Editor,
-                                    )
-                                })
-                                .collect();
-                            let (found, missing) =
-                                crate::build::resolve_static_plugins(&engine_dir, &wanted);
-                            if !missing.is_empty() {
-                                progress(format!(
-                                    "No source found for {} — shipping as file(s) beside the binary",
-                                    missing.join(", ")
-                                ));
-                            }
-                            // Keyed on the library stem, which is what the
-                            // selection below compares against — `id` is the
-                            // crate name, and on Unix the two differ by `lib`.
-                            linked_ids = found.iter().map(|p| p.library_stem.clone()).collect();
-                            found
-                        } else {
-                            Vec::new()
-                        };
-                        progress(format!(
-                            "Compiling lean binary in {} (this can take several minutes)…",
-                            engine_dir.display()
-                        ));
-                        crate::build::build_lean(
-                            &engine_dir,
-                            &project.path,
-                            platform,
-                            toolchain.as_ref(),
-                            &mut progress,
-                            &disabled_bevy_features,
-                            &disabled_runtime_features,
-                            lean_profile,
-                            &statics,
-                            &cancel,
-                        )
-                    });
+                            .to_string()
+                    })?;
+                    // Linking a plugin in means COMPILING it, so it needs the
+                    // source that produced the library the UI listed. A
+                    // plugin with no source here (a marketplace download, say)
+                    // is reported and shipped as a file instead — refusing the
+                    // whole export over one would be a poor trade.
+                    let statics = if link_plugins_in {
+                        let wanted: Vec<(String, bool)> = selected_plugins
+                            .iter()
+                            .map(|p| {
+                                (
+                                    p.id.clone(),
+                                    p.scope == renzora_plugin::sys::PluginScope::Editor,
+                                )
+                            })
+                            .collect();
+                        let (found, missing) =
+                            crate::build::resolve_static_plugins(&engine_dir, &wanted);
+                        if !missing.is_empty() {
+                            progress(format!(
+                                "No source found for {} — shipping as file(s) beside the binary",
+                                missing.join(", ")
+                            ));
+                        }
+                        // Keyed on the library stem, which is what the
+                        // selection below compares against — `id` is the
+                        // crate name, and on Unix the two differ by `lib`.
+                        linked_ids = found.iter().map(|p| p.library_stem.clone()).collect();
+                        found
+                    } else {
+                        Vec::new()
+                    };
+                    progress(format!(
+                        "Compiling lean binary in {} (this can take several minutes)…",
+                        engine_dir.display()
+                    ));
+                    crate::build::build_lean(
+                        &engine_dir,
+                        &project.path,
+                        platform,
+                        toolchain.as_ref(),
+                        &mut progress,
+                        &disabled_bevy_features,
+                        &disabled_runtime_features,
+                        lean_profile,
+                        &statics,
+                        &cancel,
+                    )
+                });
                 match built {
                     Ok(bin) => {
                         let src = compress_exe(&bin, &tx);
@@ -1506,9 +1555,7 @@ fn export_worker(
                             )));
                         }
                         Err(e) => {
-                            let _ = tx.send(ExportMsg::Progress(format!(
-                                "Skipped {label}: {e}"
-                            )));
+                            let _ = tx.send(ExportMsg::Progress(format!("Skipped {label}: {e}")));
                         }
                     }
                 }

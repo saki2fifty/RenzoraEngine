@@ -2,7 +2,7 @@ mod backend;
 mod command;
 mod component;
 mod context;
-mod engine;
+pub mod engine;
 pub mod extension;
 pub mod get_handler;
 pub mod http;

@@ -14,14 +14,22 @@ use renzora::core::WindowMode;
 use std::sync::atomic::Ordering;
 
 use renzora_ember::font::{icon_text, ui_font, EmberFonts};
-use renzora_ember::reactive::{react, KeyedSnapshot};
+use renzora_ember::reactive::tracked::{
+    bind_2way, bind_bg, bind_display, bind_text, bind_text_color, keyed_list,
+};
 use renzora_ember::reactive::Rx;
-use renzora_ember::reactive::tracked::{bind_2way, bind_bg, bind_display, bind_text, bind_text_color, keyed_list};
+use renzora_ember::reactive::{react, KeyedSnapshot};
 use renzora_ember::theme::*;
-use renzora_ember::widgets::{bind_text_input, drag_value, icon_menu_button, radio_group, scroll_area, scroll_view_pinned, section, spinner, tabs, text_input, toggle_switch, OverlaySurface};
+use renzora_ember::widgets::{
+    bind_text_input, drag_value, icon_menu_button, radio_group, scroll_area, scroll_view_pinned,
+    section, spinner, tabs, text_input, toggle_switch, OverlaySurface,
+};
 
 use crate::download::{self, DownloadProgress};
-use crate::overlay::{ensure_release_fetch, poll_download_task, poll_export_task, poll_release_fetch, run_export, ExportOverlayState, ExportProgress, ExportView, PackagingMode, PluginLinkMode};
+use crate::overlay::{
+    ensure_release_fetch, poll_download_task, poll_export_task, poll_release_fetch, run_export,
+    ExportOverlayState, ExportProgress, ExportView, PackagingMode, PluginLinkMode,
+};
 use crate::templates::{Platform, TemplateManager};
 
 const GREEN: (u8, u8, u8) = (89, 191, 115);
@@ -109,7 +117,9 @@ struct SectionToggle(&'static str);
 /// target the host. Probing spawns a process, so it is keyed on the platform and
 /// runs again only when that changes — never per frame.
 fn probe_docker(world: &mut World) {
-    let Some(state) = world.get_resource::<ExportOverlayState>() else { return };
+    let Some(state) = world.get_resource::<ExportOverlayState>() else {
+        return;
+    };
     let needed = state.packaging_mode == PackagingMode::LeanSingleBinary
         && Platform::current() != Some(state.platform);
     let platform = state.platform;
@@ -136,13 +146,16 @@ fn probe_docker(world: &mut World) {
 }
 
 fn manage_export_modal(world: &mut World) {
-    let visible = world.get_resource::<ExportOverlayState>().is_some_and(|s| s.visible);
+    let visible = world
+        .get_resource::<ExportOverlayState>()
+        .is_some_and(|s| s.visible);
     if visible {
         // Presets belong to the open project, so this both fills an empty list
         // on first open and swaps it when the user changes project without
         // closing the editor. It no-ops once loaded for that path.
-        if let Some(root) =
-            world.get_resource::<renzora::core::CurrentProject>().map(|p| p.path.clone())
+        if let Some(root) = world
+            .get_resource::<renzora::core::CurrentProject>()
+            .map(|p| p.path.clone())
         {
             if let Some(mut state) = world.get_resource_mut::<ExportOverlayState>() {
                 state.load_presets(&root);
@@ -159,8 +172,12 @@ fn manage_export_modal(world: &mut World) {
     let existing: Vec<Entity> = q.iter(world).collect();
 
     if visible && existing.is_empty() {
-        let Some(fonts) = world.get_resource::<EmberFonts>().cloned() else { return };
-        let has_project = world.get_resource::<renzora::core::CurrentProject>().is_some();
+        let Some(fonts) = world.get_resource::<EmberFonts>().cloned() else {
+            return;
+        };
+        let has_project = world
+            .get_resource::<renzora::core::CurrentProject>()
+            .is_some();
         let mut queue = CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, world);
@@ -185,7 +202,9 @@ fn scan_plugins(world: &mut World) {
             return;
         }
     }
-    let dir = world.resource::<TemplateManager>().plugins_dir_for(platform);
+    let dir = world
+        .resource::<TemplateManager>()
+        .plugins_dir_for(platform);
     let mut plugins = renzora_plugin::host::loader::scan_plugins(world, &dir);
 
     // Phase 3 loose Tier-1 plugins. The same canonical identity and
@@ -193,9 +212,7 @@ fn scan_plugins(world: &mut World) {
     // plugin has no separate "source directory" to look up, only the
     // artifact the editor already produced. Editor-scoped loose plugins
     // are excluded because they would never load in a runtime build.
-    if let Some(inventory) =
-        world.get_resource::<renzora_loose_plugins::LoosePluginInventory>()
-    {
+    if let Some(inventory) = world.get_resource::<renzora_loose_plugins::LoosePluginInventory>() {
         for (id, staged_path) in inventory.export_candidates() {
             plugins.push(renzora_plugin::host::loader::PluginInfo {
                 id: id.to_string(),
@@ -292,7 +309,9 @@ fn scene_used_plugin_ids(
 
     let mut used = std::collections::HashSet::new();
     for file in &ron_files {
-        let Ok(text) = std::fs::read_to_string(file) else { continue };
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
         for (id, needle) in &needles {
             if !used.contains(id) && text.contains(needle.as_str()) {
                 used.insert(id.clone());
@@ -305,7 +324,9 @@ fn scene_used_plugin_ids(
 /// Recursively collect `.ron` files under `dir`, skipping dot-directories
 /// (`.editor`, `.cache`, `.git`, …).
 fn collect_ron_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -376,9 +397,25 @@ fn spawn_modal(commands: &mut Commands, fonts: &EmberFonts, has_project: bool) {
     // Up here it is beside the only other thing that ends the dialog, so the two
     // outcomes are in one place instead of at opposite corners — and the form
     // between them can grow or scroll without the primary action moving.
-    let header = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).id();
-    let title = icon_title(commands, fonts, "package", &renzora::lang::t("export.title"));
-    commands.entity(title).insert(Node { flex_grow: 1.0, ..default() });
+    let header = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .id();
+    let title = icon_title(
+        commands,
+        fonts,
+        "package",
+        &renzora::lang::t("export.title"),
+    );
+    commands.entity(title).insert(Node {
+        flex_grow: 1.0,
+        ..default()
+    });
 
     // The bare ✕ becomes a labelled Cancel that keeps the glyph. An icon alone
     // says "close"; next to a primary action the word is what makes it read as
@@ -414,54 +451,121 @@ fn spawn_modal(commands: &mut Commands, fonts: &EmberFonts, has_project: bool) {
     commands.entity(close).add_children(&[cx, ct]);
 
     let export = build_export_btn(commands, fonts);
-    commands.entity(header).add_children(&[title, close, export]);
+    commands
+        .entity(header)
+        .add_children(&[title, close, export]);
     commands.entity(panel).add_child(header);
-    let sep = commands.spawn((Node { width: Val::Percent(100.0), height: Val::Px(1.0), margin: UiRect::vertical(Val::Px(8.0)), ..default() }, BackgroundColor(rgb(divider())))).id();
+    let sep = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(1.0),
+                margin: UiRect::vertical(Val::Px(8.0)),
+                ..default()
+            },
+            BackgroundColor(rgb(divider())),
+        ))
+        .id();
     commands.entity(panel).add_child(sep);
 
     if !has_project {
-        let w = txt(commands, fonts, &renzora::lang::t("export.no_project"), 12.0, RED);
+        let w = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.no_project"),
+            12.0,
+            RED,
+        );
         commands.entity(panel).add_child(w);
         return;
     }
 
     // Settings view — the export form. Hidden once an export starts.
     let settings_view = commands
-        .spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(8.0), flex_grow: 1.0, min_height: Val::Px(0.0), ..default() })
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(8.0),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            ..default()
+        })
         .id();
     commands.entity(panel).add_child(settings_view);
     bind_display(commands, settings_view, |w| {
-        matches!(w.get_resource::<ExportOverlayState>().map(|s| s.view), Some(ExportView::Settings))
+        matches!(
+            w.get_resource::<ExportOverlayState>().map(|s| s.view),
+            Some(ExportView::Settings)
+        )
     });
 
     // Two columns.
-    let cols = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Row, column_gap: Val::Px(16.0), flex_grow: 1.0, min_height: Val::Px(0.0), ..default() }).id();
+    let cols = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(16.0),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            ..default()
+        })
+        .id();
     let sidebar = build_sidebar(commands, fonts);
     // The right column is NOT scrolled as a whole — the platform header and tab
     // bar inside it stay fixed; each tab caps and scrolls its own content (see
     // `finish_tab`). That keeps the top chrome put while a long list scrolls.
-    let right = commands.spawn((Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, row_gap: Val::Px(8.0), min_width: Val::Px(0.0), min_height: Val::Px(0.0), ..default() }, RightPane { sig: None })).id();
+    let right = commands
+        .spawn((
+            Node {
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                min_width: Val::Px(0.0),
+                min_height: Val::Px(0.0),
+                ..default()
+            },
+            RightPane { sig: None },
+        ))
+        .id();
     // Every setting in the right pane belongs to the selected preset, so with
     // nothing selected there is nothing to configure. Showing the form anyway
     // invited edits that had nowhere to be saved to — and offered an Export
     // button for a configuration that does not exist.
     bind_display(commands, right, |w| {
-        w.get_resource::<ExportOverlayState>().is_some_and(|s| s.active_preset.is_some())
+        w.get_resource::<ExportOverlayState>()
+            .is_some_and(|s| s.active_preset.is_some())
     });
 
     // What stands in its place: say what to do, rather than leaving the pane
     // blank next to a sidebar that already says "press +".
     let right_empty = commands
-        .spawn(Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, row_gap: Val::Px(6.0), min_width: Val::Px(0.0), ..default() })
+        .spawn(Node {
+            flex_grow: 1.0,
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            row_gap: Val::Px(6.0),
+            min_width: Val::Px(0.0),
+            ..default()
+        })
         .id();
     let ei = icon_text(commands, &fonts.phosphor, "package", text_muted(), 30.0);
-    let et = txt(commands, fonts, &renzora::lang::t("export.presets.none_selected"), 12.0, text_muted());
+    let et = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.presets.none_selected"),
+        12.0,
+        text_muted(),
+    );
     commands.entity(right_empty).add_children(&[ei, et]);
     bind_display(commands, right_empty, |w| {
-        w.get_resource::<ExportOverlayState>().is_some_and(|s| s.active_preset.is_none())
+        w.get_resource::<ExportOverlayState>()
+            .is_some_and(|s| s.active_preset.is_none())
     });
 
-    commands.entity(cols).add_children(&[sidebar, right, right_empty]);
+    commands
+        .entity(cols)
+        .add_children(&[sidebar, right, right_empty]);
     commands.entity(settings_view).add_child(cols);
 
     // The Export button used to be built here, in a row below the columns. It
@@ -472,7 +576,10 @@ fn spawn_modal(commands: &mut Commands, fonts: &EmberFonts, has_project: bool) {
     let log_view = build_log_view(commands, fonts);
     commands.entity(panel).add_child(log_view);
     bind_display(commands, log_view, |w| {
-        matches!(w.get_resource::<ExportOverlayState>().map(|s| s.view), Some(ExportView::Log))
+        matches!(
+            w.get_resource::<ExportOverlayState>().map(|s| s.view),
+            Some(ExportView::Log)
+        )
     });
 }
 
@@ -491,12 +598,37 @@ fn build_sidebar(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     // column simply gets taller as presets are added — and since the dialog's
     // height is fixed, the Duplicate/Remove buttons and the release line under
     // the list were pushed out through the bottom of the panel.
-    let col = commands.spawn(Node { width: Val::Px(180.0), flex_shrink: 0.0, min_height: Val::Px(0.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(4.0), ..default() }).id();
+    let col = commands
+        .spawn(Node {
+            width: Val::Px(180.0),
+            flex_shrink: 0.0,
+            min_height: Val::Px(0.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(4.0),
+            ..default()
+        })
+        .id();
 
     // Header: title on the left, add-menu on the right.
-    let head_row = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).id();
-    let head = section_label(commands, fonts, "sliders-horizontal", &renzora::lang::t("export.section.presets"));
-    commands.entity(head).insert(Node { flex_grow: 1.0, ..default() });
+    let head_row = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .id();
+    let head = section_label(
+        commands,
+        fonts,
+        "sliders-horizontal",
+        &renzora::lang::t("export.section.presets"),
+    );
+    commands.entity(head).insert(Node {
+        flex_grow: 1.0,
+        ..default()
+    });
     // The platform picker lives here, which is the whole reason a bare "+" is
     // enough: adding a preset IS choosing a platform, so there is no separate
     // list to keep in step with the selection.
@@ -508,13 +640,19 @@ fn build_sidebar(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
         "desktop-tower",
         &names,
         |world, i| {
-            let Some(&platform) = Platform::ALL.get(i) else { return };
-            let Some(mut state) = world.get_resource_mut::<ExportOverlayState>() else { return };
+            let Some(&platform) = Platform::ALL.get(i) else {
+                return;
+            };
+            let Some(mut state) = world.get_resource_mut::<ExportOverlayState>() else {
+                return;
+            };
             // Keep the outgoing preset's edits before the new one replaces the
             // working fields.
             state.sync_active_preset();
             let name = crate::presets::unique_name(platform.display_name(), &state.presets);
-            state.presets.push(crate::presets::ExportPreset::new(name, platform));
+            state
+                .presets
+                .push(crate::presets::ExportPreset::new(name, platform));
             let last = state.presets.len() - 1;
             // Not `select_preset`: that early-returns when the index is already
             // active and would also re-sync the preset we just pushed.
@@ -530,7 +668,14 @@ fn build_sidebar(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
 
     // The list itself — keyed, so adding or removing one preset rebuilds that
     // row rather than the whole sidebar (and never disturbs the rest).
-    let list = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(4.0), ..default() }).id();
+    let list = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(4.0),
+            ..default()
+        })
+        .id();
     keyed_list(commands, list, preset_list_snapshot);
     // Scrolled, because the list is unbounded — a preset per platform plus
     // duplicates runs past the dialog. `scroll_view`'s wrapper already flex-grows
@@ -542,26 +687,60 @@ fn build_sidebar(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     // Empty state. A project with no presets shows nothing at all otherwise,
     // and "the export dialog is blank" is a worse first impression than a line
     // of text saying what to press.
-    let empty = txt(commands, fonts, &renzora::lang::t("export.presets.empty"), 11.0, text_muted());
-    commands.entity(empty).insert(Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() });
+    let empty = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.presets.empty"),
+        11.0,
+        text_muted(),
+    );
+    commands.entity(empty).insert(Node {
+        margin: UiRect::vertical(Val::Px(8.0)),
+        ..default()
+    });
     bind_display(commands, empty, |w| {
-        w.get_resource::<ExportOverlayState>().is_some_and(|s| s.presets.is_empty())
+        w.get_resource::<ExportOverlayState>()
+            .is_some_and(|s| s.presets.is_empty())
     });
     commands.entity(col).add_child(empty);
 
     // Duplicate / Remove act on the selection, so they are hidden when there
     // isn't one rather than sitting there doing nothing.
-    let actions = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), margin: UiRect::top(Val::Px(6.0)), ..default() }).id();
-    let dup = small_button(commands, fonts, "copy", &renzora::lang::t("export.presets.duplicate"), PresetDupBtn);
-    let del = small_button(commands, fonts, "trash", &renzora::lang::t("export.presets.remove"), PresetDelBtn);
+    let actions = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(4.0),
+            margin: UiRect::top(Val::Px(6.0)),
+            ..default()
+        })
+        .id();
+    let dup = small_button(
+        commands,
+        fonts,
+        "copy",
+        &renzora::lang::t("export.presets.duplicate"),
+        PresetDupBtn,
+    );
+    let del = small_button(
+        commands,
+        fonts,
+        "trash",
+        &renzora::lang::t("export.presets.remove"),
+        PresetDelBtn,
+    );
     commands.entity(actions).add_children(&[dup, del]);
     bind_display(commands, actions, |w| {
-        w.get_resource::<ExportOverlayState>().is_some_and(|s| s.active_preset.is_some())
+        w.get_resource::<ExportOverlayState>()
+            .is_some_and(|s| s.active_preset.is_some())
     });
     commands.entity(col).add_child(actions);
     // Release info status.
     let rel = txt(commands, fonts, "", 11.0, text_muted());
-    commands.entity(rel).insert(Node { margin: UiRect::top(Val::Px(8.0)), ..default() });
+    commands.entity(rel).insert(Node {
+        margin: UiRect::top(Val::Px(8.0)),
+        ..default()
+    });
     bind_text(commands, rel, |w| {
         let s = w.resource::<ExportOverlayState>();
         if let Some(err) = &s.release_fetch_error {
@@ -589,7 +768,10 @@ fn build_sidebar(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
 /// A snapshot with no rows — what the preset list shows before the overlay
 /// resource exists.
 fn empty_snapshot() -> KeyedSnapshot {
-    KeyedSnapshot { items: Vec::new(), build: Box::new(|c, _, _| c.spawn(Node::default()).id()) }
+    KeyedSnapshot {
+        items: Vec::new(),
+        build: Box::new(|c, _, _| c.spawn(Node::default()).id()),
+    }
 }
 
 fn hasher() -> std::collections::hash_map::DefaultHasher {
@@ -648,8 +830,22 @@ fn preset_row(
 ) -> Entity {
     let btn = commands
         .spawn((
-            Node { width: Val::Percent(100.0), height: Val::Px(40.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), padding: UiRect::horizontal(Val::Px(10.0)), border: UiRect::all(Val::Px(1.0)), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() },
-            BackgroundColor(if selected { rgb(section_bg()) } else { Color::NONE }),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(40.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                padding: UiRect::horizontal(Val::Px(10.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(if selected {
+                rgb(section_bg())
+            } else {
+                Color::NONE
+            }),
             BorderColor::all(rgb(border())),
             Interaction::default(),
             PresetBtn(index),
@@ -659,16 +855,66 @@ fn preset_row(
     // Selection is baked into the row hash, so only hover needs to be live.
     bind_bg(commands, btn, move |w| {
         let hov = matches!(w.get::<Interaction>(btn), Some(Interaction::Hovered));
-        if selected { rgb(section_bg()) } else if hov { ca(255, 255, 255, 10) } else { Color::NONE }
+        if selected {
+            rgb(section_bg())
+        } else if hov {
+            ca(255, 255, 255, 10)
+        } else {
+            Color::NONE
+        }
     });
-    let ic = icon_text(commands, &fonts.phosphor, platform_icon(p), text_primary(), 18.0);
+    let ic = icon_text(
+        commands,
+        &fonts.phosphor,
+        platform_icon(p),
+        text_primary(),
+        18.0,
+    );
     commands.entity(ic).insert(FocusPolicy::Pass);
-    let nm = commands.spawn((Text::new(name.to_string()), ui_font(&fonts.ui, 12.5), TextColor(rgb(text_primary())), FocusPolicy::Pass, Node { flex_grow: 1.0, ..default() }, bevy::text::TextLayout::no_wrap())).id();
-    let dot = commands.spawn((Node { width: Val::Px(8.0), height: Val::Px(8.0), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() }, BackgroundColor(rgb(text_muted())), FocusPolicy::Pass)).id();
+    let nm = commands
+        .spawn((
+            Text::new(name.to_string()),
+            ui_font(&fonts.ui, 12.5),
+            TextColor(rgb(text_primary())),
+            FocusPolicy::Pass,
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            bevy::text::TextLayout::no_wrap(),
+        ))
+        .id();
+    let dot = commands
+        .spawn((
+            Node {
+                width: Val::Px(8.0),
+                height: Val::Px(8.0),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(rgb(text_muted())),
+            FocusPolicy::Pass,
+        ))
+        .id();
     bind_bg(commands, dot, move |w| {
-        let installed = w.get_resource::<TemplateManager>().is_some_and(|t| t.is_installed(p));
-        let available = w.get_resource::<ExportOverlayState>().and_then(|s| s.release_info.as_ref().map(|r| r.available_platforms.contains(&p))).unwrap_or(false);
-        if installed { rgb(GREEN) } else if available { rgb(AMBER) } else { ca(130, 138, 160, 150) }
+        let installed = w
+            .get_resource::<TemplateManager>()
+            .is_some_and(|t| t.is_installed(p));
+        let available = w
+            .get_resource::<ExportOverlayState>()
+            .and_then(|s| {
+                s.release_info
+                    .as_ref()
+                    .map(|r| r.available_platforms.contains(&p))
+            })
+            .unwrap_or(false);
+        if installed {
+            rgb(GREEN)
+        } else if available {
+            rgb(AMBER)
+        } else {
+            ca(130, 138, 160, 150)
+        }
     });
     commands.entity(btn).add_children(&[ic, nm, dot]);
     btn
@@ -684,7 +930,17 @@ fn small_button<M: Component>(
 ) -> Entity {
     let btn = commands
         .spawn((
-            Node { flex_grow: 1.0, height: Val::Px(26.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, justify_content: JustifyContent::Center, column_gap: Val::Px(5.0), border: UiRect::all(Val::Px(1.0)), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() },
+            Node {
+                flex_grow: 1.0,
+                height: Val::Px(26.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(5.0),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
             BackgroundColor(Color::NONE),
             BorderColor::all(rgb(border())),
             Interaction::default(),
@@ -701,7 +957,15 @@ fn small_button<M: Component>(
     });
     let ic = icon_text(commands, &fonts.phosphor, icon, text_muted(), 13.0);
     commands.entity(ic).insert(FocusPolicy::Pass);
-    let tx = commands.spawn((Text::new(label.to_string()), ui_font(&fonts.ui, 11.0), TextColor(rgb(text_muted())), FocusPolicy::Pass, bevy::text::TextLayout::no_wrap())).id();
+    let tx = commands
+        .spawn((
+            Text::new(label.to_string()),
+            ui_font(&fonts.ui, 11.0),
+            TextColor(rgb(text_muted())),
+            FocusPolicy::Pass,
+            bevy::text::TextLayout::no_wrap(),
+        ))
+        .id();
     commands.entity(btn).add_children(&[ic, tx]);
     btn
 }
@@ -709,19 +973,34 @@ fn small_button<M: Component>(
 // ── Right pane (per-platform, rebuilt on platform change) ────────────────────
 
 fn rebuild_right_pane(world: &mut World) {
-    if world.query_filtered::<(), With<ExportRoot>>().iter(world).next().is_none() {
+    if world
+        .query_filtered::<(), With<ExportRoot>>()
+        .iter(world)
+        .next()
+        .is_none()
+    {
         return;
     }
-    let Some(fonts) = world.get_resource::<EmberFonts>().cloned() else { return };
+    let Some(fonts) = world.get_resource::<EmberFonts>().cloned() else {
+        return;
+    };
     let platform = world.resource::<ExportOverlayState>().platform;
-    let sig = Platform::ALL.iter().position(|p| *p == platform).unwrap_or(0) as u8;
+    let sig = Platform::ALL
+        .iter()
+        .position(|p| *p == platform)
+        .unwrap_or(0) as u8;
 
     let mut q = world.query::<(Entity, &RightPane)>();
-    let Some((pane, old)) = q.iter(world).map(|(e, r)| (e, r.sig)).next() else { return };
+    let Some((pane, old)) = q.iter(world).map(|(e, r)| (e, r.sig)).next() else {
+        return;
+    };
     if old == Some(sig) {
         return;
     }
-    let kids: Vec<Entity> = world.get::<Children>(pane).map(|c| c.iter().collect()).unwrap_or_default();
+    let kids: Vec<Entity> = world
+        .get::<Children>(pane)
+        .map(|c| c.iter().collect())
+        .unwrap_or_default();
     // Measured here rather than inside the tab builders, which have `Commands`
     // and no way to reach a `Window`. Logical (not physical) pixels, because the
     // `Val::Px` cap it feeds is logical too — using the raw resolution would
@@ -747,8 +1026,17 @@ fn rebuild_right_pane(world: &mut World) {
     }
 }
 
-fn build_settings(commands: &mut Commands, fonts: &EmberFonts, pane: Entity, p: Platform, tab_max: f32) {
-    let desktop = matches!(p, Platform::WindowsX64 | Platform::LinuxX64 | Platform::MacOSX64 | Platform::MacOSArm64);
+fn build_settings(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    pane: Entity,
+    p: Platform,
+    tab_max: f32,
+) {
+    let desktop = matches!(
+        p,
+        Platform::WindowsX64 | Platform::LinuxX64 | Platform::MacOSX64 | Platform::MacOSArm64
+    );
     // Not "is this the host?" any more, but "can a lean binary be produced for
     // this platform at all?" Everything downstream (the lean radio option,
     // engine-feature stripping, linking plugins in) depends on a lean build
@@ -764,7 +1052,14 @@ fn build_settings(commands: &mut Commands, fonts: &EmberFonts, pane: Entity, p: 
     let host = crate::docker::lean_supported(p) && lean_source_available();
 
     // Platform header — context above the category tabs.
-    let hdr = commands.spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(2.0), margin: UiRect::bottom(Val::Px(6.0)), ..default() }).id();
+    let hdr = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(2.0),
+            margin: UiRect::bottom(Val::Px(6.0)),
+            ..default()
+        })
+        .id();
     let title = icon_title(commands, fonts, platform_icon(p), p.display_name());
     let sub = txt(commands, fonts, p.supported_devices(), 11.0, text_muted());
     commands.entity(hdr).add_children(&[title, sub]);
@@ -791,12 +1086,7 @@ fn build_settings(commands: &mut Commands, fonts: &EmberFonts, pane: Entity, p: 
         renzora::lang::t("export.tab.plugins"),
     ];
     let tab_refs: Vec<&str> = tab_labels.iter().map(|s| s.as_str()).collect();
-    let strip = tabs(
-        commands,
-        &fonts.ui,
-        &tab_refs,
-        panels.clone(),
-    );
+    let strip = tabs(commands, &fonts.ui, &tab_refs, panels.clone());
     // `tabs()` overwrites each panel's `Node` with `default() + display`, so a
     // column layout has to be re-applied here — preserving the initial
     // visibility it set (only panel 0 shown). `tab_select` later toggles only
@@ -867,7 +1157,12 @@ const MODAL_VH: f32 = 0.78;
 /// (sizes to content when short, scrolls past `TAB_CONTENT_MAX`).
 fn finish_tab(commands: &mut Commands, panel: Entity, sections: &[Entity], tab_max: f32) {
     let content = commands
-        .spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(6.0), ..default() })
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(6.0),
+            ..default()
+        })
         .id();
     commands.entity(content).add_children(sections);
     let scroll = scroll_area(commands, content, tab_max);
@@ -876,43 +1171,165 @@ fn finish_tab(commands: &mut Commands, panel: Entity, sections: &[Entity], tab_m
 
 // ── Output tab: binary name, export directory, icon ──────────────────────────
 
-fn build_output_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform, desktop: bool, tab_max: f32) -> Entity {
+fn build_output_tab(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    p: Platform,
+    desktop: bool,
+    tab_max: f32,
+) -> Entity {
     let panel = tab_panel(commands);
-    let (sec, body) = section(commands, fonts, "folder-open", &renzora::lang::t("export.section.output"), accent());
+    let (sec, body) = section(
+        commands,
+        fonts,
+        "folder-open",
+        &renzora::lang::t("export.section.output"),
+        accent(),
+    );
 
     // Binary name. (Empty initial value; `bind_text_input` reflects the current
     // state in on the first frame, so no `Init` snapshot is needed here.)
     let name_row = labeled(commands, fonts, &renzora::lang::t("export.field.name"));
-    let name = text_input(commands, &fonts.ui, &renzora::lang::t("export.placeholder.binary_name"), "");
+    let name = text_input(
+        commands,
+        &fonts.ui,
+        &renzora::lang::t("export.placeholder.binary_name"),
+        "",
+    );
     style_input(commands, name);
-    bind_text_input(commands, name, |w| w.get_resource::<ExportOverlayState>().map(|s| s.binary_name.clone()).unwrap_or_default(), |w, v| { if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() { s.binary_name = v; } });
+    bind_text_input(
+        commands,
+        name,
+        |w| {
+            w.get_resource::<ExportOverlayState>()
+                .map(|s| s.binary_name.clone())
+                .unwrap_or_default()
+        },
+        |w, v| {
+            if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
+                s.binary_name = v;
+            }
+        },
+    );
     commands.entity(name_row).add_child(name);
 
     // Export directory.
-    let dir_row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).id();
-    let dir_lbl = txt(commands, fonts, &renzora::lang::t("export.field.folder"), 12.0, text_muted());
-    let dir = text_input(commands, &fonts.ui, &renzora::lang::t("export.placeholder.output_dir"), "");
+    let dir_row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .id();
+    let dir_lbl = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.field.folder"),
+        12.0,
+        text_muted(),
+    );
+    let dir = text_input(
+        commands,
+        &fonts.ui,
+        &renzora::lang::t("export.placeholder.output_dir"),
+        "",
+    );
     style_input(commands, dir);
-    bind_text_input(commands, dir, |w| w.get_resource::<ExportOverlayState>().map(|s| s.output_dir.clone()).unwrap_or_default(), |w, v| { if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() { s.output_dir = v; } });
-    let dir_browse = pill_button(commands, fonts, "folder", &renzora::lang::t("export.btn.browse"));
+    bind_text_input(
+        commands,
+        dir,
+        |w| {
+            w.get_resource::<ExportOverlayState>()
+                .map(|s| s.output_dir.clone())
+                .unwrap_or_default()
+        },
+        |w, v| {
+            if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
+                s.output_dir = v;
+            }
+        },
+    );
+    let dir_browse = pill_button(
+        commands,
+        fonts,
+        "folder",
+        &renzora::lang::t("export.btn.browse"),
+    );
     commands.entity(dir_browse).insert(OutputBrowseBtn);
-    commands.entity(dir_row).add_children(&[dir_lbl, dir, dir_browse]);
+    commands
+        .entity(dir_row)
+        .add_children(&[dir_lbl, dir, dir_browse]);
 
     // Icon.
-    let icon_row = commands.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), margin: UiRect::top(Val::Px(2.0)), ..default() }, Name::new("icon-row"))).id();
-    let icon_lbl = txt(commands, fonts, &renzora::lang::t("export.field.icon"), 12.0, text_muted());
-    let icon_path = commands.spawn((Text::new(renzora::lang::t("common.none")), ui_font(&fonts.ui, 11.0), TextColor(rgb(text_muted())), Node { flex_grow: 1.0, ..default() }, bevy::text::TextLayout::no_wrap())).id();
-    bind_text(commands, icon_path, |w| w.get_resource::<ExportOverlayState>().and_then(|s| s.icon_path.clone()).unwrap_or_else(|| renzora::lang::t("common.none")));
-    let clear = commands.spawn((Node { padding: UiRect::all(Val::Px(2.0)), ..default() }, Interaction::default(), IconClearBtn, cursor())).id();
+    let icon_row = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                margin: UiRect::top(Val::Px(2.0)),
+                ..default()
+            },
+            Name::new("icon-row"),
+        ))
+        .id();
+    let icon_lbl = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.field.icon"),
+        12.0,
+        text_muted(),
+    );
+    let icon_path = commands
+        .spawn((
+            Text::new(renzora::lang::t("common.none")),
+            ui_font(&fonts.ui, 11.0),
+            TextColor(rgb(text_muted())),
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            bevy::text::TextLayout::no_wrap(),
+        ))
+        .id();
+    bind_text(commands, icon_path, |w| {
+        w.get_resource::<ExportOverlayState>()
+            .and_then(|s| s.icon_path.clone())
+            .unwrap_or_else(|| renzora::lang::t("common.none"))
+    });
+    let clear = commands
+        .spawn((
+            Node {
+                padding: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            Interaction::default(),
+            IconClearBtn,
+            cursor(),
+        ))
+        .id();
     let clx = icon_text(commands, &fonts.phosphor, "x", text_muted(), 12.0);
     commands.entity(clx).insert(FocusPolicy::Pass);
     commands.entity(clear).add_child(clx);
-    bind_display(commands, clear, |w| w.get_resource::<ExportOverlayState>().is_some_and(|s| s.icon_path.is_some()));
-    let icon_browse = pill_button(commands, fonts, "image", &renzora::lang::t("export.btn.browse"));
+    bind_display(commands, clear, |w| {
+        w.get_resource::<ExportOverlayState>()
+            .is_some_and(|s| s.icon_path.is_some())
+    });
+    let icon_browse = pill_button(
+        commands,
+        fonts,
+        "image",
+        &renzora::lang::t("export.btn.browse"),
+    );
     commands.entity(icon_browse).insert(IconBrowseBtn);
-    commands.entity(icon_row).add_children(&[icon_lbl, icon_path, clear, icon_browse]);
+    commands
+        .entity(icon_row)
+        .add_children(&[icon_lbl, icon_path, clear, icon_browse]);
 
-    commands.entity(body).add_children(&[name_row, dir_row, icon_row]);
+    commands
+        .entity(body)
+        .add_children(&[name_row, dir_row, icon_row]);
     // Window, logging and dedicated-server options follow the output fields:
     // they all describe the artefact being produced, and splitting them across
     // two tabs meant "what am I making?" was answered in two places.
@@ -924,7 +1341,14 @@ fn build_output_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform, de
 
 // ── Packaging tab: packaging mode + runtime template status ──────────────────
 
-fn build_packaging_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform, desktop: bool, host: bool, tab_max: f32) -> Entity {
+fn build_packaging_tab(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    p: Platform,
+    desktop: bool,
+    host: bool,
+    tab_max: f32,
+) -> Entity {
     let panel = tab_panel(commands);
     let mut secs = Vec::new();
 
@@ -932,7 +1356,13 @@ fn build_packaging_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform,
     // from source, which native cargo can only do for the host triple — so it's
     // offered only when exporting for the platform the editor is running on.
     if desktop {
-        let (sec, body) = section(commands, fonts, "file-archive", &renzora::lang::t("export.section.packaging_mode"), accent());
+        let (sec, body) = section(
+            commands,
+            fonts,
+            "file-archive",
+            &renzora::lang::t("export.section.packaging_mode"),
+            accent(),
+        );
         let separate = renzora::lang::t("export.packaging.separate");
         let single = renzora::lang::t("export.packaging.single_exe");
         let lean = renzora::lang::t("export.packaging.lean");
@@ -963,10 +1393,22 @@ fn build_packaging_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform,
         // because the two copy-based modes are the fast ones and therefore the
         // ones a person reaches for by habit — while what they produce is the
         // editor's own runtime and its dylibs, not a build made for this game.
-        let guidance = txt(commands, fonts, &renzora::lang::t("export.packaging.guidance"), 11.0, text_muted());
+        let guidance = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.packaging.guidance"),
+            11.0,
+            text_muted(),
+        );
         commands.entity(body).add_child(guidance);
         if host {
-            let hint = txt(commands, fonts, &renzora::lang::t("export.packaging.lean_hint"), 11.0, text_muted());
+            let hint = txt(
+                commands,
+                fonts,
+                &renzora::lang::t("export.packaging.lean_hint"),
+                11.0,
+                text_muted(),
+            );
             commands.entity(body).add_child(hint);
         }
         // No source, no lean build — but that is a missing download rather than
@@ -974,10 +1416,33 @@ fn build_packaging_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform,
         // option greyed out with no way forward. A canonical editor ships
         // binaries only; the source rides the release as its own asset.
         if !lean_source_available() {
-            let why = txt(commands, fonts, &renzora::lang::t("export.packaging.needs_source"), 11.0, AMBER);
+            let why = txt(
+                commands,
+                fonts,
+                &renzora::lang::t("export.packaging.needs_source"),
+                11.0,
+                AMBER,
+            );
             commands.entity(body).add_child(why);
-            let btn = small_button(commands, fonts, "download-simple", &renzora::lang::t("export.packaging.get_source"), SourceDownloadBtn);
-            commands.entity(btn).insert(Node { width: Val::Px(190.0), height: Val::Px(26.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, justify_content: JustifyContent::Center, column_gap: Val::Px(5.0), margin: UiRect::top(Val::Px(4.0)), border: UiRect::all(Val::Px(1.0)), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() });
+            let btn = small_button(
+                commands,
+                fonts,
+                "download-simple",
+                &renzora::lang::t("export.packaging.get_source"),
+                SourceDownloadBtn,
+            );
+            commands.entity(btn).insert(Node {
+                width: Val::Px(190.0),
+                height: Val::Px(26.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(5.0),
+                margin: UiRect::top(Val::Px(4.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            });
             commands.entity(body).add_child(btn);
         }
         secs.push(sec);
@@ -1003,32 +1468,66 @@ fn build_packaging_tab(commands: &mut Commands, fonts: &EmberFonts, p: Platform,
 /// points one way: shipped without it a game cannot be modded at all, shipped
 /// with it a game is merely larger.
 fn build_modding_section(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
-    let (sec, body) = section(commands, fonts, "puzzle-piece", &renzora::lang::t("export.section.modding"), accent());
+    let (sec, body) = section(
+        commands,
+        fonts,
+        "puzzle-piece",
+        &renzora::lang::t("export.section.modding"),
+        accent(),
+    );
 
-    let row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).id();
+    let row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .id();
     let cb = switch_control(commands, true);
     bind_2way(
         commands,
         cb,
-        |w| w.get_resource::<ExportOverlayState>().is_some_and(|s| s.enable_modding),
+        |w| {
+            w.get_resource::<ExportOverlayState>()
+                .is_some_and(|s| s.enable_modding)
+        },
         |w, v: &bool| {
             if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
                 s.enable_modding = *v;
             }
         },
     );
-    let label = txt(commands, fonts, &renzora::lang::t("export.modding.enable"), 12.5, text_primary());
+    let label = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.modding.enable"),
+        12.5,
+        text_primary(),
+    );
     commands.entity(row).add_children(&[cb, label]);
     commands.entity(body).add_child(row);
 
-    let hint = txt(commands, fonts, &renzora::lang::t("export.modding.hint"), 11.0, text_muted());
+    let hint = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.modding.hint"),
+        11.0,
+        text_muted(),
+    );
     commands.entity(body).add_child(hint);
 
     // A lean build links Bevy statically and shares no image, so there is
     // nothing for a plugin library to bind to — the SDK would ship and be
     // unusable. Said rather than silently ignored, since the checkbox is on by
     // default and a user picking lean would otherwise expect it to apply.
-    let note = txt(commands, fonts, &renzora::lang::t("export.modding.lean_note"), 11.0, AMBER);
+    let note = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.modding.lean_note"),
+        11.0,
+        AMBER,
+    );
     bind_display(commands, note, |w| {
         w.get_resource::<ExportOverlayState>()
             .is_some_and(|s| s.packaging_mode == PackagingMode::LeanSingleBinary)
@@ -1039,41 +1538,105 @@ fn build_modding_section(commands: &mut Commands, fonts: &EmberFonts) -> Entity 
 }
 
 fn build_runtime_status(commands: &mut Commands, fonts: &EmberFonts, p: Platform) -> Entity {
-    let (sec, body) = section(commands, fonts, "download-simple", &renzora::lang::t("export.section.runtime_template"), accent());
+    let (sec, body) = section(
+        commands,
+        fonts,
+        "download-simple",
+        &renzora::lang::t("export.section.runtime_template"),
+        accent(),
+    );
     // Installed / not status line.
     let (line, msg) = icon_msg(commands, fonts, "check-circle", text_muted());
-    bind_text(commands, msg, move |w| if w.get_resource::<TemplateManager>().is_some_and(|t| t.is_installed(p)) { renzora::lang::t("export.runtime.installed") } else { renzora::lang::t("export.runtime.not_installed") });
+    bind_text(commands, msg, move |w| {
+        if w.get_resource::<TemplateManager>()
+            .is_some_and(|t| t.is_installed(p))
+        {
+            renzora::lang::t("export.runtime.installed")
+        } else {
+            renzora::lang::t("export.runtime.not_installed")
+        }
+    });
     commands.entity(body).add_child(line);
     // Buttons.
-    let btns = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).id();
-    let dl = pill_button(commands, fonts, "download-simple", &renzora::lang::t("export.btn.download_github"));
+    let btns = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .id();
+    let dl = pill_button(
+        commands,
+        fonts,
+        "download-simple",
+        &renzora::lang::t("export.btn.download_github"),
+    );
     commands.entity(dl).insert(DownloadBtn);
-    let inst = pill_button(commands, fonts, "folder-open", &renzora::lang::t("export.btn.install_from_file"));
+    let inst = pill_button(
+        commands,
+        fonts,
+        "folder-open",
+        &renzora::lang::t("export.btn.install_from_file"),
+    );
     commands.entity(inst).insert(InstallBtn);
     commands.entity(btns).add_children(&[dl, inst]);
     commands.entity(body).add_child(btns);
     // Download progress.
     let (prog, pmsg) = icon_msg(commands, fonts, "spinner", text_muted());
-    bind_text(commands, pmsg, move |w| match w.get_resource::<ExportOverlayState>().and_then(|s| s.download_status.clone()) {
-        Some((dp, DownloadProgress::Fetching(m))) if dp == p => m,
-        Some((dp, DownloadProgress::Done(m))) if dp == p => m,
-        Some((dp, DownloadProgress::Error(m))) if dp == p => m,
-        _ => String::new(),
+    bind_text(commands, pmsg, move |w| {
+        match w
+            .get_resource::<ExportOverlayState>()
+            .and_then(|s| s.download_status.clone())
+        {
+            Some((dp, DownloadProgress::Fetching(m))) if dp == p => m,
+            Some((dp, DownloadProgress::Done(m))) if dp == p => m,
+            Some((dp, DownloadProgress::Error(m))) if dp == p => m,
+            _ => String::new(),
+        }
     });
-    bind_display(commands, prog, move |w| w.get_resource::<ExportOverlayState>().and_then(|s| s.download_status.as_ref().map(|(dp, _)| *dp == p)).unwrap_or(false));
+    bind_display(commands, prog, move |w| {
+        w.get_resource::<ExportOverlayState>()
+            .and_then(|s| s.download_status.as_ref().map(|(dp, _)| *dp == p))
+            .unwrap_or(false)
+    });
     commands.entity(body).add_child(prog);
     sec
 }
 
 // ── Features tab: the lean engine-feature strip ──────────────────────────────
 
-fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, tab_max: f32) -> Entity {
+fn build_features_tab(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    host: bool,
+    tab_max: f32,
+) -> Entity {
     let panel = tab_panel(commands);
-    let (sec, body) = section(commands, fonts, "sliders-horizontal", &renzora::lang::t("export.section.engine_features"), accent());
+    let (sec, body) = section(
+        commands,
+        fonts,
+        "sliders-horizontal",
+        &renzora::lang::t("export.section.engine_features"),
+        accent(),
+    );
     if host {
-        let note = txt(commands, fonts, &renzora::lang::t("export.features.note_host"), 11.0, text_muted());
+        let note = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.features.note_host"),
+            11.0,
+            text_muted(),
+        );
         commands.entity(body).add_child(note);
-        let list = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(2.0), ..default() }).id();
+        let list = commands
+            .spawn(Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                ..default()
+            })
+            .id();
         // Grouped into sections (3D rendering, 2D rendering, Systems, …) so the
         // two pipelines can be compared side by side instead of reading as one
         // 60-row wall. Within a section: parents first, each followed by its own
@@ -1110,19 +1673,30 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
                 // `Interaction` — an earlier version made the whole row the fold
                 // control with buttons inside it, and pressing a button folded
                 // the section as well as doing its job.
-                let hrow = commands.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(8.0),
-                        padding: UiRect { left: Val::Px(6.0), right: Val::Px(6.0), top: Val::Px(4.0), bottom: Val::Px(4.0) },
-                        margin: UiRect { top: Val::Px(if idx == 0 { 0.0 } else { 8.0 }), bottom: Val::Px(2.0), ..default() },
-                        border_radius: BorderRadius::all(Val::Px(3.0)),
-                        ..default()
-                    },
-                    BackgroundColor(ca(255, 255, 255, 10)),
-                )).id();
+                let hrow = commands
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(8.0),
+                            padding: UiRect {
+                                left: Val::Px(6.0),
+                                right: Val::Px(6.0),
+                                top: Val::Px(4.0),
+                                bottom: Val::Px(4.0),
+                            },
+                            margin: UiRect {
+                                top: Val::Px(if idx == 0 { 0.0 } else { 8.0 }),
+                                bottom: Val::Px(2.0),
+                                ..default()
+                            },
+                            border_radius: BorderRadius::all(Val::Px(3.0)),
+                            ..default()
+                        },
+                        BackgroundColor(ca(255, 255, 255, 10)),
+                    ))
+                    .id();
                 // Section checkbox: on when every capability in the section is on,
                 // and writing it sets them all. Children included — a child is
                 // meaningless without its parent, and the nested entries are where
@@ -1146,25 +1720,32 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
                     },
                 );
                 // Everything right of the checkbox folds the section.
-                let fold = commands.spawn((
-                    Node {
-                        flex_grow: 1.0,
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(6.0),
-                        ..default()
-                    },
-                    Interaction::default(),
-                    SectionToggle(sid),
-                    cursor(),
-                )).id();
-                let ht = commands.spawn((
-                    Text::new(heading.to_string()),
-                    ui_font(&fonts.ui, 11.0),
-                    TextColor(rgb(text_primary())),
-                    Node { flex_grow: 1.0, ..default() },
-                    FocusPolicy::Pass,
-                )).id();
+                let fold = commands
+                    .spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(6.0),
+                            ..default()
+                        },
+                        Interaction::default(),
+                        SectionToggle(sid),
+                        cursor(),
+                    ))
+                    .id();
+                let ht = commands
+                    .spawn((
+                        Text::new(heading.to_string()),
+                        ui_font(&fonts.ui, 11.0),
+                        TextColor(rgb(text_primary())),
+                        Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        },
+                        FocusPolicy::Pass,
+                    ))
+                    .id();
                 // Chevron direction tracks the fold state, so the row reads as a
                 // control rather than decoration.
                 let chev = icon_text(commands, &fonts.phosphor, "caret-down", text_muted(), 11.0);
@@ -1173,7 +1754,11 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
                     let collapsed = w
                         .get_resource::<ExportOverlayState>()
                         .is_some_and(|s| s.collapsed_sections.contains(sid));
-                    let name = if collapsed { "caret-right" } else { "caret-down" };
+                    let name = if collapsed {
+                        "caret-right"
+                    } else {
+                        "caret-down"
+                    };
                     renzora_ember::phosphor_map::icon_glyph(name)
                         .unwrap_or('\u{E4C6}')
                         .to_string()
@@ -1221,12 +1806,23 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
                     .is_some_and(|s| s.collapsed_sections.contains(sid))
             });
             // Inlined `check_state` so the closures can capture the capability id.
-            let row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).id();
+            let row = commands
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .id();
             let cb = switch_control(commands, false);
             bind_2way(
                 commands,
                 cb,
-                move |w| w.get_resource::<ExportOverlayState>().map(|s| s.capabilities.get(id).copied().unwrap_or(false)).unwrap_or(false),
+                move |w| {
+                    w.get_resource::<ExportOverlayState>()
+                        .map(|s| s.capabilities.get(id).copied().unwrap_or(false))
+                        .unwrap_or(false)
+                },
                 move |w, v: &bool| {
                     if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
                         s.capabilities.insert(id.to_string(), *v);
@@ -1245,7 +1841,13 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
             // Right-aligned via a spacer so the badges line up in a column
             // instead of trailing each label at a different x.
             let spacer = commands
-                .spawn((Node { flex_grow: 1.0, ..default() }, FocusPolicy::Pass))
+                .spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    },
+                    FocusPolicy::Pass,
+                ))
                 .id();
             let info = icon_text(commands, &fonts.phosphor, "info", text_muted(), 13.0);
             commands.entity(info).insert((
@@ -1262,7 +1864,13 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
         }
         commands.entity(body).add_child(list);
     } else {
-        let note = txt(commands, fonts, &renzora::lang::t("export.features.note_nonhost"), 11.0, text_muted());
+        let note = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.features.note_nonhost"),
+            11.0,
+            text_muted(),
+        );
         commands.entity(body).add_child(note);
     }
     finish_tab(commands, panel, &[sec], tab_max);
@@ -1271,7 +1879,12 @@ fn build_features_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, t
 
 // ── Plugins tab ──────────────────────────────────────────────────────────────
 
-fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, tab_max: f32) -> Entity {
+fn build_plugins_tab(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    host: bool,
+    tab_max: f32,
+) -> Entity {
     let panel = tab_panel(commands);
     let mut secs = Vec::new();
 
@@ -1279,7 +1892,13 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
     // Offered only on the host platform, because linking in requires the lean
     // recompile and that can only target the triple the editor is running on.
     if host {
-        let (lsec, lbody) = section(commands, fonts, "link", &renzora::lang::t("export.section.plugin_link"), accent());
+        let (lsec, lbody) = section(
+            commands,
+            fonts,
+            "link",
+            &renzora::lang::t("export.section.plugin_link"),
+            accent(),
+        );
         let files = renzora::lang::t("export.plugin_link.files");
         let linked = renzora::lang::t("export.plugin_link.linked");
         let labels: Vec<&str> = vec![files.as_str(), linked.as_str()];
@@ -1299,12 +1918,24 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
             },
         );
         commands.entity(lbody).add_child(radios);
-        let hint = txt(commands, fonts, &renzora::lang::t("export.plugin_link.hint"), 11.0, text_muted());
+        let hint = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.plugin_link.hint"),
+            11.0,
+            text_muted(),
+        );
         commands.entity(lbody).add_child(hint);
         // Linking in needs something to compile into, and only the lean mode
         // compiles. Rather than disable the radio from the other tab (where the
         // reason would be invisible), say so — and only when it applies.
-        let warn = txt(commands, fonts, &renzora::lang::t("export.plugin_link.needs_lean"), 11.0, AMBER);
+        let warn = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.plugin_link.needs_lean"),
+            11.0,
+            AMBER,
+        );
         bind_display(commands, warn, |w| {
             w.get_resource::<ExportOverlayState>().is_some_and(|s| {
                 s.plugin_link_mode == PluginLinkMode::LinkIn
@@ -1315,7 +1946,13 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
         secs.push(lsec);
     }
 
-    let (sec, body) = section(commands, fonts, "puzzle-piece", &renzora::lang::t("export.section.plugins"), accent());
+    let (sec, body) = section(
+        commands,
+        fonts,
+        "puzzle-piece",
+        &renzora::lang::t("export.section.plugins"),
+        accent(),
+    );
     // A wrapping grid of thumbnail cards, matching Settings → Plugins. This was
     // a zebra-striped list of checkboxes: seventy identical rows in which the
     // only way to tell one plugin from another was to read it. The artwork does
@@ -1356,13 +1993,29 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
     // Filled by a command that can read the world (the plugin list is stable
     // after the scan).
     commands.queue(move |world: &mut World| {
-        let plugins: Vec<(String, String)> = world.get_resource::<ExportOverlayState>().map(|s| s.available_plugins.iter().map(|p| (p.id.clone(), format!("{:?}", p.scope))).collect()).unwrap_or_default();
-        let Some(fonts) = world.get_resource::<EmberFonts>().cloned() else { return };
+        let plugins: Vec<(String, String)> = world
+            .get_resource::<ExportOverlayState>()
+            .map(|s| {
+                s.available_plugins
+                    .iter()
+                    .map(|p| (p.id.clone(), format!("{:?}", p.scope)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(fonts) = world.get_resource::<EmberFonts>().cloned() else {
+            return;
+        };
         let mut queue = CommandQueue::default();
         {
             let mut c = Commands::new(&mut queue, world);
             if plugins.is_empty() {
-                let note = c.spawn((Text::new(renzora::lang::t("export.plugins.none")), ui_font(&fonts.ui, 11.0), TextColor(rgb(text_muted())))).id();
+                let note = c
+                    .spawn((
+                        Text::new(renzora::lang::t("export.plugins.none")),
+                        ui_font(&fonts.ui, 11.0),
+                        TextColor(rgb(text_muted())),
+                    ))
+                    .id();
                 c.entity(list).add_child(note);
             }
             for (id, scope) in plugins.into_iter() {
@@ -1443,7 +2096,12 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
                         ui_font(&fonts.ui, 9.0),
                         TextColor(rgb(text_muted())),
                         bevy::text::TextLayout::no_wrap(),
-                        Node { flex_grow: 1.0, min_width: Val::Px(0.0), overflow: Overflow::clip(), ..default() },
+                        Node {
+                            flex_grow: 1.0,
+                            min_width: Val::Px(0.0),
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
                     ))
                     .id();
 
@@ -1456,14 +2114,26 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
                 // does not block hands its press to everything behind it.
                 c.entity(sw).insert(FocusPolicy::Block);
                 let id2 = id.clone();
-                bind_2way(&mut c, sw, move |w| w.get_resource::<ExportOverlayState>().is_some_and(|s| s.selected_plugins.contains(&id2)), {
-                    let id3 = id.clone();
-                    move |w, v: &bool| {
-                        if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
-                            if *v { s.selected_plugins.insert(id3.clone()); } else { s.selected_plugins.remove(&id3); }
+                bind_2way(
+                    &mut c,
+                    sw,
+                    move |w| {
+                        w.get_resource::<ExportOverlayState>()
+                            .is_some_and(|s| s.selected_plugins.contains(&id2))
+                    },
+                    {
+                        let id3 = id.clone();
+                        move |w, v: &bool| {
+                            if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
+                                if *v {
+                                    s.selected_plugins.insert(id3.clone());
+                                } else {
+                                    s.selected_plugins.remove(&id3);
+                                }
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 c.entity(foot).add_children(&[scope_t, sw]);
 
                 c.entity(card).add_children(&[thumb, name, foot]);
@@ -1485,10 +2155,28 @@ fn build_plugins_tab(commands: &mut Commands, fonts: &EmberFonts, host: bool, ta
 /// packed, so they live under Packaging rather than behind a tab of their own.
 fn compression_sections(commands: &mut Commands, fonts: &EmberFonts) -> Vec<Entity> {
     // Asset compression level.
-    let (csec, cbody) = section(commands, fonts, "file-archive", &renzora::lang::t("export.section.compression"), accent());
-    let crow = labeled(commands, fonts, &renzora::lang::t("export.field.compression_level"));
+    let (csec, cbody) = section(
+        commands,
+        fonts,
+        "file-archive",
+        &renzora::lang::t("export.section.compression"),
+        accent(),
+    );
+    let crow = labeled(
+        commands,
+        fonts,
+        &renzora::lang::t("export.field.compression_level"),
+    );
     let dv = drag_value(commands, &fonts.ui, "", text_primary(), 0.0, 1.0);
-    bind_2way(commands, dv, |w| w.resource::<ExportOverlayState>().compression_level as f32, |w, v: &f32| w.resource_mut::<ExportOverlayState>().compression_level = (v.round() as i32).clamp(1, 22));
+    bind_2way(
+        commands,
+        dv,
+        |w| w.resource::<ExportOverlayState>().compression_level as f32,
+        |w, v: &f32| {
+            w.resource_mut::<ExportOverlayState>().compression_level =
+                (v.round() as i32).clamp(1, 22)
+        },
+    );
     commands.entity(crow).add_child(dv);
     commands.entity(cbody).add_child(crow);
 
@@ -1496,31 +2184,103 @@ fn compression_sections(commands: &mut Commands, fonts: &EmberFonts) -> Vec<Enti
     // compression level because the two answer one question — how small is the
     // shipped folder — even though one is an rpak setting and the other a
     // post-build pass over the executable.
-    let upx = check_state(commands, fonts, &renzora::lang::t("export.compression.upx"), |s| s.upx_compress, |s, v| s.upx_compress = v);
+    let upx = check_state(
+        commands,
+        fonts,
+        &renzora::lang::t("export.compression.upx"),
+        |s| s.upx_compress,
+        |s, v| s.upx_compress = v,
+    );
     commands.entity(cbody).add_child(upx);
-    let upx_help = txt(commands, fonts, &renzora::lang::t("export.compression.upx_help"), 10.0, text_muted());
+    let upx_help = txt(
+        commands,
+        fonts,
+        &renzora::lang::t("export.compression.upx_help"),
+        10.0,
+        text_muted(),
+    );
     commands.entity(cbody).add_child(upx_help);
 
     // Mesh optimization.
-    let (msec, mbody) = section(commands, fonts, "cube", &renzora::lang::t("export.section.mesh_opt"), accent());
-    let simplify = check_state(commands, fonts, &renzora::lang::t("export.mesh.simplify"), |s| s.mesh_simplify, |s, v| s.mesh_simplify = v);
+    let (msec, mbody) = section(
+        commands,
+        fonts,
+        "cube",
+        &renzora::lang::t("export.section.mesh_opt"),
+        accent(),
+    );
+    let simplify = check_state(
+        commands,
+        fonts,
+        &renzora::lang::t("export.mesh.simplify"),
+        |s| s.mesh_simplify,
+        |s, v| s.mesh_simplify = v,
+    );
     commands.entity(mbody).add_child(simplify);
-    let ratio = labeled(commands, fonts, &renzora::lang::t("export.field.keep_ratio"));
+    let ratio = labeled(
+        commands,
+        fonts,
+        &renzora::lang::t("export.field.keep_ratio"),
+    );
     let dvr = drag_value(commands, &fonts.ui, "", text_primary(), 0.0, 0.01);
-    bind_2way(commands, dvr, |w| w.resource::<ExportOverlayState>().mesh_simplify_ratio, |w, v: &f32| w.resource_mut::<ExportOverlayState>().mesh_simplify_ratio = v.clamp(0.1, 1.0));
+    bind_2way(
+        commands,
+        dvr,
+        |w| w.resource::<ExportOverlayState>().mesh_simplify_ratio,
+        |w, v: &f32| w.resource_mut::<ExportOverlayState>().mesh_simplify_ratio = v.clamp(0.1, 1.0),
+    );
     commands.entity(ratio).add_child(dvr);
-    commands.entity(ratio).insert(Node { margin: UiRect::left(Val::Px(20.0)), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() });
-    bind_display(commands, ratio, |w| w.resource::<ExportOverlayState>().mesh_simplify);
+    commands.entity(ratio).insert(Node {
+        margin: UiRect::left(Val::Px(20.0)),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        ..default()
+    });
+    bind_display(commands, ratio, |w| {
+        w.resource::<ExportOverlayState>().mesh_simplify
+    });
     commands.entity(mbody).add_child(ratio);
-    let quant = check_state(commands, fonts, &renzora::lang::t("export.mesh.quantize"), |s| s.mesh_quantize, |s, v| s.mesh_quantize = v);
-    let lods = check_state(commands, fonts, &renzora::lang::t("export.mesh.generate_lods"), |s| s.mesh_generate_lods, |s, v| s.mesh_generate_lods = v);
+    let quant = check_state(
+        commands,
+        fonts,
+        &renzora::lang::t("export.mesh.quantize"),
+        |s| s.mesh_quantize,
+        |s, v| s.mesh_quantize = v,
+    );
+    let lods = check_state(
+        commands,
+        fonts,
+        &renzora::lang::t("export.mesh.generate_lods"),
+        |s| s.mesh_generate_lods,
+        |s, v| s.mesh_generate_lods = v,
+    );
     commands.entity(mbody).add_children(&[quant, lods]);
-    let levels = labeled(commands, fonts, &renzora::lang::t("export.field.lod_levels"));
+    let levels = labeled(
+        commands,
+        fonts,
+        &renzora::lang::t("export.field.lod_levels"),
+    );
     let dvl = drag_value(commands, &fonts.ui, "", text_primary(), 0.0, 1.0);
-    bind_2way(commands, dvl, |w| w.resource::<ExportOverlayState>().mesh_lod_levels as f32, |w, v: &f32| w.resource_mut::<ExportOverlayState>().mesh_lod_levels = (v.round() as u32).clamp(1, 5));
+    bind_2way(
+        commands,
+        dvl,
+        |w| w.resource::<ExportOverlayState>().mesh_lod_levels as f32,
+        |w, v: &f32| {
+            w.resource_mut::<ExportOverlayState>().mesh_lod_levels = (v.round() as u32).clamp(1, 5)
+        },
+    );
     commands.entity(levels).add_child(dvl);
-    commands.entity(levels).insert(Node { margin: UiRect::left(Val::Px(20.0)), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() });
-    bind_display(commands, levels, |w| w.resource::<ExportOverlayState>().mesh_generate_lods);
+    commands.entity(levels).insert(Node {
+        margin: UiRect::left(Val::Px(20.0)),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        ..default()
+    });
+    bind_display(commands, levels, |w| {
+        w.resource::<ExportOverlayState>().mesh_generate_lods
+    });
     commands.entity(mbody).add_child(levels);
     vec![csec, msec]
 }
@@ -1531,16 +2291,32 @@ fn compression_sections(commands: &mut Commands, fonts: &EmberFonts) -> Vec<Enti
 ///
 /// Returns sections rather than a tab: these describe the thing being produced —
 /// what window it opens, whether it logs — so they belong with Output.
-fn options_sections(commands: &mut Commands, fonts: &EmberFonts, p: Platform, desktop: bool) -> Vec<Entity> {
+fn options_sections(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    p: Platform,
+    desktop: bool,
+) -> Vec<Entity> {
     let mut secs = Vec::new();
 
     // Window (desktop).
     if desktop {
-        let (wsec, wbody) = section(commands, fonts, "monitor", &renzora::lang::t("export.section.window"), accent());
+        let (wsec, wbody) = section(
+            commands,
+            fonts,
+            "monitor",
+            &renzora::lang::t("export.section.window"),
+            accent(),
+        );
         let windowed = renzora::lang::t("export.window.windowed");
         let fullscreen = renzora::lang::t("export.window.fullscreen");
         let borderless = renzora::lang::t("export.window.borderless");
-        let radios = radio_group(commands, &fonts.ui, &[windowed.as_str(), fullscreen.as_str(), borderless.as_str()], 0);
+        let radios = radio_group(
+            commands,
+            &fonts.ui,
+            &[windowed.as_str(), fullscreen.as_str(), borderless.as_str()],
+            0,
+        );
         bind_2way(
             commands,
             radios,
@@ -1549,28 +2325,86 @@ fn options_sections(commands: &mut Commands, fonts: &EmberFonts, p: Platform, de
                 WindowMode::Borderless => 2,
                 _ => 0,
             },
-            |w, v: &usize| w.resource_mut::<ExportOverlayState>().window_mode = match v { 1 => WindowMode::Fullscreen, 2 => WindowMode::Borderless, _ => WindowMode::Windowed },
+            |w, v: &usize| {
+                w.resource_mut::<ExportOverlayState>().window_mode = match v {
+                    1 => WindowMode::Fullscreen,
+                    2 => WindowMode::Borderless,
+                    _ => WindowMode::Windowed,
+                }
+            },
         );
         commands.entity(wbody).add_child(radios);
-        let size = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).id();
-        let szl = txt(commands, fonts, &renzora::lang::t("export.field.size"), 12.0, text_muted());
+        let size = commands
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            })
+            .id();
+        let szl = txt(
+            commands,
+            fonts,
+            &renzora::lang::t("export.field.size"),
+            12.0,
+            text_muted(),
+        );
         let dw = drag_value(commands, &fonts.ui, "", text_primary(), 0.0, 10.0);
-        bind_2way(commands, dw, |w| w.resource::<ExportOverlayState>().window_width as f32, |w, v: &f32| w.resource_mut::<ExportOverlayState>().window_width = (v.round() as u32).clamp(320, 7680));
+        bind_2way(
+            commands,
+            dw,
+            |w| w.resource::<ExportOverlayState>().window_width as f32,
+            |w, v: &f32| {
+                w.resource_mut::<ExportOverlayState>().window_width =
+                    (v.round() as u32).clamp(320, 7680)
+            },
+        );
         let xl = txt(commands, fonts, "x", 12.0, text_muted());
         let dh = drag_value(commands, &fonts.ui, "", text_primary(), 0.0, 10.0);
-        bind_2way(commands, dh, |w| w.resource::<ExportOverlayState>().window_height as f32, |w, v: &f32| w.resource_mut::<ExportOverlayState>().window_height = (v.round() as u32).clamp(240, 4320));
+        bind_2way(
+            commands,
+            dh,
+            |w| w.resource::<ExportOverlayState>().window_height as f32,
+            |w, v: &f32| {
+                w.resource_mut::<ExportOverlayState>().window_height =
+                    (v.round() as u32).clamp(240, 4320)
+            },
+        );
         commands.entity(size).add_children(&[szl, dw, xl, dh]);
-        bind_display(commands, size, |w| matches!(w.resource::<ExportOverlayState>().window_mode, WindowMode::Windowed));
+        bind_display(commands, size, |w| {
+            matches!(
+                w.resource::<ExportOverlayState>().window_mode,
+                WindowMode::Windowed
+            )
+        });
         commands.entity(wbody).add_child(size);
         secs.push(wsec);
     }
 
     // Flags.
-    let (osec, obody) = section(commands, fonts, "gear", &renzora::lang::t("export.section.options"), accent());
-    let console = check_state(commands, fonts, &renzora::lang::t("export.options.console_logging"), |s| s.console_logging, |s, v| s.console_logging = v);
+    let (osec, obody) = section(
+        commands,
+        fonts,
+        "gear",
+        &renzora::lang::t("export.section.options"),
+        accent(),
+    );
+    let console = check_state(
+        commands,
+        fonts,
+        &renzora::lang::t("export.options.console_logging"),
+        |s| s.console_logging,
+        |s, v| s.console_logging = v,
+    );
     commands.entity(obody).add_child(console);
     if desktop && p.supports_dedicated_server() {
-        let server = check_state(commands, fonts, &renzora::lang::t("export.options.include_server"), |s| s.include_server, |s, v| s.include_server = v);
+        let server = check_state(
+            commands,
+            fonts,
+            &renzora::lang::t("export.options.include_server"),
+            |s| s.include_server,
+            |s, v| s.include_server = v,
+        );
         commands.entity(obody).add_child(server);
     }
     secs.push(osec);
@@ -1617,37 +2451,93 @@ fn bind_width_pct(
 /// live build output, and a Cancel/Back button. Replaces the old inline progress.
 fn build_log_view(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     let view = commands
-        .spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(8.0), flex_grow: 1.0, min_height: Val::Px(0.0), ..default() })
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(8.0),
+            flex_grow: 1.0,
+            min_height: Val::Px(0.0),
+            ..default()
+        })
         .id();
 
     // Heading — reflects the current phase.
-    let heading_row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).id();
+    let heading_row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .id();
     let sp = spinner(commands);
     bind_display(commands, sp, |w| {
-        w.get_resource::<ExportOverlayState>().map(|s| s.active_task.is_some()).unwrap_or(false)
+        w.get_resource::<ExportOverlayState>()
+            .map(|s| s.active_task.is_some())
+            .unwrap_or(false)
     });
     let heading = txt(commands, fonts, "", 14.0, text_primary());
-    bind_text(commands, heading, |w| match w.get_resource::<ExportOverlayState>().map(|s| s.progress.clone()) {
-        Some(ExportProgress::Done(_)) => renzora::lang::t("export.status.complete"),
-        Some(ExportProgress::Error(_)) => renzora::lang::t("export.status.failed"),
-        _ => renzora::lang::t("export.status.exporting"),
+    bind_text(commands, heading, |w| {
+        match w
+            .get_resource::<ExportOverlayState>()
+            .map(|s| s.progress.clone())
+        {
+            Some(ExportProgress::Done(_)) => renzora::lang::t("export.status.complete"),
+            Some(ExportProgress::Error(_)) => renzora::lang::t("export.status.failed"),
+            _ => renzora::lang::t("export.status.exporting"),
+        }
     });
-    bind_text_color(commands, heading, |w| match w.get_resource::<ExportOverlayState>().map(|s| s.progress.clone()) {
-        Some(ExportProgress::Done(_)) => rgb(GREEN),
-        Some(ExportProgress::Error(_)) => rgb(RED),
-        _ => rgb(text_primary()),
+    bind_text_color(commands, heading, |w| {
+        match w
+            .get_resource::<ExportOverlayState>()
+            .map(|s| s.progress.clone())
+        {
+            Some(ExportProgress::Done(_)) => rgb(GREEN),
+            Some(ExportProgress::Error(_)) => rgb(RED),
+            _ => rgb(text_primary()),
+        }
     });
     commands.entity(heading_row).add_children(&[sp, heading]);
 
     // Progress bar.
-    let track = commands.spawn((Node { width: Val::Percent(100.0), height: Val::Px(8.0), border_radius: BorderRadius::all(Val::Px(4.0)), overflow: Overflow::clip(), ..default() }, BackgroundColor(rgb(card_bg())))).id();
-    let fill = commands.spawn((Node { width: Val::Percent(2.0), height: Val::Percent(100.0), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() }, BackgroundColor(rgb(accent())))).id();
+    let track = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(8.0),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(rgb(card_bg())),
+        ))
+        .id();
+    let fill = commands
+        .spawn((
+            Node {
+                width: Val::Percent(2.0),
+                height: Val::Percent(100.0),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(rgb(accent())),
+        ))
+        .id();
     commands.entity(track).add_child(fill);
-    bind_width_pct(commands, fill, |w| w.get_resource::<ExportOverlayState>().map(build_fraction).unwrap_or(0.0));
-    bind_bg(commands, fill, |w| match w.get_resource::<ExportOverlayState>().map(|s| s.progress.clone()) {
-        Some(ExportProgress::Error(_)) => rgb(RED),
-        Some(ExportProgress::Done(_)) => rgb(GREEN),
-        _ => rgb(accent()),
+    bind_width_pct(commands, fill, |w| {
+        w.get_resource::<ExportOverlayState>()
+            .map(build_fraction)
+            .unwrap_or(0.0)
+    });
+    bind_bg(commands, fill, |w| {
+        match w
+            .get_resource::<ExportOverlayState>()
+            .map(|s| s.progress.clone())
+        {
+            Some(ExportProgress::Error(_)) => rgb(RED),
+            Some(ExportProgress::Done(_)) => rgb(GREEN),
+            _ => rgb(accent()),
+        }
     });
 
     // Terminal — dark monospace box with the FULL build log in a pinned scroll
@@ -1655,22 +2545,82 @@ fn build_log_view(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     // the user scrolls up to read back (an error can otherwise be pushed out of
     // view by cargo's huge linker-command dump). `build_log` is tail-capped at 600
     // lines upstream so this stays bounded.
-    let term = commands.spawn((Node { width: Val::Percent(100.0), height: Val::Px(360.0), flex_direction: FlexDirection::Column, padding: UiRect::all(Val::Px(8.0)), overflow: Overflow::clip(), ..default() }, BackgroundColor(rgb((14, 16, 20))))).id();
-    let log_text = commands.spawn((Text::new(""), ui_font(&fonts.mono, 11.0), TextColor(rgb(text_muted())), FocusPolicy::Pass)).id();
+    let term = commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(360.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(8.0)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(rgb((14, 16, 20))),
+        ))
+        .id();
+    let log_text = commands
+        .spawn((
+            Text::new(""),
+            ui_font(&fonts.mono, 11.0),
+            TextColor(rgb(text_muted())),
+            FocusPolicy::Pass,
+        ))
+        .id();
     bind_text(commands, log_text, |w| {
-        w.get_resource::<ExportOverlayState>().map(|s| s.build_log.join("\n")).unwrap_or_default()
+        w.get_resource::<ExportOverlayState>()
+            .map(|s| s.build_log.join("\n"))
+            .unwrap_or_default()
     });
     let log_scroll = scroll_view_pinned(commands, log_text);
     commands.entity(term).add_child(log_scroll);
 
     // Buttons: Copy log (left), Cancel/Back (right).
-    let btn_row = commands.spawn(Node { width: Val::Percent(100.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, ..default() }).id();
-    let copy_btn = pill_button(commands, fonts, "clipboard", &renzora::lang::t("export.btn.copy_log"));
+    let btn_row = commands
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            ..default()
+        })
+        .id();
+    let copy_btn = pill_button(
+        commands,
+        fonts,
+        "clipboard",
+        &renzora::lang::t("export.btn.copy_log"),
+    );
     commands.entity(copy_btn).insert(CopyLogBtn);
-    let btn = commands.spawn((Node { min_width: Val::Px(100.0), height: Val::Px(32.0), flex_direction: FlexDirection::Row, align_items: AlignItems::Center, justify_content: JustifyContent::Center, border_radius: BorderRadius::all(Val::Px(5.0)), ..default() }, BackgroundColor(rgb(section_bg())), Interaction::default(), CancelOrBackBtn, cursor())).id();
-    let btn_label = commands.spawn((Text::new(renzora::lang::t("common.cancel")), ui_font(&fonts.ui, 13.0), TextColor(rgb(text_primary())), FocusPolicy::Pass)).id();
+    let btn = commands
+        .spawn((
+            Node {
+                min_width: Val::Px(100.0),
+                height: Val::Px(32.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(5.0)),
+                ..default()
+            },
+            BackgroundColor(rgb(section_bg())),
+            Interaction::default(),
+            CancelOrBackBtn,
+            cursor(),
+        ))
+        .id();
+    let btn_label = commands
+        .spawn((
+            Text::new(renzora::lang::t("common.cancel")),
+            ui_font(&fonts.ui, 13.0),
+            TextColor(rgb(text_primary())),
+            FocusPolicy::Pass,
+        ))
+        .id();
     bind_text(commands, btn_label, |w| {
-        if w.get_resource::<ExportOverlayState>().map(|s| s.active_task.is_some()).unwrap_or(false) {
+        if w.get_resource::<ExportOverlayState>()
+            .map(|s| s.active_task.is_some())
+            .unwrap_or(false)
+        {
             renzora::lang::t("common.cancel")
         } else {
             renzora::lang::t("export.btn.back")
@@ -1679,7 +2629,9 @@ fn build_log_view(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     commands.entity(btn).add_child(btn_label);
     commands.entity(btn_row).add_children(&[copy_btn, btn]);
 
-    commands.entity(view).add_children(&[heading_row, track, term, btn_row]);
+    commands
+        .entity(view)
+        .add_children(&[heading_row, track, term, btn_row]);
     view
 }
 
@@ -1725,9 +2677,22 @@ fn build_export_btn(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
             rgb(section_bg())
         }
     });
-    let ic = icon_text(commands, &fonts.phosphor, "rocket-launch", (255, 255, 255), 14.0);
+    let ic = icon_text(
+        commands,
+        &fonts.phosphor,
+        "rocket-launch",
+        (255, 255, 255),
+        14.0,
+    );
     commands.entity(ic).insert(FocusPolicy::Pass);
-    let t = commands.spawn((Text::new(renzora::lang::t("common.export")), ui_font(&fonts.ui, 13.0), TextColor(Color::WHITE), FocusPolicy::Pass)).id();
+    let t = commands
+        .spawn((
+            Text::new(renzora::lang::t("common.export")),
+            ui_font(&fonts.ui, 13.0),
+            TextColor(Color::WHITE),
+            FocusPolicy::Pass,
+        ))
+        .id();
     commands.entity(btn).add_children(&[ic, t]);
     btn
 }
@@ -1735,12 +2700,25 @@ fn build_export_btn(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
 // ── Interaction ──────────────────────────────────────────────────────────────
 
 fn can_export(w: &Rx) -> bool {
-    let Some(s) = w.get_resource::<ExportOverlayState>() else { return false };
-    let installed = w.get_resource::<TemplateManager>().is_some_and(|t| t.is_installed(s.platform));
-    installed && !s.output_dir.is_empty() && s.active_task.is_none() && matches!(s.progress, ExportProgress::Idle | ExportProgress::Done(_) | ExportProgress::Error(_))
+    let Some(s) = w.get_resource::<ExportOverlayState>() else {
+        return false;
+    };
+    let installed = w
+        .get_resource::<TemplateManager>()
+        .is_some_and(|t| t.is_installed(s.platform));
+    installed
+        && !s.output_dir.is_empty()
+        && s.active_task.is_none()
+        && matches!(
+            s.progress,
+            ExportProgress::Idle | ExportProgress::Done(_) | ExportProgress::Error(_)
+        )
 }
 
-fn preset_click(q: Query<(&Interaction, &PresetBtn), Changed<Interaction>>, mut state: Option<ResMut<ExportOverlayState>>) {
+fn preset_click(
+    q: Query<(&Interaction, &PresetBtn), Changed<Interaction>>,
+    mut state: Option<ResMut<ExportOverlayState>>,
+) {
     let Some(state) = state.as_mut() else { return };
     for (i, b) in &q {
         if *i == Interaction::Pressed {
@@ -1750,7 +2728,10 @@ fn preset_click(q: Query<(&Interaction, &PresetBtn), Changed<Interaction>>, mut 
     }
 }
 
-fn preset_dup_click(q: Query<&Interaction, (With<PresetDupBtn>, Changed<Interaction>)>, mut state: Option<ResMut<ExportOverlayState>>) {
+fn preset_dup_click(
+    q: Query<&Interaction, (With<PresetDupBtn>, Changed<Interaction>)>,
+    mut state: Option<ResMut<ExportOverlayState>>,
+) {
     let Some(state) = state.as_mut() else { return };
     if !q.iter().any(|i| *i == Interaction::Pressed) {
         return;
@@ -1758,7 +2739,13 @@ fn preset_dup_click(q: Query<&Interaction, (With<PresetDupBtn>, Changed<Interact
     // Duplicate what is on screen, not what was last saved — the edits made
     // since selecting are the reason to duplicate rather than add.
     state.sync_active_preset();
-    let Some(src) = state.active_preset.and_then(|i| state.presets.get(i)).cloned() else { return };
+    let Some(src) = state
+        .active_preset
+        .and_then(|i| state.presets.get(i))
+        .cloned()
+    else {
+        return;
+    };
     let mut copy = src;
     copy.name = crate::presets::unique_name(&copy.name, &state.presets);
     state.presets.push(copy);
@@ -1766,7 +2753,10 @@ fn preset_dup_click(q: Query<&Interaction, (With<PresetDupBtn>, Changed<Interact
     state.save_presets();
 }
 
-fn preset_del_click(q: Query<&Interaction, (With<PresetDelBtn>, Changed<Interaction>)>, mut state: Option<ResMut<ExportOverlayState>>) {
+fn preset_del_click(
+    q: Query<&Interaction, (With<PresetDelBtn>, Changed<Interaction>)>,
+    mut state: Option<ResMut<ExportOverlayState>>,
+) {
     let Some(state) = state.as_mut() else { return };
     if !q.iter().any(|i| *i == Interaction::Pressed) {
         return;
@@ -1784,13 +2774,20 @@ fn preset_del_click(q: Query<&Interaction, (With<PresetDelBtn>, Changed<Interact
     } else {
         Some(i.min(state.presets.len() - 1))
     };
-    if let Some(p) = state.active_preset.and_then(|i| state.presets.get(i)).cloned() {
+    if let Some(p) = state
+        .active_preset
+        .and_then(|i| state.presets.get(i))
+        .cloned()
+    {
         p.apply(state);
     }
     state.save_presets();
 }
 
-fn close_click(q: Query<&Interaction, (With<CloseBtn>, Changed<Interaction>)>, mut state: Option<ResMut<ExportOverlayState>>) {
+fn close_click(
+    q: Query<&Interaction, (With<CloseBtn>, Changed<Interaction>)>,
+    mut state: Option<ResMut<ExportOverlayState>>,
+) {
     let Some(state) = state.as_mut() else { return };
     if q.iter().any(|i| *i == Interaction::Pressed) {
         // Persist before hiding. Every field in the form writes to the flat
@@ -1869,7 +2866,9 @@ fn section_toggle_click(
 /// `section` decides placement, and the two agree by construction, but resolving
 /// through the parent means a mismatch can't leave a visible row out of the
 /// header checkbox's reach.
-fn section_members(sid: &'static str) -> impl Iterator<Item = &'static crate::capabilities::Capability> {
+fn section_members(
+    sid: &'static str,
+) -> impl Iterator<Item = &'static crate::capabilities::Capability> {
     crate::capabilities::CAPABILITIES.iter().filter(move |c| {
         let owning = c
             .group
@@ -1879,7 +2878,10 @@ fn section_members(sid: &'static str) -> impl Iterator<Item = &'static crate::ca
     })
 }
 
-fn icon_clear_click(q: Query<&Interaction, (With<IconClearBtn>, Changed<Interaction>)>, mut state: Option<ResMut<ExportOverlayState>>) {
+fn icon_clear_click(
+    q: Query<&Interaction, (With<IconClearBtn>, Changed<Interaction>)>,
+    mut state: Option<ResMut<ExportOverlayState>>,
+) {
     let Some(state) = state.as_mut() else { return };
     if q.iter().any(|i| *i == Interaction::Pressed) {
         state.icon_path = None;
@@ -1915,7 +2917,8 @@ fn spawn_save_prompt(world: &mut World) {
         let (overlay, content) =
             renzora_ember::widgets::overlay_sized(&mut c, &fonts, "Export", 420.0, 190.0, true);
         // Above the export dialog (9300) that opened it.
-        c.entity(overlay).insert((GlobalZIndex(9800), SavePromptRoot));
+        c.entity(overlay)
+            .insert((GlobalZIndex(9800), SavePromptRoot));
 
         let msg = txt(
             &mut c,
@@ -1924,7 +2927,10 @@ fn spawn_save_prompt(world: &mut World) {
             12.0,
             text_primary(),
         );
-        c.entity(msg).insert(Node { margin: UiRect::bottom(Val::Px(14.0)), ..default() });
+        c.entity(msg).insert(Node {
+            margin: UiRect::bottom(Val::Px(14.0)),
+            ..default()
+        });
 
         let row = c
             .spawn(Node {
@@ -1988,7 +2994,10 @@ fn save_prompt_click(
     });
 }
 
-fn export_click(q: Query<&Interaction, (With<ExportBtn>, Changed<Interaction>)>, mut commands: Commands) {
+fn export_click(
+    q: Query<&Interaction, (With<ExportBtn>, Changed<Interaction>)>,
+    mut commands: Commands,
+) {
     if q.iter().any(|i| *i == Interaction::Pressed) {
         commands.queue(|w: &mut World| {
             if can_export(&Rx::new(&*w)) {
@@ -1998,21 +3007,39 @@ fn export_click(q: Query<&Interaction, (With<ExportBtn>, Changed<Interaction>)>,
     }
 }
 
-fn output_browse_click(q: Query<&Interaction, (With<OutputBrowseBtn>, Changed<Interaction>)>, mut commands: Commands) {
+fn output_browse_click(
+    q: Query<&Interaction, (With<OutputBrowseBtn>, Changed<Interaction>)>,
+    mut commands: Commands,
+) {
     if q.iter().any(|i| *i == Interaction::Pressed) {
         commands.queue(|w: &mut World| {
-            if let Some(dir) = rfd::FileDialog::new().set_title(renzora::lang::t("export.dialog.select_output")).pick_folder() {
-                w.resource_mut::<ExportOverlayState>().output_dir = dir.to_string_lossy().to_string();
+            if let Some(dir) = rfd::FileDialog::new()
+                .set_title(renzora::lang::t("export.dialog.select_output"))
+                .pick_folder()
+            {
+                w.resource_mut::<ExportOverlayState>().output_dir =
+                    dir.to_string_lossy().to_string();
             }
         });
     }
 }
 
-fn icon_browse_click(q: Query<&Interaction, (With<IconBrowseBtn>, Changed<Interaction>)>, mut commands: Commands) {
+fn icon_browse_click(
+    q: Query<&Interaction, (With<IconBrowseBtn>, Changed<Interaction>)>,
+    mut commands: Commands,
+) {
     if q.iter().any(|i| *i == Interaction::Pressed) {
         commands.queue(|w: &mut World| {
-            if let Some(f) = rfd::FileDialog::new().set_title(renzora::lang::t("export.dialog.select_icon")).add_filter(renzora::lang::t("export.filter.images"), &["png", "ico", "svg"]).pick_file() {
-                w.resource_mut::<ExportOverlayState>().icon_path = Some(f.to_string_lossy().to_string());
+            if let Some(f) = rfd::FileDialog::new()
+                .set_title(renzora::lang::t("export.dialog.select_icon"))
+                .add_filter(
+                    renzora::lang::t("export.filter.images"),
+                    &["png", "ico", "svg"],
+                )
+                .pick_file()
+            {
+                w.resource_mut::<ExportOverlayState>().icon_path =
+                    Some(f.to_string_lossy().to_string());
             }
         });
     }
@@ -2050,7 +3077,10 @@ fn source_download_click(
     }
 }
 
-fn download_click(q: Query<&Interaction, (With<DownloadBtn>, Changed<Interaction>)>, mut commands: Commands) {
+fn download_click(
+    q: Query<&Interaction, (With<DownloadBtn>, Changed<Interaction>)>,
+    mut commands: Commands,
+) {
     if q.iter().any(|i| *i == Interaction::Pressed) {
         commands.queue(|w: &mut World| {
             let p = w.resource::<ExportOverlayState>().platform;
@@ -2059,27 +3089,43 @@ fn download_click(q: Query<&Interaction, (With<DownloadBtn>, Changed<Interaction
             // the worker thread that could have resolved differently.
             let Some(release) = w.resource::<ExportOverlayState>().release_info.clone() else {
                 let mut s = w.resource_mut::<ExportOverlayState>();
-                s.download_status = Some((p, DownloadProgress::Error(renzora::lang::t("export.status.no_release"))));
+                s.download_status = Some((
+                    p,
+                    DownloadProgress::Error(renzora::lang::t("export.status.no_release")),
+                ));
                 return;
             };
             let task = download::spawn_download(p, release);
             let mut s = w.resource_mut::<ExportOverlayState>();
             s.download_task = Some(task);
-            s.download_status = Some((p, DownloadProgress::Fetching(renzora::lang::t("export.status.download_starting"))));
+            s.download_status = Some((
+                p,
+                DownloadProgress::Fetching(renzora::lang::t("export.status.download_starting")),
+            ));
         });
     }
 }
 
-fn install_click(q: Query<&Interaction, (With<InstallBtn>, Changed<Interaction>)>, mut commands: Commands) {
+fn install_click(
+    q: Query<&Interaction, (With<InstallBtn>, Changed<Interaction>)>,
+    mut commands: Commands,
+) {
     if q.iter().any(|i| *i == Interaction::Pressed) {
         commands.queue(|w: &mut World| {
-            let Some(file) = rfd::FileDialog::new().set_title(renzora::lang::t("export.dialog.select_runtime")).pick_file() else { return };
+            let Some(file) = rfd::FileDialog::new()
+                .set_title(renzora::lang::t("export.dialog.select_runtime"))
+                .pick_file()
+            else {
+                return;
+            };
             let p = w.resource::<ExportOverlayState>().platform;
             // Into the per-user template store, NOT the editor's own directory.
             // `runtime_binary_name()` for a desktop platform is `renzora[.exe]`,
             // so the old destination would have overwritten the editor's own
             // runtime with a foreign-platform binary — and taken Play with it.
-            let Some(dir) = crate::templates::user_template_dir(p) else { return };
+            let Some(dir) = crate::templates::user_template_dir(p) else {
+                return;
+            };
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::copy(&file, dir.join(p.runtime_binary_name()));
             w.resource_mut::<TemplateManager>().scan();
@@ -2159,59 +3205,180 @@ fn cursor() -> renzora_ember::cursor_icon::HoverCursor {
     renzora_ember::cursor_icon::HoverCursor(bevy::window::SystemCursorIcon::Pointer)
 }
 
-fn txt(commands: &mut Commands, fonts: &EmberFonts, s: &str, size: f32, color: (u8, u8, u8)) -> Entity {
-    commands.spawn((Text::new(s.to_string()), ui_font(&fonts.ui, size), TextColor(rgb(color)))).id()
+fn txt(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    s: &str,
+    size: f32,
+    color: (u8, u8, u8),
+) -> Entity {
+    commands
+        .spawn((
+            Text::new(s.to_string()),
+            ui_font(&fonts.ui, size),
+            TextColor(rgb(color)),
+        ))
+        .id()
 }
 
 fn labeled(commands: &mut Commands, fonts: &EmberFonts, label: &str) -> Entity {
-    let row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).id();
+    let row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .id();
     let t = txt(commands, fonts, label, 12.0, text_muted());
     commands.entity(row).add_child(t);
     row
 }
 
 fn icon_title(commands: &mut Commands, fonts: &EmberFonts, icon: &str, label: &str) -> Entity {
-    let row = commands.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }, FocusPolicy::Pass)).id();
+    let row = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+            FocusPolicy::Pass,
+        ))
+        .id();
     let ic = icon_text(commands, &fonts.phosphor, icon, text_primary(), 16.0);
-    let t = commands.spawn((Text::new(label.to_string()), ui_font(&fonts.ui, 15.0), TextColor(rgb(text_primary())))).id();
+    let t = commands
+        .spawn((
+            Text::new(label.to_string()),
+            ui_font(&fonts.ui, 15.0),
+            TextColor(rgb(text_primary())),
+        ))
+        .id();
     commands.entity(row).add_children(&[ic, t]);
     row
 }
 
 fn section_label(commands: &mut Commands, fonts: &EmberFonts, icon: &str, label: &str) -> Entity {
-    let row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).id();
+    let row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .id();
     let ic = icon_text(commands, &fonts.phosphor, icon, text_primary(), 13.0);
-    let t = commands.spawn((Text::new(label.to_string()), ui_font(&fonts.ui, 13.0), TextColor(rgb(text_primary())))).id();
+    let t = commands
+        .spawn((
+            Text::new(label.to_string()),
+            ui_font(&fonts.ui, 13.0),
+            TextColor(rgb(text_primary())),
+        ))
+        .id();
     commands.entity(row).add_children(&[ic, t]);
     row
 }
 
-fn icon_msg(commands: &mut Commands, fonts: &EmberFonts, icon: &str, color: (u8, u8, u8)) -> (Entity, Entity) {
-    let row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(6.0), ..default() }).id();
+fn icon_msg(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    icon: &str,
+    color: (u8, u8, u8),
+) -> (Entity, Entity) {
+    let row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .id();
     let ic = icon_text(commands, &fonts.phosphor, icon, color, 12.0);
-    let t = commands.spawn((Text::new(String::new()), ui_font(&fonts.ui, 11.0), TextColor(rgb(color)))).id();
+    let t = commands
+        .spawn((
+            Text::new(String::new()),
+            ui_font(&fonts.ui, 11.0),
+            TextColor(rgb(color)),
+        ))
+        .id();
     commands.entity(row).add_children(&[ic, t]);
     (row, t)
 }
 
-fn check_state(commands: &mut Commands, fonts: &EmberFonts, label: &str, get: fn(&ExportOverlayState) -> bool, set: fn(&mut ExportOverlayState, bool)) -> Entity {
-    let row = commands.spawn(Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(8.0), ..default() }).id();
+fn check_state(
+    commands: &mut Commands,
+    fonts: &EmberFonts,
+    label: &str,
+    get: fn(&ExportOverlayState) -> bool,
+    set: fn(&mut ExportOverlayState, bool),
+) -> Entity {
+    let row = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(8.0),
+            ..default()
+        })
+        .id();
     let cb = switch_control(commands, false);
-    bind_2way(commands, cb, move |w| w.get_resource::<ExportOverlayState>().map(get).unwrap_or(false), move |w, v: &bool| { if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() { set(&mut s, *v); } });
+    bind_2way(
+        commands,
+        cb,
+        move |w| {
+            w.get_resource::<ExportOverlayState>()
+                .map(get)
+                .unwrap_or(false)
+        },
+        move |w, v: &bool| {
+            if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
+                set(&mut s, *v);
+            }
+        },
+    );
     let t = txt(commands, fonts, label, 12.0, text_primary());
     commands.entity(row).add_children(&[cb, t]);
     row
 }
 
 fn pill_button(commands: &mut Commands, fonts: &EmberFonts, icon: &str, label: &str) -> Entity {
-    let btn = commands.spawn((Node { flex_direction: FlexDirection::Row, align_items: AlignItems::Center, column_gap: Val::Px(5.0), padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() }, BackgroundColor(rgb(section_bg())), Interaction::default(), cursor())).id();
+    let btn = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(5.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(rgb(section_bg())),
+            Interaction::default(),
+            cursor(),
+        ))
+        .id();
     let ic = icon_text(commands, &fonts.phosphor, icon, text_primary(), 11.0);
     commands.entity(ic).insert(FocusPolicy::Pass);
-    let t = commands.spawn((Text::new(label.to_string()), ui_font(&fonts.ui, 11.0), TextColor(rgb(text_primary())), FocusPolicy::Pass)).id();
+    let t = commands
+        .spawn((
+            Text::new(label.to_string()),
+            ui_font(&fonts.ui, 11.0),
+            TextColor(rgb(text_primary())),
+            FocusPolicy::Pass,
+        ))
+        .id();
     commands.entity(btn).add_children(&[ic, t]);
     btn
 }
 
 fn style_input(commands: &mut Commands, input: Entity) {
-    commands.entity(input).insert(Node { flex_grow: 1.0, height: Val::Px(28.0), align_items: AlignItems::Center, padding: UiRect::horizontal(Val::Px(8.0)), border: UiRect::all(Val::Px(1.0)), border_radius: BorderRadius::all(Val::Px(4.0)), ..default() });
+    commands.entity(input).insert(Node {
+        flex_grow: 1.0,
+        height: Val::Px(28.0),
+        align_items: AlignItems::Center,
+        padding: UiRect::horizontal(Val::Px(8.0)),
+        border: UiRect::all(Val::Px(1.0)),
+        border_radius: BorderRadius::all(Val::Px(4.0)),
+        ..default()
+    });
 }

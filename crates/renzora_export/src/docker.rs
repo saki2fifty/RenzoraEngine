@@ -43,7 +43,11 @@ impl DockerStatus {
 /// Spawns a process, so call it when the modal opens or the selected preset
 /// changes — never per frame.
 pub fn probe() -> DockerStatus {
-    let out = Command::new("docker").arg("info").arg("--format").arg("{{.ServerVersion}}").output();
+    let out = Command::new("docker")
+        .arg("info")
+        .arg("--format")
+        .arg("{{.ServerVersion}}")
+        .output();
     match out {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DockerStatus::NotInstalled,
         Err(e) => DockerStatus::NotRunning(e.to_string()),
@@ -53,7 +57,10 @@ pub fn probe() -> DockerStatus {
             // Docker daemon…"); keep the first line and drop the rest, which is
             // usually a usage dump.
             let err = String::from_utf8_lossy(&o.stderr);
-            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("docker info failed");
+            let first = err
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("docker info failed");
             DockerStatus::NotRunning(first.trim().to_string())
         }
     }
@@ -140,8 +147,14 @@ pub fn build_command(image_ref: &str, workspace: &Path) -> Command {
 /// a checkout with CRLF line endings produces the same tag as one without —
 /// otherwise a Windows clone would ask for an image tag that CI never published.
 pub fn image_ref(workspace_dir: &Path, image: &str) -> Option<String> {
-    let base = hash_file(&workspace_dir.join("docker").join("base").join("Dockerfile"), None)?;
-    let tag = hash_file(&workspace_dir.join("docker").join(image).join("Dockerfile"), Some(&base))?;
+    let base = hash_file(
+        &workspace_dir.join("docker").join("base").join("Dockerfile"),
+        None,
+    )?;
+    let tag = hash_file(
+        &workspace_dir.join("docker").join(image).join("Dockerfile"),
+        Some(&base),
+    )?;
     Some(format!("ghcr.io/renzora/{image}:{tag}"))
 }
 
@@ -153,6 +166,12 @@ fn hash_file(path: &Path, prefix: Option<&str>) -> Option<String> {
     if let Some(p) = prefix {
         hasher.update(p.as_bytes());
     }
-    hasher.update(bytes.iter().copied().filter(|b| *b != b'\r').collect::<Vec<u8>>());
+    hasher.update(
+        bytes
+            .iter()
+            .copied()
+            .filter(|b| *b != b'\r')
+            .collect::<Vec<u8>>(),
+    );
     Some(format!("{:x}", hasher.finalize())[..12].to_string())
 }

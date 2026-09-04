@@ -196,7 +196,9 @@ fn bootstrap_rustup(
         std::fs::set_permissions(&init_path, perm).map_err(|e| e.to_string())?;
     }
 
-    progress(format!("Installing Rust {TOOLCHAIN_CHANNEL} (minimal) — one-time setup…"));
+    progress(format!(
+        "Installing Rust {TOOLCHAIN_CHANNEL} (minimal) — one-time setup…"
+    ));
     let status = Command::new(&init_path)
         .env("CARGO_HOME", cargo_home)
         .env("RUSTUP_HOME", rustup_home)

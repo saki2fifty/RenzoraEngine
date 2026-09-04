@@ -7,7 +7,19 @@
 //! 3. Rolls back the reservation if `open_library` fails.
 //! 4. Owns the real `Library` handle in RAII (unregister + unload on drop).
 //! 5. Never reports a mapping that did not occur.
+//!
+//! ## Required-symbol policy (S4-2)
+//!
+//! Required exported symbols are keyed by [`ArtifactKind`]: a Tier-1
+//! plugin must export the loose-plugin init symbol, a Tier-1 script
+//! must export the script descriptor symbol. Other artifact kinds
+//! retain their existing policy (no required symbols by default).
+//! The previous combined-list policy — every configured symbol
+//! mandatory for every loaded image — is gone, because a normal
+//! loose plugin does not export the script descriptor and a normal
+//! script does not export the loose-plugin initializer.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,7 +29,7 @@ use renzora_identity::CanonicalId;
 
 use crate::fingerprint::BuildFingerprint;
 use crate::staging::{verify_generation_fingerprint, ArtifactCache};
-use crate::types::{PublishedGeneration, Revision};
+use crate::types::{ArtifactKind, PublishedGeneration, Revision};
 
 /// Errors from [`Loader::load`].
 #[derive(Debug)]
@@ -32,6 +44,8 @@ pub enum LoadError {
     Miss,
     /// `Library::new` failed.
     OpenLibraryFailed(String),
+    /// A symbol required by the artifact kind is missing.
+    MissingRequiredSymbol(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -42,6 +56,7 @@ impl std::fmt::Display for LoadError {
             LoadError::FingerprintMismatch => write!(f, "fingerprint mismatch"),
             LoadError::Miss => write!(f, "no matching generation"),
             LoadError::OpenLibraryFailed(s) => write!(f, "open library failed: {s}"),
+            LoadError::MissingRequiredSymbol(s) => write!(f, "missing required symbol: {s}"),
         }
     }
 }
@@ -97,7 +112,7 @@ impl LoadedLibrary {
     /// Borrow the inner `libloading::Library` without consuming it. The
     /// mapping registration remains active as long as `self` is alive;
     /// the returned reference is valid for that same lifetime. Phase 4
-    /// will use this to hand function pointers to `LoadedScripts::insert`
+    /// uses this to hand function pointers to `LoadedScripts::insert`
     /// while keeping the mapping guard on the cache.
     pub fn library(&self) -> &libloading::Library {
         self.library.as_ref().expect("library already consumed")
@@ -120,27 +135,29 @@ impl Drop for LoadedLibrary {
 /// The cache's Tier-1 library loader. Stateless beyond `Arc<ArtifactCache>`.
 pub struct Loader {
     cache: Arc<ArtifactCache>,
-    /// Symbol name lookup registry. The Bevy adapter registers the
-    /// project-defined symbols (`renzora_script_update` etc.) at startup
-    /// so the loader can validate that the library exports at least one
-    /// known entry point. The loader does NOT dereference the symbol;
-    /// the Bevy adapter does.
-    required_symbols: Mutex<Vec<Vec<u8>>>,
+    /// Required exported symbols keyed by artifact kind. The previous
+    /// combined-list policy required every configured symbol for every
+    /// loaded image, which was wrong for the two-artifact case: a
+    /// loose plugin does not export the script descriptor and a
+    /// script does not export the loose-plugin initializer.
+    required_symbols_by_kind: Mutex<HashMap<ArtifactKind, Vec<Vec<u8>>>>,
 }
 
 impl Loader {
     pub fn new(cache: Arc<ArtifactCache>) -> Self {
         Self {
             cache,
-            required_symbols: Mutex::new(Vec::new()),
+            required_symbols_by_kind: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Register a C-string symbol name that every loaded library MUST
-    /// export. The loader verifies presence at `load` time but does not
-    /// call the symbol.
-    pub fn require_symbol(&self, name: &[u8]) {
-        self.required_symbols.lock().push(name.to_vec());
+    /// Register a C-string symbol name that every loaded library of
+    /// the supplied [`ArtifactKind`] must export. The loader verifies
+    /// presence at `load` time but does not call the symbol. Other
+    /// artifact kinds are unaffected.
+    pub fn require_symbol_for(&self, kind: ArtifactKind, name: &[u8]) {
+        let mut map = self.required_symbols_by_kind.lock();
+        map.entry(kind).or_default().push(name.to_vec());
     }
 
     /// Real library load. Steps:
@@ -152,12 +169,14 @@ impl Loader {
     /// 4. On match, reactivate `active.bin`.
     /// 5. Register in `MappedSet` BEFORE `Library::new`.
     /// 6. `Library::new`. On failure, unregister and return error.
-    /// 7. Verify the library exports every required symbol.
+    /// 7. Verify the library exports every required symbol for
+    ///    `artifact_kind` only.
     /// 8. Return the `LoadedLibrary` RAII handle.
     pub fn load(
         &self,
         id: &CanonicalId,
         request_fingerprint: &BuildFingerprint,
+        artifact_kind: ArtifactKind,
     ) -> Result<LoadedLibrary, LoadError> {
         let active = self
             .cache
@@ -227,8 +246,17 @@ impl Loader {
                 LoadError::OpenLibraryFailed(format!("{}: {e}", path.display()))
             })?;
 
-        // Step 7: verify required symbols are present.
-        let required = self.required_symbols.lock().clone();
+        // Step 7: verify required symbols are present for THIS kind.
+        // The lookup uses `ArtifactKind` so a Tier-1 script is not
+        // rejected for missing the loose-plugin init symbol, and a
+        // Tier-1 plugin is not rejected for missing the script
+        // descriptor symbol.
+        let required = self
+            .required_symbols_by_kind
+            .lock()
+            .get(&artifact_kind)
+            .cloned()
+            .unwrap_or_default();
         for name in &required {
             // SAFETY: we are not dereferencing; we only check the
             // library's exported-symbol table.
@@ -239,10 +267,9 @@ impl Loader {
             };
             if !lookup_result {
                 self.cache.unregister(id, generation);
-                return Err(LoadError::OpenLibraryFailed(format!(
-                    "library is missing required symbol {}",
-                    String::from_utf8_lossy(name)
-                )));
+                return Err(LoadError::MissingRequiredSymbol(
+                    String::from_utf8_lossy(name).into_owned(),
+                ));
             }
         }
 
