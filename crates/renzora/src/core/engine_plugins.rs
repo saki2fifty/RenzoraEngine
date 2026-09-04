@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 /// Current on-disk engine-plugin manifest schema.
 pub const ENGINE_PLUGIN_MANIFEST_SCHEMA: u32 = 1;
 
+/// Current immutable editor/runtime generation schema.
+pub const ENGINE_PLUGIN_GENERATION_SCHEMA: u32 = 1;
+
 /// Explicit classification required in every Tier 2 manifest.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

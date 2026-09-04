@@ -12,6 +12,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Added early checks for invalid identities, duplicate plugins, unsafe paths, and unsupported declarations.
 - Added a version-matched build-kit inventory that detects incompatible compilers, altered files, and incomplete installations before rebuilding the editor.
 - Added isolated build workspaces that reuse identical inputs, keep plugin source untouched, and rebuild only when the kit or plugin content changes.
+- Added immutable editor/runtime generations so a completed build can be verified and offered for restart without replacing the running program or losing the previous candidate.
 
 ## September 4, 2026 — 19:47 UTC
 
