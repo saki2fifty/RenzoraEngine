@@ -77,6 +77,7 @@ pub(crate) fn add_editor_plugins(app: &mut App) {
     app.add_plugins(renzora_system_monitor::SystemMonitorPlugin::default());
     app.add_plugins(renzora_terrain_editor::TerrainEditorPlugin::default());
     app.add_plugins(renzora_test_component::TestComponentPlugin::default());
+    app.add_plugins(renzora_text3d_editor::Text3dEditorPlugin::default());
     app.add_plugins(renzora_theme_status::ThemeStatusPlugin::default());
     app.add_plugins(renzora_tilemap_editor::TilemapEditorPlugin::default());
     app.add_plugins(renzora_tonemapping_editor::TonemappingEditorPlugin::default());

@@ -1,0 +1,14 @@
+[package]
+name = "renzora_text3d"
+version = "0.1.0"
+edition = "2021"
+description = "Flat and extruded world-space text rendering"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["text_mesh"] }
+ttf-parser = "0.25"
+lyon_tessellation = "1.0"
+
+[lints]
+workspace = true

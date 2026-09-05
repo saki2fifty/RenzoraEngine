@@ -138,6 +138,8 @@ The starfield uses `renzora_night_stars` plus editor-only `renzora_night_stars_e
 
 Procedural trees use `renzora_procedural_tree` for mesh generation and wind integration, and `renzora_procedural_tree_editor` for the preset and inspector. Shared tree/settings types live in `renzora::procedural_tree` and keep their original scene names. Embedded leaf textures and generator attribution remain with the runtime crate; the `procedural_tree` preference is unchanged.
 
+3D text uses `renzora_text3d` for flat SDF and extruded glyph rendering, with its preset and six inspector fields in `renzora_text3d_editor`. Both use the shared `renzora::text3d::Text3d` component, preserving its original scene type name and settings. The bundled Noto Sans font, custom font selection and `text3d` enable preference remain available.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

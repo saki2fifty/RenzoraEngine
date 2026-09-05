@@ -1,0 +1,12 @@
+[package]
+name = "renzora_text3d_editor"
+version = "0.1.0"
+edition = "2021"
+description = "Editor preset and inspector for 3D text"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+
+[lints]
+workspace = true

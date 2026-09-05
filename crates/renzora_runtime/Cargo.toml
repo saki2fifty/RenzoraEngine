@@ -344,6 +344,7 @@ renzora_night_stars = { path = "../renzora_night_stars" }
 renzora_procedural_tree = { path = "../renzora_procedural_tree" }
 renzora_rust_script = { path = "../renzora_rust_script" }
 renzora_spline = { path = "../renzora_spline" }
+renzora_text3d = { path = "../renzora_text3d" }
 renzora_vignette = { path = "../renzora_vignette" }
 renzora_wind = { path = "../renzora_wind" }
 # ── end generated ──

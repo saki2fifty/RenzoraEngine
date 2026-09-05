@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 14:06 UTC
+
+- Separated 3D-text rendering from its editor controls while retaining the bundled font, flat and extruded modes, and saved text settings.
+
 ## September 5, 2026 — 13:31 UTC
 
 - Separated vignette rendering from its editor controls while retaining saved scene settings and the existing enable switch.

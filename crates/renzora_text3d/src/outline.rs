@@ -62,7 +62,12 @@ impl ttf_parser::OutlineBuilder for ContourBuilder {
         self.pos = p2;
     }
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        let (p0, p1, p2, p3) = (self.pos, Vec2::new(x1, y1), Vec2::new(x2, y2), Vec2::new(x, y));
+        let (p0, p1, p2, p3) = (
+            self.pos,
+            Vec2::new(x1, y1),
+            Vec2::new(x2, y2),
+            Vec2::new(x, y),
+        );
         for i in 1..=CUBIC_STEPS {
             let t = i as f32 / CUBIC_STEPS as f32;
             let a = p0.lerp(p1, t);
@@ -211,7 +216,10 @@ pub fn build_outline_mesh(font_bytes: &[u8], text: &str, size: f32, depth: f32) 
     }
 
     let uvs = vec![[0.0f32, 0.0]; positions.len()];
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);

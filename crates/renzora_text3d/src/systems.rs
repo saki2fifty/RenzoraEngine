@@ -2,7 +2,9 @@
 //! keep it in sync.
 
 use bevy::prelude::*;
-use bevy::text::{Font, FontAtlasSet, FontCx, FontSource, LayoutCx, RemSize, ScaleCx, TextPipeline};
+use bevy::text::{
+    Font, FontAtlasSet, FontCx, FontSource, LayoutCx, RemSize, ScaleCx, TextPipeline,
+};
 
 use crate::outline::build_outline_mesh;
 use crate::Text3d;
@@ -114,8 +116,7 @@ pub(crate) fn rebuild_text3d(
             );
             match built {
                 Some((mesh, atlas)) => {
-                    let color =
-                        Color::srgb(t3d.color[0], t3d.color[1], t3d.color[2]).to_linear();
+                    let color = Color::srgb(t3d.color[0], t3d.color[1], t3d.color[2]).to_linear();
                     let mesh_h = meshes.add(mesh);
                     let mat = sdf_materials.add(SdfTextMaterial { color, atlas });
                     commands

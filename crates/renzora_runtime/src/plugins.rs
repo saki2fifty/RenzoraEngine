@@ -93,6 +93,7 @@ pub(crate) fn add_runtime_plugins(app: &mut App) {
     app.add_plugins(renzora_terrain::TerrainPlugin::default());
     #[cfg(feature = "terrain")]
     app.add_plugins(renzora_terrain::foliage::FoliagePlugin::default());
+    app.add_plugins(renzora_text3d::Text3dPlugin::default());
     #[cfg(feature = "tilemap")]
     app.add_plugins(renzora_tilemap::TilemapPlugin::default());
     app.add_plugins(renzora_tonemapping::TonemappingPlugin::default());
