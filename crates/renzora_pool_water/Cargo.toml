@@ -1,0 +1,12 @@
+[package]
+name = "renzora_pool_water"
+version = "0.1.0"
+edition = "2021"
+description = "Pool water rendering and ripple simulation"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false }
+
+[lints]
+workspace = true

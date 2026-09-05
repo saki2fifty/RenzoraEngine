@@ -7708,6 +7708,7 @@ dependencies = [
  "renzora_particle_editor",
  "renzora_physics",
  "renzora_physics_editor",
+ "renzora_pool_water_editor",
  "renzora_procedural_tree_editor",
  "renzora_scene",
  "renzora_scripting",
@@ -8543,6 +8544,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "renzora_pool_water"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+]
+
+[[package]]
+name = "renzora_pool_water_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+]
+
+[[package]]
 name = "renzora_postprocess"
 version = "0.1.0"
 dependencies = [
@@ -8682,6 +8699,7 @@ dependencies = [
  "renzora_oit",
  "renzora_parkour",
  "renzora_physics",
+ "renzora_pool_water",
  "renzora_postprocess",
  "renzora_procedural_tree",
  "renzora_ragdoll",

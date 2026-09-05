@@ -140,6 +140,8 @@ Procedural trees use `renzora_procedural_tree` for mesh generation and wind inte
 
 3D text uses `renzora_text3d` for flat SDF and extruded glyph rendering, with its preset and six inspector fields in `renzora_text3d_editor`. Both use the shared `renzora::text3d::Text3d` component, preserving its original scene type name and settings. The bundled Noto Sans font, custom font selection and `text3d` enable preference remain available.
 
+Pool water uses `renzora_pool_water` for rendering and ripple simulation and `renzora_pool_water_editor` for its 14 inspector fields. Settings have one definition in `renzora::pool_water`, preserving the scene name `pool_water::PoolWater` and the existing `pool_water` enable preference. Shader contents are unchanged; their embedded lookup uses the runtime crate's namespace.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

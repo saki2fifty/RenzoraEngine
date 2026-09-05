@@ -178,6 +178,7 @@ pub mod vignette;
 pub use vignette::VignetteSettings;
 pub mod procedural_tree;
 pub mod text3d;
+pub mod pool_water;
 
 // ── Editor contract (Operation Merge fold) ───────────────────────────────
 // The thin editor types shared across the binary↔bundle boundary live here in

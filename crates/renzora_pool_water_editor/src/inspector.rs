@@ -1,16 +1,4 @@
-//! The Pool Water inspector.
-//!
-//! In the workspace this was a **separate crate**, `renzora_pool_water_editor`,
-//! because the inspector's dependency on `renzora_editor_framework` was not
-//! optional and would otherwise have compiled the whole editor framework into
-//! every shipped game — and a cargo feature could not have separated them, since
-//! features unify across a `--workspace` build.
-//!
-//! Neither problem exists here. `renzora_editor_framework` only *re-exports*
-//! `AppEditorExt` / `InspectorEntry` / `FieldDef` from the contract crate, so
-//! this imports them from `renzora` directly and links no framework at all. The
-//! two halves are one plugin again, and a game that loads it pays a single `Vec`
-//! push into a registry it never reads.
+//! Pool water inspector fields, kept out of the runtime renderer.
 
 use bevy::prelude::*;
 use renzora::AppEditorExt;
@@ -307,8 +295,32 @@ pub(crate) fn pool_water_inspector_entry() -> renzora::InspectorEntry {
     }
 }
 
-/// Registered from the one plugin's `build`, unconditionally — see the note in
-/// `lib.rs` on why there is no `cfg(feature = "editor")` here.
+/// Register controls against the shared pool component.
 pub(crate) fn register(app: &mut App) {
     app.register_inspector(pool_water_inspector_entry());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_all_fields_and_shared_component_callbacks() {
+        let entry = pool_water_inspector_entry();
+        assert_eq!(entry.fields.len(), 14);
+        assert_eq!(entry.type_id, "pool_water");
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        entry.add_fn.unwrap()(&mut world, entity);
+        assert!((entry.has_fn)(&world, entity));
+        let damping = entry
+            .fields
+            .iter()
+            .find(|field| field.name == "Damping")
+            .unwrap();
+        (damping.set_fn)(&mut world, entity, renzora::FieldValue::Float(0.97));
+        assert_eq!(world.get::<PoolWater>(entity).unwrap().damping, 0.97);
+        entry.remove_fn.unwrap()(&mut world, entity);
+        assert!(!(entry.has_fn)(&world, entity));
+    }
 }

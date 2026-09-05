@@ -1,24 +1,5 @@
-//! Pool water — refraction, caustics and a rippling height simulation, as a
-//! native plugin.
-//!
-//! In the workspace this was two crates, `renzora_pool_water` (Runtime) and
-//! `renzora_pool_water_editor` (Editor), split so a shipped game would not drag
-//! in the editor framework. Here they are one `Runtime` plugin: it loads in the
-//! editor *and* in a copy-based export, and the inspector registration costs a
-//! game one `Vec` push into a registry it never reads.
-//!
-//! Two things had to change coming across, and both are silent failures rather
-//! than compile errors if missed:
-//!
-//! * **`serde` comes from `renzora`.** A plugin's own crates.io dependencies are
-//!   resolved separately from the engine's, so a plain `serde = "1"` is a
-//!   different crate from the one Bevy derives against. Using the contract
-//!   crate's copy also means cargo never runs for this plugin at all.
-//! * **No `cfg(feature = "editor")`.** A native plugin is compiled by `rustc`
-//!   with no features set, so that gate is always false — the inspector would
-//!   vanish with nothing logged.
+//! Pool water rendering and rippling height simulation.
 
-pub mod inspector;
 pub mod material;
 pub mod simulation;
 
@@ -28,11 +9,10 @@ use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
-use renzora::serde::{Deserialize, Serialize};
+pub use renzora::pool_water::PoolWater;
 
 use material::{PoolWaterMaterial, PoolWaterUniforms};
 use simulation::WaterSim;
-
 
 // ── Components ────────────────────────────────────────────────────────────────
 
@@ -43,77 +23,6 @@ pub struct PoolWaterLink(pub Entity);
 /// Marker on the child water surface entity linking back to its pool parent.
 #[derive(Component)]
 pub struct PoolWaterSurface(pub Entity);
-
-/// Interactive pool water.
-/// Attach to any mesh entity (e.g. a cube) to turn it into a pool.
-/// A water surface child entity is spawned automatically inside it.
-#[derive(Component, Clone, Debug, Reflect, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
-#[reflect(Component, Default)]
-pub struct PoolWater {
-    /// How far below the top face the water sits (0 = flush with top, 0.1 = slightly below)
-    pub water_level: f32,
-    /// Index of refraction (1.333 = water)
-    pub ior: f32,
-    /// Minimum Fresnel reflectance (0–1)
-    pub fresnel_min: f32,
-    /// Caustic brightness multiplier
-    pub caustic_intensity: f32,
-    /// Deep water absorption color
-    pub deep_color: [f32; 3],
-    /// Shallow water tint
-    pub shallow_color: [f32; 3],
-    /// Foam color
-    pub foam_color: [f32; 3],
-    /// Simulation damping (0.99–0.999, higher = longer ripples)
-    pub damping: f32,
-    /// Wave propagation speed
-    pub wave_speed: f32,
-    /// Height scale (maps sim values to world units)
-    pub height_scale: f32,
-    /// Simulation resolution (width = height)
-    pub sim_resolution: u32,
-    /// Mesh subdivisions
-    pub mesh_subdivisions: u32,
-    /// Sun specular power
-    pub specular_power: f32,
-    /// Refraction UV distortion strength
-    pub refraction_strength: f32,
-    /// Maximum depth for absorption (world units)
-    pub max_depth: f32,
-    /// Absorption coefficients (R, G, B) — higher = absorbed faster
-    pub absorption_r: f32,
-    pub absorption_g: f32,
-    pub absorption_b: f32,
-    /// Shoreline foam depth threshold
-    pub foam_depth: f32,
-}
-
-impl Default for PoolWater {
-    fn default() -> Self {
-        Self {
-            water_level: 0.05,
-            ior: 1.333,
-            fresnel_min: 0.02,
-            caustic_intensity: 0.25,
-            deep_color: [0.005, 0.02, 0.08],
-            shallow_color: [0.04, 0.22, 0.28],
-            foam_color: [0.9, 0.92, 0.95],
-            damping: 0.995,
-            wave_speed: 2.0,
-            height_scale: 0.3,
-            sim_resolution: 256,
-            mesh_subdivisions: 200,
-            specular_power: 5000.0,
-            refraction_strength: 0.03,
-            max_depth: 5.0,
-            absorption_r: 3.0,
-            absorption_g: 1.0,
-            absorption_b: 0.4,
-            foam_depth: 1.0,
-        }
-    }
-}
 
 // ── Mesh generation ───────────────────────────────────────────────────────────
 
@@ -330,17 +239,17 @@ fn hash_f32(x: f32) -> f32 {
     s.fract()
 }
 
-// ── Inspector ─────────────────────────────────────────────────────────────────
-
-
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
+/// Install pool water rendering and simulation without inspector dependencies.
 #[derive(Default)]
 pub struct PoolWaterPlugin;
 
 impl Plugin for PoolWaterPlugin {
     fn build(&self, app: &mut App) {
-        info!("[pool_water] native plugin");
+        if !renzora::builtin_plugin_enabled(app, "pool_water") {
+            return;
+        }
 
         embedded_asset!(app, "pool_water.wgsl");
 
@@ -355,11 +264,135 @@ impl Plugin for PoolWaterPlugin {
                     cleanup_pool_water,
                 ),
             );
-
-        inspector::register(app);
     }
 }
 
-// `Runtime`, explicitly. `plugin!` defaults to `Editor` where `add!` defaulted
-// to `Runtime`, so omitting this would quietly stop shipping the water to games.
-renzora::plugin!(PoolWaterPlugin, Runtime);
+renzora::add!(PoolWaterPlugin, Runtime);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::AssetPlugin;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::render::sync_world::SyncWorldPlugin;
+    use bevy::shader::ShaderRef;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), SyncWorldPlugin));
+        app.init_asset::<Mesh>().init_asset::<Image>();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        app.add_plugins(PoolWaterPlugin);
+        app
+    }
+
+    #[test]
+    fn shader_resolves_and_material_identity_is_preserved() {
+        let app = app();
+        for shader in [
+            PoolWaterMaterial::vertex_shader(),
+            PoolWaterMaterial::fragment_shader(),
+        ] {
+            let ShaderRef::Path(path) = shader else {
+                panic!("expected embedded shader");
+            };
+            let source = app
+                .world()
+                .resource::<AssetServer>()
+                .get_source(path.source())
+                .unwrap();
+            let mut reader = bevy::tasks::block_on(source.reader().read(path.path())).unwrap();
+            let mut bytes = Vec::new();
+            bevy::tasks::block_on(reader.read_to_end(&mut bytes)).unwrap();
+            assert_eq!(bytes, include_bytes!("pool_water.wgsl"));
+        }
+        assert_eq!(
+            PoolWaterMaterial::type_path(),
+            "pool_water::material::PoolWaterMaterial"
+        );
+    }
+
+    #[test]
+    fn surface_ripples_reuse_assets_and_cleanup_with_parent_settings() {
+        let mut app = app();
+        let pool = app
+            .world_mut()
+            .spawn((
+                PoolWater {
+                    mesh_subdivisions: 4,
+                    sim_resolution: 8,
+                    ..default()
+                },
+                Transform::default(),
+            ))
+            .id();
+        let camera = app.world_mut().spawn(Camera3d::default()).id();
+        app.world_mut().run_system_once(setup_pool_water).unwrap();
+        app.world_mut()
+            .run_system_once(ensure_depth_prepass)
+            .unwrap();
+        assert!(app.world().get::<DepthPrepass>(camera).is_some());
+        let surface = app.world().get::<PoolWaterLink>(pool).unwrap().0;
+        assert_eq!(app.world().get::<ChildOf>(surface).unwrap().parent(), pool);
+        // Initial height is a separately tracked pre-existing parenting bug;
+        // this migration preserves the original setup rather than changing it.
+        let mesh = app.world().get::<Mesh3d>(surface).unwrap().0.clone();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .get(&mesh)
+                .unwrap()
+                .count_vertices(),
+            25
+        );
+        let material = app
+            .world()
+            .get::<MeshMaterial3d<PoolWaterMaterial>>(surface)
+            .unwrap()
+            .0
+            .clone();
+        let texture = app
+            .world()
+            .get::<WaterSim>(surface)
+            .unwrap()
+            .texture_handle
+            .clone();
+        app.world_mut()
+            .get_mut::<WaterSim>(surface)
+            .unwrap()
+            .add_drop(0.5, 0.5, 0.4, 0.1);
+        app.world_mut().run_system_once(update_pool_water).unwrap();
+        let sim = app.world().get::<WaterSim>(surface).unwrap();
+        assert!(sim.heights.iter().all(|value| value.is_finite()));
+        assert!(sim.heights.iter().any(|value| *value != 0.0));
+        let image = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&texture)
+            .unwrap();
+        assert!(image.data.as_ref().unwrap().iter().any(|byte| *byte != 0));
+        app.world_mut().run_system_once(setup_pool_water).unwrap();
+        assert_eq!(app.world().get::<PoolWaterLink>(pool).unwrap().0, surface);
+        assert_eq!(app.world().get::<Mesh3d>(surface).unwrap().0, mesh);
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<PoolWaterMaterial>>(surface)
+                .unwrap()
+                .0,
+            material
+        );
+        app.world_mut().entity_mut(pool).remove::<PoolWater>();
+        app.world_mut().run_system_once(cleanup_pool_water).unwrap();
+        assert!(app.world().get_entity(surface).is_err());
+        assert!(app.world().get::<PoolWaterLink>(pool).is_none());
+    }
+
+    #[test]
+    fn disabled_startup_does_not_install_material_or_systems() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["pool_water".into()]));
+        app.add_plugins(PoolWaterPlugin);
+        assert!(!app.is_plugin_added::<MaterialPlugin<PoolWaterMaterial>>());
+        app.update();
+    }
+}

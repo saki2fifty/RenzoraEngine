@@ -177,7 +177,7 @@ pub fn record_plugin(
 /// These identities stay retired even when a feature is disabled or omitted
 /// from a lean host. Loading an old DLL is not a fallback for a built-in crate.
 pub fn retired_native_plugin(id: &str) -> bool {
-    matches!(id, "spline" | "gamepad" | "vignette" | "auto_exposure" | "night_stars" | "procedural_tree" | "text3d")
+    matches!(id, "spline" | "gamepad" | "vignette" | "auto_exposure" | "night_stars" | "procedural_tree" | "text3d" | "pool_water")
 }
 
 /// Preserve a built-in feature's enable preference and report its startup state.

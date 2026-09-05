@@ -252,6 +252,7 @@ renzora_engine_plugins = { path = "../renzora_engine_plugins" }
 renzora_gamepad_editor = { path = "../renzora_gamepad_editor" }
 renzora_night_stars_editor = { path = "../renzora_night_stars_editor" }
 renzora_parkour_editor = { path = "../renzora_parkour/editor" }
+renzora_pool_water_editor = { path = "../renzora_pool_water_editor" }
 renzora_procedural_tree_editor = { path = "../renzora_procedural_tree_editor" }
 renzora_text3d_editor = { path = "../renzora_text3d_editor" }
 renzora_update = { path = "../renzora_update" }

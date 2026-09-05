@@ -56,8 +56,8 @@ impl Default for PoolWaterUniforms {
 }
 
 /// Custom Bevy Material for interactive pool water with screen-space refraction.
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-#[derive(Default)]
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone, Default)]
+#[type_path = "pool_water::material"]
 pub struct PoolWaterMaterial {
     #[uniform(0)]
     pub uniforms: PoolWaterUniforms,
@@ -66,20 +66,13 @@ pub struct PoolWaterMaterial {
     pub heightfield: Option<Handle<Image>>,
 }
 
-
 impl Material for PoolWaterMaterial {
     fn vertex_shader() -> ShaderRef {
-        // The crate name is part of an `embedded://` path, and this crate is now
-// `pool_water` rather than `renzora_pool_water`. Getting this wrong is not a
-// compile error — the shader simply fails to resolve at runtime.
-"embedded://pool_water/pool_water.wgsl".into()
+        "embedded://renzora_pool_water/pool_water.wgsl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        // The crate name is part of an `embedded://` path, and this crate is now
-// `pool_water` rather than `renzora_pool_water`. Getting this wrong is not a
-// compile error — the shader simply fails to resolve at runtime.
-"embedded://pool_water/pool_water.wgsl".into()
+        "embedded://renzora_pool_water/pool_water.wgsl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {

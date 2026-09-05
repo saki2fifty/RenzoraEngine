@@ -1,3 +1,5 @@
+//! CPU heightfield simulation and texture upload.
+
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler};
 use bevy::prelude::*;
