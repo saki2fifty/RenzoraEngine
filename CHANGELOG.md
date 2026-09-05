@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 14:42 UTC
+
+- Moved mesh-drawing tools into the editor, preserving shortcuts, saved construction recipes and undo/redo while keeping authoring code out of games.
+
 ## September 5, 2026 — 14:31 UTC
 
 - Moved pool-water rendering into the engine with separate editor controls, preserving saved settings, ripple simulation and water shaders.

@@ -54,6 +54,7 @@ pub enum DrawStage {
 
 /// A footprint shape on the XZ plane.
 #[derive(Clone, Debug, Reflect)]
+#[type_path = "mesh_draw"]
 pub enum Footprint {
     Box { min: Vec2, max: Vec2 },
     Polygon { points: Vec<Vec2> },
@@ -84,6 +85,7 @@ pub struct MeshDrawState {
 /// Construction recipe saved on every drawn mesh (future edit passes regenerate).
 #[derive(Component, Clone, Debug, Reflect)]
 #[reflect(Component)]
+#[type_path = "mesh_draw"]
 pub struct MeshDrawRecipe {
     pub footprint: Footprint,
     pub height: f32,
@@ -120,11 +122,9 @@ const SECTION: ToolSection = ToolSection::Shelf("modeling.a-draw");
 /// meaning for them at all.
 fn in_edit_mode(world: &World) -> bool {
     use renzora::core::viewport_types::{ViewportMode, ViewportSettings, ViewportView};
-    world
-        .get_resource::<ViewportSettings>()
-        .is_some_and(|s| {
-            s.viewport_view == ViewportView::Three && s.viewport_mode == ViewportMode::Edit
-        })
+    world.get_resource::<ViewportSettings>().is_some_and(|s| {
+        s.viewport_view == ViewportView::Three && s.viewport_mode == ViewportMode::Edit
+    })
 }
 
 /// Join is the odd one out: it merges *several selected objects*, which is a
@@ -147,12 +147,15 @@ fn publish_modal_flag(
 
 // ── Plugin ─────────────────────────────────────────────────────────────────
 
+/// Install viewport mesh drawing tools in the editor only.
 #[derive(Default)]
-pub struct MeshDrawPlugin;
+pub struct MeshDrawEditorPlugin;
 
-impl Plugin for MeshDrawPlugin {
+impl Plugin for MeshDrawEditorPlugin {
     fn build(&self, app: &mut App) {
-        info!("[editor] MeshDrawPlugin");
+        if !renzora::builtin_plugin_enabled(app, "mesh_draw") {
+            return;
+        }
         app.register_type::<MeshDrawRecipe>()
             .init_resource::<MeshDrawState>()
             .init_resource::<renzora::core::viewport_types::ModalToolActive>()
@@ -1061,6 +1064,106 @@ fn merge_meshes(assets: &Assets<Mesh>, sources: &[(Entity, Handle<Mesh>, Transfo
     mesh
 }
 
-// `Editor` — an authoring tool has no business in a shipped game. That is also
-// `plugin!`'s default, but stated explicitly because it differs from `add!`'s.
-renzora::plugin!(MeshDrawPlugin, Editor);
+renzora::add!(MeshDrawEditorPlugin, Editor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use renzora::undo::UndoCommand;
+    use renzora::core::viewport_types::ModalToolActive;
+
+    #[test]
+    fn registers_tools_shortcuts_and_releases_modal_state() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        app.add_plugins(MeshDrawEditorPlugin);
+        let ids: Vec<_> = app
+            .world()
+            .resource::<renzora::ToolbarRegistry>()
+            .entries()
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["mesh_draw.box", "mesh_draw.polyline", "mesh_draw.join"]
+        );
+        assert_eq!(
+            app.world()
+                .resource::<renzora::ShortcutRegistry>()
+                .entries()
+                .len(),
+            3
+        );
+        toggle_tool(app.world_mut(), ToolMode::Polyline);
+        assert!(is_active_with(app.world(), ToolMode::Polyline));
+        assert_eq!(*app.world().resource::<ActiveTool>(), ActiveTool::None);
+        app.world_mut().run_system_once(publish_modal_flag).unwrap();
+        assert!(app.world().resource::<ModalToolActive>().0);
+        deactivate_tool(app.world_mut(), ToolMode::Polyline);
+        app.world_mut().run_system_once(publish_modal_flag).unwrap();
+        assert!(!app.world().resource::<ModalToolActive>().0);
+        assert_eq!(*app.world().resource::<ActiveTool>(), ActiveTool::Select);
+    }
+
+    #[test]
+    fn recipe_identity_geometry_and_undo_redo_are_preserved() {
+        assert_eq!(MeshDrawRecipe::type_path(), "mesh_draw::MeshDrawRecipe");
+        assert_eq!(Footprint::type_path(), "mesh_draw::Footprint");
+        let mut app = App::new();
+        app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+        let world = app.world_mut();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        for footprint in [
+            Footprint::Box {
+                min: Vec2::ZERO,
+                max: Vec2::new(2.0, 3.0),
+            },
+            Footprint::Polygon {
+                points: vec![Vec2::ZERO, Vec2::X * 2.0, Vec2::ONE, Vec2::Y * 2.0],
+            },
+        ] {
+            let recipe = MeshDrawRecipe {
+                footprint,
+                height: 2.0,
+            };
+            let restored = MeshDrawRecipe::from_reflect(&recipe).unwrap();
+            assert_eq!(restored.height, 2.0);
+            let mut command = SpawnDrawnMeshCmd {
+                recipe: restored,
+                entity: None,
+            };
+            command.execute(world);
+            let entity = command.entity.unwrap();
+            let mesh = &world.get::<Mesh3d>(entity).unwrap().0;
+            assert!(
+                world
+                    .resource::<Assets<Mesh>>()
+                    .get(mesh)
+                    .unwrap()
+                    .count_vertices()
+                    > 0
+            );
+            assert_eq!(world.get::<MeshDrawRecipe>(entity).unwrap().height, 2.0);
+            command.undo(world);
+            assert!(world.get_entity(entity).is_err());
+            command.execute(world);
+            assert!(world
+                .get::<MeshDrawRecipe>(command.entity.unwrap())
+                .is_some());
+            command.undo(world);
+        }
+    }
+
+    #[test]
+    fn disabled_plugin_registers_no_tools_or_state() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["mesh_draw".into()]));
+        app.add_plugins(MeshDrawEditorPlugin);
+        assert!(!app.world().contains_resource::<MeshDrawState>());
+        assert!(!app.world().contains_resource::<renzora::ToolbarRegistry>());
+        app.update();
+    }
+}
