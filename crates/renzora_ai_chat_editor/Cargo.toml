@@ -1,0 +1,16 @@
+[package]
+name = "renzora_ai_chat_editor"
+version = "0.1.0"
+edition = "2021"
+description = "Editor AI chat panel and provider settings"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+renzora_ember = { path = "../renzora_ember", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.15"
+
+[lints]
+workspace = true

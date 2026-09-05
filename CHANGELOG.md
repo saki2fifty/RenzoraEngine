@@ -5,6 +5,8 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 5, 2026 — 14:42 UTC
 
 - Moved mesh-drawing tools into the editor, preserving shortcuts, saved construction recipes and undo/redo while keeping authoring code out of games.
+- Moved AI Chat into the editor workspace, retaining its panel, provider settings, streamed replies and manual retrieval.
+- Corrected standalone-plugin examples that still described an obsolete version of 3D text.
 
 ## September 5, 2026 — 14:31 UTC
 

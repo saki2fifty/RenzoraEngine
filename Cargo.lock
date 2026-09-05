@@ -7288,6 +7288,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "renzora_ai_chat_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+ "renzora_ember",
+ "rfd",
+]
+
+[[package]]
 name = "renzora_animation"
 version = "0.1.0"
 dependencies = [
@@ -7658,6 +7668,7 @@ name = "renzora_editor"
 version = "0.1.0"
 dependencies = [
  "renzora",
+ "renzora_ai_chat_editor",
  "renzora_animation",
  "renzora_animation_editor",
  "renzora_antialiasing",

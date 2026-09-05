@@ -146,6 +146,8 @@ Clouds use `renzora_clouds` for rendering and GPU noise baking, with the 28-fiel
 
 Mesh drawing is editor-only in `renzora_mesh_draw_editor`. Its three toolbar/shortcut IDs (`mesh_draw.box`, `mesh_draw.polyline`, `mesh_draw.join`), preference and saved recipe type names are unchanged. Generated runtime wiring does not depend on this authoring crate.
 
+AI Chat lives in `renzora_ai_chat_editor`, retaining the `ai_chat` panel, settings and preference IDs. It uses the shared UI framework and HTTP contract, and its native folder-picker dependency is excluded on WebAssembly. It is not linked into exported games.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

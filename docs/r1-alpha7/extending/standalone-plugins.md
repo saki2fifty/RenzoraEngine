@@ -426,7 +426,7 @@ impl Default for Label {
 
 It draws as a text row in the inspector and round-trips through scenes like any other field. Read it with `as_str()`, write it with `Str256::new` (returns `None` if it does not fit) or `Str256::new_truncating`.
 
-The fixed size is the whole point rather than a limitation to be lifted. Component storage is allocated by the host from a layout the plugin declares, and anything with a destructor is refused outright — a `String` would hand the host a pointer into the plugin's heap to free. 252 bytes covers a name, a label, or a path; a plugin needing more keeps it in its own memory keyed by entity, which is what `plugins/text3d` does for font *files* while the path itself lives on the component.
+The fixed size is the whole point rather than a limitation to be lifted. Component storage is allocated by the host from a layout the plugin declares, and anything with a destructor is refused outright — a `String` would hand the host a pointer into the plugin's heap to free. 252 bytes covers a name, a label, or a path; a plugin needing more keeps it in its own memory keyed by entity. Built-in 3D text uses the engine-plugin architecture and is not a C-ABI example.
 
 ### Tuning how a field is edited
 
@@ -957,7 +957,7 @@ fn update(q: Query<&Ribbon>, meshes: Meshes) {
 
 The last argument is optional per-vertex colours. Vertex count and topology can change freely between writes — only the handle is fixed.
 
-The practical consequence of init-only creation is a **pool**: every mesh the plugin will ever write has to exist by the end of `build`, so a plugin decides its own ceiling and hands slots out. `plugins/text3d` keeps 64 and `plugins/hair` keeps 16, both as a free stack. Seed each one with a degenerate triangle — a mesh with no positions is refused.
+The practical consequence of init-only creation is a **pool**: every mesh the plugin will ever write has to exist by the end of `build`, so a plugin decides its own ceiling and hands slots out. `plugins/hair` keeps 16 as a free stack. Seed each one with a degenerate triangle — a mesh with no positions is refused. The built-in 3D-text renderer is not subject to this standalone-plugin pool.
 
 ### Reading geometry already in the world
 
@@ -1331,7 +1331,7 @@ The 2.x MINORs below are kept as history, because two of them broke the additive
 
 Note what is *not* in that list: animation, physics and HTTP *commands*. They ship alongside but are [domain modules](#domain-modules), not boundary surface, so they moved the crate's version and not the ABI's. What did land as MINORs — `Http::poll`, `Meshes::read` — are the parts that hand data *back*, which the generic channel cannot do. Audio will follow the same split.
 
-The run from 2.5 to 2.11 is what porting real plugins cost. Each one was a capability an actual plugin was blocked on and nothing else would substitute for: `plugins/text3d` needed strings and then mesh writes; `plugins/hair` needed to read a scalp mesh before it could grow anything from it. None of them was foreseeable from the outside, which is the argument for porting a plugin before declaring the surface complete.
+The run from 2.5 to 2.11 is what porting real plugins cost. Each one was a capability an actual plugin was blocked on and nothing else would substitute for: the former C-ABI text3d implementation needed strings and then mesh writes; `plugins/hair` needed to read a scalp mesh before it could grow anything from it. The current built-in 3D-text renderer uses workspace engine crates instead. These historical gaps illustrate why real plugins need to exercise an API before its coverage is considered complete.
 
 **MAJOR went to 3 to repair the interface table**, and it is worth reading why, because it is the failure mode this whole scheme is built to avoid.
 
@@ -1532,8 +1532,8 @@ Everything else on the page is work nobody has done yet, and the order it gets w
 - **`Startup` and `FixedUpdate`.** Five main-loop schedules only. An unknown one is re-homed to
   `Update` with a warning rather than dropped.
 - **Change detection and removal.** No `Added<T>`, `Changed<T>`, `Ref<T>`, `RemovedComponents`.
-  This is why `plugins/hair` and `plugins/text3d` both hand-roll a per-frame liveness sweep and
-  a signature hash — read them before writing your own.
+  `plugins/hair` uses a per-frame liveness sweep and a signature hash; consult that
+  standalone example rather than the built-in 3D-text renderer, which uses Bevy directly.
 - **`Local<T>`, `ParamSet`, `Single`, messages, observers, component hooks.**
 - **Assets by path.** No `AssetServer`. Meshes and images can be [created](#geometry) and
   [rewritten](#textures), but only ones the plugin made. Asset creation is init-only, which is

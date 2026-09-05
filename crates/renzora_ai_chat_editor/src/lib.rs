@@ -15,9 +15,8 @@
 //!   - **Anthropic Messages API** — Claude, via `/v1/messages` SSE streaming
 //!     (`x-api-key` + `anthropic-version` headers), models from `/v1/models`.
 //!
-//! Editor-scope distribution plugin: never loads in an exported game, and
-//! deleting `librenzora_ai_chat.{dll,so,dylib}` from `plugins/` removes the
-//! feature entirely.
+//! Editor-only workspace feature. The existing `ai_chat` preference controls
+//! startup; exported games do not link this panel.
 //!
 //! [Ollama]: https://ollama.com
 
@@ -30,14 +29,14 @@ use bevy::prelude::*;
 use renzora::core::RenzoraShellExt;
 use renzora_ember::font::{icon_text, ui_font, EmberFonts};
 use renzora_ember::panel::RegisterPanelContent;
-use renzora_ember::reactive::{KeyedSnapshot};
-use renzora_ember::reactive::Rx;
 use renzora_ember::reactive::tracked::{bind_2way, bind_bg, bind_display, bind_text, keyed_list};
+use renzora_ember::reactive::KeyedSnapshot;
+use renzora_ember::reactive::Rx;
 use renzora_ember::settings_sections::RegisterSettingsSection;
 use renzora_ember::theme::{accent, rgb, tab_active, text_muted, text_primary};
 use renzora_ember::widgets::{
-    bind_text_input, button, dropdown, markdown_view, password_input, scroll_view_pinned,
-    spinner, text_input, EmberTextInput,
+    bind_text_input, button, dropdown, markdown_view, password_input, scroll_view_pinned, spinner,
+    text_input, EmberTextInput,
 };
 
 /// Wire protocol — how to talk to the server. Several providers share the
@@ -393,12 +392,15 @@ struct ThinkingDots;
 #[derive(Component)]
 struct DocsBrowseBtn;
 
+/// Install AI chat and its provider settings in the editor only.
 #[derive(Default)]
-pub struct AiChatPlugin;
+pub struct AiChatEditorPlugin;
 
-impl Plugin for AiChatPlugin {
+impl Plugin for AiChatEditorPlugin {
     fn build(&self, app: &mut App) {
-        info!("[editor] AiChatPlugin (AI Chat panel)");
+        if !renzora::builtin_plugin_enabled(app, "ai_chat") {
+            return;
+        }
         let mut chat = AiChat::default();
         if let Some(cfg) = load_config() {
             cfg.apply(&mut chat);
@@ -423,7 +425,12 @@ impl Plugin for AiChatPlugin {
         panel
             .systems(
                 Update,
-                (refresh_click, docs_browse_click, send_prompt, animate_thinking)
+                (
+                    refresh_click,
+                    docs_browse_click,
+                    send_prompt,
+                    animate_thinking,
+                )
                     .run_if(in_state(renzora::SplashState::Editor)),
             )
             .always(
@@ -451,7 +458,11 @@ fn build_panel(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
 
     // Status line — shows "Thinking…" while a reply streams.
     let status = commands
-        .spawn((Text::new(""), ui_font(&fonts.ui, 10.0), TextColor(rgb(text_muted()))))
+        .spawn((
+            Text::new(""),
+            ui_font(&fonts.ui, 10.0),
+            TextColor(rgb(text_muted())),
+        ))
         .id();
     bind_text(commands, status, |w| {
         w.get_resource::<AiChat>()
@@ -517,7 +528,8 @@ fn build_panel(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
         ))
         .id();
     fn streaming(w: &Rx) -> bool {
-        w.get_resource::<AiChat>().is_some_and(|c| c.stream.is_some())
+        w.get_resource::<AiChat>()
+            .is_some_and(|c| c.stream.is_some())
     }
     bind_bg(commands, send, |w| {
         if streaming(w) {
@@ -529,10 +541,18 @@ fn build_panel(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     let spin = spinner(commands);
     bind_display(commands, spin, streaming);
     let send_label = commands
-        .spawn((Text::new("Send"), ui_font(&fonts.ui, 12.0), TextColor(rgb(text_primary()))))
+        .spawn((
+            Text::new("Send"),
+            ui_font(&fonts.ui, 12.0),
+            TextColor(rgb(text_primary())),
+        ))
         .id();
     bind_text(commands, send_label, |w| {
-        if streaming(w) { "Stop".to_string() } else { "Send".to_string() }
+        if streaming(w) {
+            "Stop".to_string()
+        } else {
+            "Send".to_string()
+        }
     });
     commands.entity(send).add_children(&[spin, send_label]);
     commands.entity(prompt_row).add_children(&[prompt, send]);
@@ -602,7 +622,8 @@ fn thinking_bubble(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
         .entity(row)
         .insert(BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.05)));
     bind_display(commands, row, |w| {
-        w.get_resource::<AiChat>().is_some_and(|c| c.stream.is_some())
+        w.get_resource::<AiChat>()
+            .is_some_and(|c| c.stream.is_some())
     });
     let icon = icon_text(commands, &fonts.phosphor, "robot", (120, 210, 120), 12.0);
     let dots = commands
@@ -707,7 +728,12 @@ fn build_settings(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
     commands.entity(key_row).add_child(key);
 
     let docs_row = settings_row(commands, fonts, "Docs folder");
-    let docs = text_input(commands, &fonts.ui, "local folder of markdown docs (optional)", "");
+    let docs = text_input(
+        commands,
+        &fonts.ui,
+        "local folder of markdown docs (optional)",
+        "",
+    );
     grow(commands, docs, 1.0);
     bind_text_input(
         commands,
@@ -885,19 +911,25 @@ fn message_row(commands: &mut Commands, fonts: &EmberFonts, msg: &ChatMsg) -> En
         .id();
     let ico = icon_text(commands, &fonts.phosphor, icon, color, 12.0);
     let name = commands
-        .spawn((Text::new(label), ui_font(&fonts.ui, 10.0), TextColor(rgb(color))))
+        .spawn((
+            Text::new(label),
+            ui_font(&fonts.ui, 10.0),
+            TextColor(rgb(color)),
+        ))
         .id();
     commands.entity(who).add_children(&[ico, name]);
 
     // The assistant speaks markdown (headings, lists, code blocks); user
     // prompts render verbatim.
     let body = match msg.role {
-        Role::Assistant if !msg.content.is_empty() => {
-            markdown_view(commands, fonts, &msg.content)
-        }
+        Role::Assistant if !msg.content.is_empty() => markdown_view(commands, fonts, &msg.content),
         _ => commands
             .spawn((
-                Text::new(if msg.content.is_empty() { "…" } else { &msg.content }),
+                Text::new(if msg.content.is_empty() {
+                    "…"
+                } else {
+                    &msg.content
+                }),
                 ui_font(&fonts.ui, 11.5),
                 TextColor(rgb(text_primary())),
             ))
@@ -984,7 +1016,9 @@ fn drain_models(mut chat: ResMut<AiChat>) {
                     .preferred_model
                     .map(str::to_string)
                     .filter(|m| models.contains(m));
-                chat.model = preferred.or_else(|| models.first().cloned()).unwrap_or_default();
+                chat.model = preferred
+                    .or_else(|| models.first().cloned())
+                    .unwrap_or_default();
             }
             chat.models = models;
         }
@@ -1010,8 +1044,8 @@ fn fetch_models(preset: &Preset, url: &str, key: &str) -> Result<Vec<String>, St
             api_error_message(&body)
         ));
     }
-    let value: renzora::serde_json::Value =
-        renzora::serde_json::from_str(&body).map_err(|e| format!("Bad JSON from {endpoint}: {e}"))?;
+    let value: renzora::serde_json::Value = renzora::serde_json::from_str(&body)
+        .map_err(|e| format!("Bad JSON from {endpoint}: {e}"))?;
     let list = match preset.protocol {
         Protocol::Ollama => value["models"]
             .as_array()
@@ -1200,7 +1234,12 @@ fn drain_stream(mut chat: ResMut<AiChat>) {
     if let Some(ctx) = context {
         // Attach to the message being answered so follow-up turns keep the
         // grounding (the last user message — the streaming target sits after).
-        if let Some(m) = chat.messages.iter_mut().rev().find(|m| m.role == Role::User) {
+        if let Some(m) = chat
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::User)
+        {
             m.context = Some(ctx);
         }
     }
@@ -1303,7 +1342,12 @@ shell); its real content is not visible to a plain fetch.]",
 
     if !context.is_empty() {
         let context = context.trim_end().to_string();
-        if let Some(last) = job.history.iter_mut().rev().find(|(role, _)| *role == "user") {
+        if let Some(last) = job
+            .history
+            .iter_mut()
+            .rev()
+            .find(|(role, _)| *role == "user")
+        {
             last.1 = format!("{}\n\n{context}", last.1);
         }
         // Persist on the stored message so follow-up turns keep the grounding.
@@ -1418,7 +1462,8 @@ shell); its real content is not visible to a plain fetch.]",
                 finished = true;
                 break;
             }
-            let Ok(value) = renzora::serde_json::from_str::<renzora::serde_json::Value>(json_part) else {
+            let Ok(value) = renzora::serde_json::from_str::<renzora::serde_json::Value>(json_part)
+            else {
                 continue;
             };
             if let Some(err) = value["error"].as_str() {
@@ -1481,8 +1526,8 @@ fn extract_urls(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter_map(|token| {
             let start = token.find("http://").or_else(|| token.find("https://"))?;
-            let url = token[start..].trim_end_matches(['.', ',', ';', ':', ')', ']', '>', '"', '\''])
-                ;
+            let url =
+                token[start..].trim_end_matches(['.', ',', ';', ':', ')', ']', '>', '"', '\'']);
             (url.len() > 10).then(|| url.to_string())
         })
         .take(3)
@@ -1531,7 +1576,9 @@ fn clamp_text(mut text: String, budget: usize) -> String {
 /// prompt; top `max`, query-relevant only.
 fn related_links(html: &str, base: &str, query: &str, max: usize) -> Vec<String> {
     let origin = {
-        let Some(scheme_end) = base.find("://") else { return Vec::new() };
+        let Some(scheme_end) = base.find("://") else {
+            return Vec::new();
+        };
         match base[scheme_end + 3..].find('/') {
             Some(host_end) => &base[..scheme_end + 3 + host_end],
             None => base,
@@ -1549,7 +1596,9 @@ fn related_links(html: &str, base: &str, query: &str, max: usize) -> Vec<String>
         let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
             continue;
         };
-        let Some(end) = rest[1..].find(quote) else { continue };
+        let Some(end) = rest[1..].find(quote) else {
+            continue;
+        };
         let href = &rest[1..1 + end];
         rest = &rest[1 + end..];
 
@@ -1598,7 +1647,9 @@ fn retrieve_docs(path: &str, query: &str) -> Vec<(String, String)> {
     let mut dirs = vec![root.clone()];
     let mut files_seen = 0usize;
     while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let p = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -1615,13 +1666,11 @@ fn retrieve_docs(path: &str, query: &str) -> Vec<(String, String)> {
             if !matches!(ext, "md" | "mdx" | "markdown" | "txt") {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&p) else { continue };
+            let Ok(content) = std::fs::read_to_string(&p) else {
+                continue;
+            };
             files_seen += 1;
-            let rel = p
-                .strip_prefix(&root)
-                .unwrap_or(&p)
-                .display()
-                .to_string();
+            let rel = p.strip_prefix(&root).unwrap_or(&p).display().to_string();
 
             let mut heading = String::new();
             let mut cur = String::new();
@@ -1743,7 +1792,10 @@ fn resolve_docs_root(path: &str) -> Option<std::path::PathBuf> {
         .filter(|n| {
             !n.starts_with('.')
                 && n.chars().any(|c| c.is_ascii_digit())
-                && (n.starts_with('r') || n.starts_with('v') || n.contains("alpha") || n.contains("beta"))
+                && (n.starts_with('r')
+                    || n.starts_with('v')
+                    || n.contains("alpha")
+                    || n.contains("beta"))
         })
         .collect();
     if versions.is_empty() {
@@ -1802,9 +1854,9 @@ fn term_variants(term: &str) -> Vec<String> {
 /// Meaningful query words for scoring docs chunks and crawl links.
 fn query_terms(query: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "the", "and", "for", "with", "what", "how", "this", "that", "you", "your", "can",
-        "are", "does", "about", "from", "into", "look", "like", "need", "want", "please",
-        "tell", "scan", "website", "page", "http", "https", "com", "docs", "renzora",
+        "the", "and", "for", "with", "what", "how", "this", "that", "you", "your", "can", "are",
+        "does", "about", "from", "into", "look", "like", "need", "want", "please", "tell", "scan",
+        "website", "page", "http", "https", "com", "docs", "renzora",
     ];
     let mut out: Vec<String> = Vec::new();
     for word in query
@@ -1832,16 +1884,35 @@ fn html_to_text(html: &str) -> String {
         rest = &rest[open..];
         let Some(close) = rest.find('>') else { break };
         let tag = rest[1..close].trim_start_matches('/').to_ascii_lowercase();
-        let tag_name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let tag_name: String = tag
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
         if let Some(until) = skip_until {
             if rest.starts_with("</") && tag_name == until {
                 skip_until = None;
             }
         } else if tag_name == "script" || tag_name == "style" {
-            skip_until = Some(if tag_name == "script" { "script" } else { "style" });
+            skip_until = Some(if tag_name == "script" {
+                "script"
+            } else {
+                "style"
+            });
         } else if matches!(
             tag_name.as_str(),
-            "p" | "br" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "section" | "article" | "pre"
+            "p" | "br"
+                | "div"
+                | "li"
+                | "tr"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "section"
+                | "article"
+                | "pre"
         ) {
             out.push('\n');
         }
@@ -1882,11 +1953,7 @@ const LF: char = '\n';
 
 /// Attach the protocol's auth headers. Anthropic uses `x-api-key` + a
 /// pinned `anthropic-version`; everything else is a Bearer token.
-fn authorize(
-    req: renzora::net::Request,
-    protocol: Protocol,
-    key: &str,
-) -> renzora::net::Request {
+fn authorize(req: renzora::net::Request, protocol: Protocol, key: &str) -> renzora::net::Request {
     match protocol {
         Protocol::Anthropic => req
             .header("x-api-key", key)
@@ -1916,14 +1983,73 @@ fn api_error_message(body: &str) -> String {
     }
 }
 
-// `Editor` — this is an editor panel and has no business in a shipped game.
-// That is also `plugin!`'s default, but stated explicitly: the default differs
-// from `add!`'s, and a scope that reads as an accident is worth spelling out.
-renzora::plugin!(AiChatPlugin, Editor);
+renzora::add!(AiChatEditorPlugin, Editor);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registers_panel_and_settings_with_original_ids() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        app.add_plugins(AiChatEditorPlugin);
+        assert!(app.world().contains_resource::<AiChat>());
+        let panels = app.world().resource::<renzora::core::ShellPanelRegistry>();
+        assert_eq!(panels.panels.get("ai_chat").unwrap().title, "AI Chat");
+        let settings = app
+            .world()
+            .resource::<renzora_ember::settings_sections::SettingsSectionRegistry>();
+        assert!(settings.0.iter().any(|section| section.id == "ai_chat"));
+        // Do not update the full App: these registration assertions need no
+        // network activity or persisted user-configuration writes.
+    }
+
+    #[test]
+    fn disabled_startup_registers_no_chat_or_panel() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["ai_chat".into()]));
+        app.add_plugins(AiChatEditorPlugin);
+        assert!(!app.world().contains_resource::<AiChat>());
+        assert!(!app
+            .world()
+            .contains_resource::<renzora::core::ShellPanelRegistry>());
+        app.update();
+    }
+
+    #[test]
+    fn stream_drains_without_a_visible_panel_and_preserves_context() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (tx, rx) = channel();
+        let chat = AiChat {
+            stream: Some(Mutex::new(rx)),
+            messages: vec![
+                ChatMsg {
+                    role: Role::User,
+                    content: "question".into(),
+                    context: None,
+                },
+                ChatMsg {
+                    role: Role::Assistant,
+                    content: String::new(),
+                    context: None,
+                },
+            ],
+            ..default()
+        };
+        world.insert_resource(chat);
+        tx.send(StreamEvent::Context("manual excerpt".into()))
+            .unwrap();
+        tx.send(StreamEvent::Delta("hello ".into())).unwrap();
+        tx.send(StreamEvent::Delta("world".into())).unwrap();
+        tx.send(StreamEvent::Done).unwrap();
+        world.run_system_once(drain_stream).unwrap();
+        let chat = world.resource::<AiChat>();
+        assert_eq!(chat.messages[1].content, "hello world");
+        assert_eq!(chat.messages[0].context.as_deref(), Some("manual excerpt"));
+        assert!(chat.stream.is_none());
+    }
 
     #[test]
     fn urls_extracted_and_trimmed() {
@@ -1956,7 +2082,9 @@ mod tests {
         let links = related_links(html, "https://renzora.com/docs/r1", "lua scripting", 3);
         assert!(links.contains(&"https://renzora.com/docs/r1/scripting/lua".to_string()));
         assert!(links.contains(&"https://renzora.com/docs/r1/scripting/rhai".to_string()));
-        assert!(!links.iter().any(|l| l.contains("other.site") || l.contains("pricing")));
+        assert!(!links
+            .iter()
+            .any(|l| l.contains("other.site") || l.contains("pricing")));
     }
 
     #[test]
@@ -1986,7 +2114,10 @@ mod tests {
         );
         let hits = retrieve_docs(docs, "how do lua lifecycle hooks work in scripts");
         assert!(!hits.is_empty(), "lua docs should match");
-        assert!(hits.iter().any(|(label, _)| label.contains("scripting")), "{hits:?}");
+        assert!(
+            hits.iter().any(|(label, _)| label.contains("scripting")),
+            "{hits:?}"
+        );
     }
 
     #[test]
@@ -1996,8 +2127,8 @@ mod tests {
         let docs = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs");
         let hits = retrieve_docs(docs, "write me a lua script that rotates a cube");
         assert!(
-            hits.iter().any(|(label, text)| label.contains("api/scripting")
-                || text.contains("rotate(")),
+            hits.iter()
+                .any(|(label, text)| label.contains("api/scripting") || text.contains("rotate(")),
             "API reference should be retrieved: {:?}",
             hits.iter().map(|(l, _)| l).collect::<Vec<_>>()
         );
