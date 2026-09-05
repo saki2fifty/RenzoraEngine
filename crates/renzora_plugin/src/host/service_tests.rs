@@ -6,6 +6,7 @@ fn gate() -> GenGate {
     GenGate {
         counter: Default::default(),
         at: 0,
+        cancelled: Default::default(),
     }
 }
 

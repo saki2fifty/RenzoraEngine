@@ -1599,7 +1599,7 @@ Their old entries are cleared between calls; resource addresses are resolved
 again each time. Deferred commands keep their own payload bytes until execution.
 This reduces allocation overhead but does not make dispatch allocation-free:
 growing buffers and copying command payloads can still allocate.
-Bounded reload cleanup is a separate improvement.
+Retired systems release these buffers when removed from their schedules.
 
 ## Parallel system scheduling
 
@@ -1621,3 +1621,16 @@ for undeclared mutable service sources. `SystemDesc.flags` remains reserved and
 zero. Existing plugins using `add_system` retain their previous service access;
 rebuilding against the new SDK enables inference. Newly built plugins require a
 4.11-or-newer compatible host and refuse older hosts during negotiation.
+
+## Reload system cleanup
+
+Reloading removes the replaced systems instead of keeping an ever-growing list
+of inactive callbacks. Rejected candidates are cancelled permanently, including
+when the next successful build reuses their generation number. If a schedule is
+currently running, additions and removals wait until it is available; the host
+checks pending work at frame boundaries. A newly added system targeting that
+active schedule begins on its next run.
+
+The host reuses a bounded pool of private scheduling sets and releases retired
+systems' owned buffers. This does **not** unload old library images: callback and
+backend-thread lifetime safety still requires those images to remain mapped.

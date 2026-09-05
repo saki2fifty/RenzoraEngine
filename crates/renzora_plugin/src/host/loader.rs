@@ -366,28 +366,11 @@ pub struct PluginSlot {
     /// **Every** library ever loaded for this path, and none of them is ever
     /// dropped.
     ///
-    /// Deliberate. Every function pointer a plugin registered — system entries,
-    /// panel action thunks, render callbacks — points into its library, and a
-    /// retired system is still *in* the schedule, merely returning early. Freeing
-    /// the library would turn those into dangling pointers. Dropping a
-    /// `libloading::Library` has also deadlocked in `FreeLibrary` here before.
-    ///
-    /// So a reload leaks one library image. A few MB per reload across a dev
-    /// session is a fair price for never unmapping code that something might
-    /// still call, and a restart reclaims all of it.
-    ///
-    /// **Every** library ever loaded for this path, and none of them is ever
-    /// dropped.
-    ///
-    /// Deliberate. Every function pointer a plugin registered — system entries,
-    /// panel action thunks, render callbacks — points into its library, and a
-    /// retired system is still *in* the schedule, merely returning early. Freeing
-    /// the library would turn those into dangling pointers. Dropping a
-    /// `libloading::Library` has also deadlocked in `FreeLibrary` here before.
-    ///
-    /// So a reload leaks one library image. A few MB per reload across a dev
-    /// session is a fair price for never unmapping code that something might
-    /// still call, and a restart reclaims all of it.
+    /// Retired systems are removed, but that alone does not prove all panel,
+    /// render or backend callbacks and plugin-owned threads have quiesced.
+    /// Dropping a `libloading::Library` has also deadlocked in `FreeLibrary`
+    /// here before. Keep images mapped until a separate full teardown contract
+    /// proves unloading safe; restarting the process reclaims them.
     ///
     /// `ManuallyDrop`, and not merely "we never call `remove`": [`LoadedPlugins`]
     /// is an ECS resource, so a plain `Vec<Library>` is dropped when the World
@@ -817,12 +800,12 @@ fn load_one(
     }
 
     // Take the slot's previous registrations back before the new build adds its
-    // own, so a panel or a render pass is replaced rather than duplicated. Systems
-    // are NOT in here — they retire themselves via the generation counter, because
-    // Bevy cannot remove one from a schedule.
+    // own, so a panel or a render pass is replaced rather than duplicated.
+    // Keep the prior systems until init succeeds; cancelling them here would
+    // stop last-good execution even when the new candidate is refused.
     let prior_loaded_at = world.resource::<LoadedPlugins>().0[slot].loaded_at;
     if generation > 0 {
-        super::retire_slot(world, slot, prior_loaded_at);
+        super::retire_slot_registrations(world, slot, prior_loaded_at);
     }
 
     match super::init_plugin_gen_with_non_persistable(
@@ -836,6 +819,9 @@ fn load_one(
     ) {
         super::InitOutcome::Ok => {
             counter.store(generation, std::sync::atomic::Ordering::Relaxed);
+            if generation > 0 {
+                super::system_lifecycle::retire(world, slot, prior_loaded_at);
+            }
             let mut loaded = world.resource_mut::<LoadedPlugins>();
             let s = &mut loaded.0[slot];
             s.loaded_at = generation;
@@ -1222,10 +1208,9 @@ pub unsafe fn activate_with_transaction(
 }
 
 /// Restore the slot's counter and `loaded_at` after a rolled-back
-/// activation. The candidate's systems remain registered with
-/// `at = proposed_generation` and are permanently stale because the
-/// counter still reads `prior_loaded_at`. They never run, so they cannot
-/// disturb the running build.
+/// activation. Failed systems have already been irrevocably cancelled and
+/// removed, or queued for removal if their schedule is currently running.
+/// Reusing a proposed generation cannot reactivate those failed systems.
 fn restore_slot_after_rollback(world: &mut World, slot: usize, prior_loaded_at: u32) {
     if let Some(mut loaded) = world.get_resource_mut::<LoadedPlugins>() {
         if let Some(s) = loaded.0.get_mut(slot) {
@@ -1765,6 +1750,7 @@ pub struct RenzoraPluginHostPlugin {
 
 impl Plugin for RenzoraPluginHostPlugin {
     fn build(&self, app: &mut App) {
+        super::install_system_maintenance(app);
         let dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("plugins")))

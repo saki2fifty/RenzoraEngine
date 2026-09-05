@@ -593,6 +593,7 @@ impl Plugin for LoosePluginHost {
         // implicit (the queue is filled before either runs because the build
         // service is on a worker thread and the events arrive via a channel
         // that both systems drain).
+        renzora_plugin::host::install_system_maintenance(app);
         app.add_systems(PreUpdate, drain_pending_builds);
         app.add_systems(PreUpdate, drain_activation_queue);
         app.add_systems(PreUpdate, process_reload_requests);

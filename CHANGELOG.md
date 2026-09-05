@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 23:06 UTC
+
+- Stopped plugin reloads from accumulating inactive systems and their working memory. A 1,000-reload test keeps one active system rather than growing the list.
+- Prevented rejected plugin code from coming back on a later retry, and preserved new systems registered while their schedule is running.
+
 ## September 5, 2026 — 22:51 UTC
 
 - Allowed independent Rust plugin systems to run in parallel instead of waiting on services they do not use. Systems that share writable data still run safely in turn.

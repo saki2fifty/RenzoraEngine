@@ -29,6 +29,9 @@ pub mod input;
 pub mod loader;
 
 mod call_buffers;
+mod system_lifecycle;
+
+pub use system_lifecycle::install as install_system_maintenance;
 
 #[cfg(test)]
 mod dispatch_tests;
@@ -162,6 +165,7 @@ struct HostCtx<'w> {
     /// Which reload of which plugin is registering. Handed to every system this
     /// init call creates, so a later reload can retire them.
     gate: GenGate,
+    system_set: system_lifecycle::AttemptSet,
     /// The plugin's slot index, stamped on everything it registers so
     /// [`retire_slot`] can take it back on the next reload.
     slot: usize,
@@ -351,8 +355,8 @@ unsafe fn refresh_component_schema(
 /// **Taken back:** panels, render passes and post-process effects, all of which the
 /// new build re-registers. Without this a reload would duplicate them.
 ///
-/// **Not here:** systems. Bevy cannot remove one from a schedule, so they retire
-/// themselves by generation instead — see [`GenGate`].
+/// **Systems:** cancelled immediately, then removed when their schedules are
+/// available. The frame-boundary sweep handles a currently running schedule.
 /// Retire the prior generation of a slot's registrations.
 ///
 /// `prior_loaded_at` is the prior `loaded_at` for the slot. Only entries
@@ -375,6 +379,11 @@ unsafe fn refresh_component_schema(
 /// the prior's (the prior's bytes are still in column storage for
 /// live entities — `refresh_compatible_schemas` keeps the layout).
 pub fn retire_slot(world: &mut World, slot: usize, prior_loaded_at: u32) {
+    system_lifecycle::retire(world, slot, prior_loaded_at);
+    retire_slot_registrations(world, slot, prior_loaded_at);
+}
+
+fn retire_slot_registrations(world: &mut World, slot: usize, prior_loaded_at: u32) {
     if let Some(mut panels) = world.get_resource_mut::<PluginPanels>() {
         panels
             .0
@@ -504,20 +513,15 @@ pub type PluginGeneration = std::sync::Arc<std::sync::atomic::AtomicU32>;
 
 /// Lets a system tell whether the plugin that registered it has since reloaded.
 ///
-/// Bevy cannot remove a system from a schedule, so a reloaded plugin's old
-/// systems stay in it forever. Rather than restructure every registration to live
-/// in a swappable sub-schedule — which would force the runner to be exclusive and
-/// stop plugin systems parallelising with engine systems in *every* build,
-/// reloading or not — a retired system stays scheduled and returns immediately.
-///
-/// The cost is that a long dev session accumulates no-op systems, each still
-/// paying its param fetch. That is a dev-only cost, cleared by a restart, and a
-/// shipped game never reloads so it never has one.
+/// Generation comparison guards publication. Irrevocable cancellation guards
+/// failed attempts even when their generation number is reused. The lifecycle
+/// sweep removes cancelled systems once their schedules are not running.
 #[derive(Clone)]
 struct GenGate {
     counter: PluginGeneration,
     /// The counter's value when the capturing system registered.
     at: u32,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GenGate {
@@ -540,7 +544,8 @@ impl GenGate {
     /// build's systems live alongside the previous build's — two sets of systems,
     /// one of them reading a struct whose layout the host had just rejected.
     fn stale(&self) -> bool {
-        self.at != self.counter.load(std::sync::atomic::Ordering::Relaxed)
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+            || self.at != self.counter.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1498,10 +1503,7 @@ unsafe extern "C" fn add_system_with_services_v1(
         let system = build_dispatcher(
             ctx.world, plans, res_plan, desc.entry, desc.user as usize, gate, services,
         );
-        ctx.world
-            .resource_mut::<Schedules>()
-            .entry(bevy_label(desc.schedule))
-            .add_systems(system);
+        system_lifecycle::register(ctx.world, ctx.system_set, bevy_label(desc.schedule).intern(), system);
         sys::RegisterStatus::Ok
     })
 }
@@ -4016,14 +4018,9 @@ fn build_dispatcher(
             if disabled.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            // The plugin that registered this has been reloaded, and a newer
-            // build has already registered its replacement. Retiring here rather
-            // than unregistering is what keeps hot-reload from costing every
-            // build a swappable sub-schedule — see `GenGate`.
-            //
-            // Checked before the staging buffers are built, so a retired system
-            // costs an atomic load and nothing else. It still pays the param
-            // fetch Bevy did to call it; that is the accumulating cost.
+            // Publication and irrevocable cancellation also guard the short
+            // interval before cleanup can remove a currently running schedule's
+            // retired systems. No plugin callback runs during that interval.
             if gate.stale() {
                 return;
             }
@@ -5091,6 +5088,7 @@ pub fn apply_journal_rollback(
     slot: usize,
     proposed_generation: u32,
 ) {
+    system_lifecycle::retire(world, slot, proposed_generation);
     // Q3-2: collect every candidate custom-material id into a single batch
     // BEFORE mutating either `PendingMaterials` or `PluginAssets::materials`.
     // Removing one candidate's row at a time while iterating the journal in
@@ -5461,12 +5459,15 @@ pub fn init_plugin_gen_with_non_persistable(
     // handing it a stack local leaves it dangling the moment this returns, and
     // the next `render_set_pipeline` reads a garbage function pointer. Systems
     // were unaffected because they get their interface from `SystemCall::iface`.
+    let (system_set, cancelled) = system_lifecycle::begin(world, slot, generation);
     let mut ctx = HostCtx {
         world,
         gate: GenGate {
             counter,
             at: generation,
+            cancelled,
         },
+        system_set,
         slot,
         layout_conflict: false,
         layout_conflict_reason: None,
@@ -5474,6 +5475,7 @@ pub fn init_plugin_gen_with_non_persistable(
         non_persistable,
     };
     let result = unsafe { init(&IFACE, (&mut ctx as *mut HostCtx).cast()) };
+    system_lifecycle::finish(ctx.world, system_set, result == sys::InitResult::Ok && !ctx.layout_conflict);
     // A layout change is only discoverable once the plugin registers, i.e. part
     // way through init. Reporting failure here is what makes it a no-op: the
     // loader leaves the generation counter alone, so this build's systems are

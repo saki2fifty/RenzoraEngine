@@ -203,6 +203,7 @@ fn real_dispatcher_handles_empty_and_smaller_frames_after_warmup() {
         GenGate {
             counter: Default::default(),
             at: 0,
+            cancelled: Default::default(),
         },
         sys::system_services::ALL,
     );
@@ -256,6 +257,7 @@ fn resource_table_refreshes_after_resource_removal_and_reinsertion() {
         GenGate {
             counter: Default::default(),
             at: 0,
+            cancelled: Default::default(),
         },
         sys::system_services::ALL,
     );
@@ -319,6 +321,7 @@ fn run_command_probe(status: sys::SystemStatus) -> (u32, u32) {
         GenGate {
             counter: Default::default(),
             at: 0,
+            cancelled: Default::default(),
         },
         sys::system_services::ALL,
     );

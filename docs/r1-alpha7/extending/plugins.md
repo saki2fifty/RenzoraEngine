@@ -280,7 +280,8 @@ performs:
   resource-byte restoration via
   `host::write_resource_bytes_unsafe`), the slot's `loaded_at` and
   counter are restored to their prior values, and the candidate's
-  systems remain permanently inert (`at != counter`).
+  systems are irrevocably cancelled and removed. If their schedule is running,
+  removal waits for a safe boundary; reusing a generation cannot revive them.
 
 **Same-ID ownership.** `PluginComponentOwners` maps every
 `ComponentId` to a `Vec<(slot, generation)>` of ownership claims,
@@ -318,9 +319,9 @@ candidate registered would point at freed memory.
 **Last-good behavior.** On every failure mode — open fail, missing
 symbol, scope reject, ABI mismatch, prefix mismatch, layout change,
 init fail — the slot's prior generation stays active. The candidate's
-systems are registered with `at = proposed` but counter remains at
-`loaded_at`, so `GenGate::stale()` returns true forever. A failed
-candidate never runs and never disturbs the running build. The
+systems are cancelled independently of the generation counter and removed at
+a safe schedule boundary. A failed candidate never runs, even if a later retry
+uses the same generation number, and does not disturb the running build. The
 stable staged file is unchanged.
 
 **Durable host identity.** Every plugin component and resource the
