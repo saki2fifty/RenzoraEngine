@@ -337,6 +337,7 @@ renzora_skybox = { path = "../renzora_skybox", optional = true }
 # entry here pointing at a directory that no longer exists stops cargo
 # loading the workspace, including to run the generator that would fix
 # it. If you hit that, delete the offending line below.
+renzora_auto_exposure = { path = "../renzora_auto_exposure" }
 renzora_native_plugin = { path = "../renzora_native_plugin" }
 renzora_net = { path = "../renzora_net" }
 renzora_rust_script = { path = "../renzora_rust_script" }

@@ -132,6 +132,8 @@ Gamepad diagnostics now live in `renzora_gamepad_editor` and are linked only int
 
 Vignette rendering lives in `renzora_vignette`; its inspector controls live separately in `renzora_vignette_editor`. Both use the same settings definition from the contract crate. Existing scenes still identify it as `vignette::VignetteSettings`, and the `vignette` enable preference is preserved.
 
+Auto exposure follows the same split: `renzora_auto_exposure` handles runtime metering and compensation, while `renzora_auto_exposure_editor` owns the inspector. The shared settings type, `auto_exposure` preference, artwork and night-darkening controls are preserved.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

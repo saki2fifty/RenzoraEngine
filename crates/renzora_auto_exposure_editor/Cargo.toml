@@ -1,0 +1,12 @@
+[package]
+name = "renzora_auto_exposure_editor"
+version = "0.1.0"
+edition = "2021"
+description = "Editor controls for auto exposure"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+
+[lints]
+workspace = true

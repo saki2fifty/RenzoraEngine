@@ -32,7 +32,6 @@ use bevy::post_process::auto_exposure::{
     AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin as BevyAePlugin,
 };
 use bevy::prelude::*;
-pub mod inspector;
 
 /// The authored settings live in the **contract crate** now.
 ///
@@ -177,9 +176,9 @@ fn sync_exposure(
                 if !routing_changed && !exposure.is_changed() {
                     break;
                 }
-                commands
-                    .entity(*target)
-                    .insert(Exposure { ev100: exposure.ev100 });
+                commands.entity(*target).insert(Exposure {
+                    ev100: exposure.ev100,
+                });
                 break;
             }
         }
@@ -225,6 +224,9 @@ pub struct AutoExposurePlugin;
 
 impl Plugin for AutoExposurePlugin {
     fn build(&self, app: &mut App) {
+        if !renzora::builtin_plugin_enabled(app, "auto_exposure") {
+            return;
+        }
         info!("[runtime] AutoExposurePlugin");
         // Bevy's AutoExposurePlugin is opt-in (not part of DefaultPlugins).
         // Adding it here means `AutoExposure` components are actually
@@ -241,13 +243,97 @@ impl Plugin for AutoExposurePlugin {
         app.register_type::<AutoExposureSettings>();
         // Build the curve before applying AE so a freshly rebuilt curve reaches
         // the camera the same frame.
-        app.add_systems(Update, (build_compensation_curve, sync_auto_exposure).chain());
-        app.add_systems(Update, (cleanup_auto_exposure, sync_exposure, mirror_camera_ev));
-
-        inspector::register(app);
+        app.add_systems(
+            Update,
+            (build_compensation_curve, sync_auto_exposure).chain(),
+        );
+        app.add_systems(
+            Update,
+            (cleanup_auto_exposure, sync_exposure, mirror_camera_ev),
+        );
     }
 }
 
-// `Runtime`, explicitly: `plugin!` defaults to `Editor` where `add!` defaulted
-// to `Runtime`, so omitting it would stop shipping auto-exposure to games.
-renzora::plugin!(AutoExposurePlugin, Runtime);
+renzora::add!(AutoExposurePlugin, Runtime);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn compensation_is_reused_until_shaping_settings_change() {
+        let mut world = World::new();
+        world.init_resource::<Assets<AutoExposureCompensationCurve>>();
+        world.init_resource::<AeCompensation>();
+        let source = world.spawn(AutoExposureSettings::default()).id();
+        world.run_system_once(build_compensation_curve).unwrap();
+        let original = world.resource::<AeCompensation>().handle.clone();
+        assert!(world
+            .resource::<Assets<AutoExposureCompensationCurve>>()
+            .get(&original)
+            .is_some());
+        world.run_system_once(build_compensation_curve).unwrap();
+        assert_eq!(world.resource::<AeCompensation>().handle, original);
+        world
+            .get_mut::<AutoExposureSettings>(source)
+            .unwrap()
+            .keep_dark_strength += 0.1;
+        world.run_system_once(build_compensation_curve).unwrap();
+        assert_ne!(world.resource::<AeCompensation>().handle, original);
+    }
+
+    #[test]
+    fn routes_metering_and_manual_exposure_without_editor_controls() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        // Bevy's effect removal hook uses render synchronization even without
+        // a GPU sub-app. Mirror the normal host's setup in this headless test.
+        app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+        app.init_asset::<bevy::shader::Shader>();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        let source = app
+            .world_mut()
+            .spawn((AutoExposureSettings::default(), Exposure { ev100: 7.0 }))
+            .id();
+        let target = app.world_mut().spawn_empty().id();
+        app.insert_resource(renzora::EffectRouting {
+            routes: vec![(target, vec![source])],
+        });
+        app.add_plugins(AutoExposurePlugin);
+        app.update();
+        let effect = app
+            .world()
+            .get::<AutoExposure>(target)
+            .expect("metered camera");
+        assert_eq!(
+            effect.range,
+            app.world()
+                .get::<AutoExposureSettings>(source)
+                .unwrap()
+                .range_min
+                ..=app
+                    .world()
+                    .get::<AutoExposureSettings>(source)
+                    .unwrap()
+                    .range_max
+        );
+        assert_eq!(app.world().get::<Exposure>(target).unwrap().ev100, 7.0);
+        app.world_mut()
+            .get_mut::<AutoExposureSettings>(source)
+            .unwrap()
+            .enabled = false;
+        app.update();
+        assert!(app.world().get::<AutoExposure>(target).is_none());
+    }
+
+    #[test]
+    fn saved_disable_preference_skips_bevy_metering_installation() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["auto_exposure".into()]));
+        app.add_plugins(AutoExposurePlugin);
+        assert!(!app.is_plugin_added::<BevyAePlugin>());
+        assert!(!app.world().contains_resource::<AeCompensation>());
+        app.update();
+    }
+}

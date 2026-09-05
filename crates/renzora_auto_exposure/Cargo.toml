@@ -1,0 +1,12 @@
+[package]
+name = "renzora_auto_exposure"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime histogram exposure and keep-dark compensation"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false }
+
+[lints]
+workspace = true
