@@ -2,6 +2,12 @@
 
 Use an engine plugin when a feature needs real Bevy systems, rendering or editor APIs. Renzora builds a new editor and game in the background, then offers a restart. Ordinary loose Rust plugins and in-editor Rust scripts keep their live-update workflow.
 
+## Built-in runtime build options
+
+Normal builds include the migrated built-in game features. The runtime crate also exposes individual Cargo features: `spline`, `vignette`, `auto_exposure`, `night_stars`, `procedural_tree`, `text3d`, `pool_water` and `clouds`. Disabling a feature omits its runtime plugin installation and optional dependency; the generated plugin list preserves these choices. Rendering features select their rendering requirements automatically.
+
+The lean exporter removes the migrated renderers when 3D rendering is disabled, and removes 3D text when UI is disabled, so those plugins do not silently re-enable excluded subsystems. Individual plugin selection integration remains in progress. Disabling scripting entirely is a separate, currently broken runtime feature combination.
+
 ## Choose the right tier
 
 | Need | Use |

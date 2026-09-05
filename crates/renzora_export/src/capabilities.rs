@@ -931,13 +931,11 @@ pub fn disabled_bevy_features(state: &HashMap<String, bool>) -> Vec<String> {
 /// it here (not via a Cargo feature dep, which would force render_3d back ON).
 pub fn disabled_runtime_features(state: &HashMap<String, bool>) -> Vec<String> {
     let mut out = collect_disabled(state, |c| c.runtime_features);
-    // 3D text used to need a special case here: it was the one subsystem outside
-    // the UI tree that still pulled `bevy_text`, so a UI-stripped runtime had to
-    // drop it too. It is a native plugin now, and the glyph machinery it shares
-    // with the UI emitter sits behind `renzora`'s `text_mesh` feature, which only
-    // `renzora_ember` turns on — and ember is already gone when UI is off. The
-    // dependency is expressed in the manifests now, so there is nothing to
-    // enforce here.
+    // The migrated text renderer shares the UI text stack. Omit its feature
+    // when UI is stripped rather than allowing its dependency to re-enable UI.
+    if !state.get("ui").copied().unwrap_or(true) {
+        out.push("text3d".into());
+    }
     let render_3d_on = state.get("render_3d").copied().unwrap_or(true);
     if !render_3d_on {
         // particles (bevy_hanabi) references bevy_pbr in its asset path — drop it
@@ -968,6 +966,14 @@ pub fn disabled_runtime_features(state: &HashMap<String, bool>) -> Vec<String> {
             "parkour",
             "gaussian_splatting",
             "forward_decal",
+            // Migrated native renderers must not re-enable the removed stack.
+            "vignette",
+            "auto_exposure",
+            "night_stars",
+            "procedural_tree",
+            "text3d",
+            "pool_water",
+            "clouds",
         ] {
             if !out.iter().any(|x| x == f) {
                 out.push(f.to_string());
@@ -1122,5 +1128,42 @@ mod tests {
         smaller.insert("parallel_codegen".into(), false);
         let p = lean_profile(&smaller);
         assert!(p.panic_abort && p.opt_level_z && p.codegen_units_one);
+    }
+
+    #[test]
+    fn migrated_renderers_follow_removed_rendering_stacks() {
+        let mut state = defaults(&[], None);
+        let normal = disabled_runtime_features(&state);
+        for feature in [
+            "spline",
+            "vignette",
+            "auto_exposure",
+            "night_stars",
+            "procedural_tree",
+            "text3d",
+            "pool_water",
+            "clouds",
+        ] {
+            assert!(!normal.iter().any(|disabled| disabled == feature));
+        }
+        state.insert("render_3d".into(), false);
+        let reduced = disabled_runtime_features(&state);
+        for feature in [
+            "vignette",
+            "auto_exposure",
+            "night_stars",
+            "procedural_tree",
+            "text3d",
+            "pool_water",
+            "clouds",
+        ] {
+            assert!(reduced.iter().any(|disabled| disabled == feature));
+        }
+        assert!(!reduced.iter().any(|disabled| disabled == "spline"));
+        state.insert("render_3d".into(), true);
+        state.insert("ui".into(), false);
+        let no_ui = disabled_runtime_features(&state);
+        assert!(no_ui.iter().any(|disabled| disabled == "text3d"));
+        assert!(!no_ui.iter().any(|disabled| disabled == "clouds"));
     }
 }

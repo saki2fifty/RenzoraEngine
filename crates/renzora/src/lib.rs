@@ -176,6 +176,7 @@ pub mod content_problems;
 pub mod wgsl;
 pub mod vignette;
 pub use vignette::VignetteSettings;
+#[cfg(feature = "render_3d")]
 pub mod procedural_tree;
 pub mod text3d;
 pub mod pool_water;

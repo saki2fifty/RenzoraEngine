@@ -9,7 +9,7 @@ u32_indices = []
 
 [dependencies]
 bevy = { workspace = true }
-renzora = { path = "../renzora", default-features = false }
+renzora = { path = "../renzora", default-features = false, features = ["render_3d"] }
 fastrand = "2.3"
 
 [lints]

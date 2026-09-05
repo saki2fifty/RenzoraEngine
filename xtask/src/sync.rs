@@ -1205,6 +1205,35 @@ mod tests {
     }
 
     #[test]
+    fn optional_builtin_gate_survives_sync_and_guards_installation() {
+        let repo = TestRepo::new();
+        repo.crate_with(
+            "crates/renzora_weather",
+            "renzora_weather",
+            "renzora::add!(WeatherPlugin, Runtime);\n",
+        );
+        let host = repo.0.join("crates/renzora_runtime");
+        fs::create_dir_all(host.join("src")).unwrap();
+        let manifest = "[features]\ndefault = [\"weather\"]\nweather = [\"dep:renzora_weather\"]\n[dependencies]\nrenzora_weather = { path = \"../renzora_weather\", optional = true }\n";
+        fs::write(host.join("Cargo.toml"), manifest).unwrap();
+        let declarations = scan(&repo.0).unwrap();
+        let host = Host {
+            dir: host,
+            scope: Scope::Runtime,
+            install_fn: "install",
+            app_path: "bevy::prelude::App",
+            always: None,
+        };
+        host.write(&declarations, false).unwrap();
+        let updated = fs::read_to_string(host.dir.join("Cargo.toml")).unwrap();
+        assert!(updated.contains("optional = true"));
+        let wiring = fs::read_to_string(host.dir.join("src/plugins.rs")).unwrap();
+        assert!(wiring.contains("#[cfg(feature = \"weather\")]"));
+        assert!(wiring.contains("renzora_weather::WeatherPlugin"));
+        assert!(host.write(&declarations, true).unwrap().is_empty());
+    }
+
+    #[test]
     fn registered_tier2_halves_are_scanned_with_overlay_paths() {
         let repo = TestRepo::new();
         repo.crate_with(

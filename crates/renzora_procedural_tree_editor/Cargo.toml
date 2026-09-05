@@ -6,7 +6,7 @@ description = "Procedural tree preset and inspector"
 
 [dependencies]
 bevy = { workspace = true }
-renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+renzora = { path = "../renzora", default-features = false, features = ["editor", "render_3d"] }
 
 [lints]
 workspace = true
