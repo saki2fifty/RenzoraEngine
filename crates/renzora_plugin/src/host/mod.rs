@@ -28,6 +28,9 @@ pub mod dev;
 pub mod input;
 pub mod loader;
 
+#[cfg(test)]
+mod dispatch_tests;
+
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::ecs::component::{ComponentDescriptor, ComponentId, StorageType};
 use bevy::ecs::lifecycle::{RemovedComponentEntity, RemovedComponentMessages};
@@ -3593,7 +3596,7 @@ fn build_query(builder: &mut QueryBuilder<FilteredEntityMut>, terms: &[TermPlan]
     }
 }
 
-/// One query's staging buffers, rebuilt each call.
+/// One query's owned staging buffers, reused across calls.
 ///
 /// Split out per query because a system now has as many of these as it declared
 /// `Query` parameters, and the plugin indexes cells within a view rather than
@@ -3615,7 +3618,6 @@ struct ViewState {
     /// keeps row indexing uniform.
     present: Vec<Vec<bool>>,
     entities: Vec<sys::Entity>,
-    cells: Vec<*mut u8>,
     /// Change-tick filters, which carry a component but produce no cell and so
     /// are absent from `cells_plan`.
     tick_plan: Vec<(ComponentId, TickKind)>,
@@ -3657,7 +3659,6 @@ impl ViewState {
             present: vec![Vec::new(); n],
             cells_plan,
             entities: Vec::new(),
-            cells: Vec::new(),
         }
     }
 
@@ -3668,12 +3669,26 @@ impl ViewState {
         )
     }
 
+    fn clear_rows(&mut self) {
+        self.entities.clear();
+        self.kept.clear();
+        for column in &mut self.staging {
+            column.clear();
+        }
+        for column in &mut self.baseline {
+            column.clear();
+        }
+        for column in &mut self.present {
+            column.clear();
+        }
+    }
+
     /// Copy every matched row into the staging buffers.
     fn gather(&mut self, q: &mut Query<FilteredEntityMut>, ticks: SystemChangeTick) {
+        self.clear_rows();
         for e in q.iter() {
-            // Before `read_cell`, deliberately: that allocates and copies per
-            // cell, so a filtered-out row now costs a tick comparison instead of
-            // a heap allocation per term. Skipping here also compacts for free —
+            // Before copying cells, deliberately: filtered-out rows need only
+            // a tick comparison. Skipping here also compacts for free —
             // everything below indexes by staged position, and nothing is pushed
             // for a skipped row.
             if self.filtered {
@@ -3700,49 +3715,48 @@ impl ViewState {
             }
             self.entities.push(sys::Entity(e.id().to_bits()));
             for (i, t) in self.cells_plan.iter().enumerate() {
-                match read_cell(&e, t) {
-                    Some(bytes) => {
-                        self.staging[i].extend_from_slice(&bytes);
-                        self.present[i].push(true);
-                    }
+                if append_cell(&e, t, &mut self.staging[i]) {
+                    self.present[i].push(true);
+                } else {
                     // Still reserve the row so offsets stay uniform; the plugin
                     // sees a null cell and never reads these bytes.
-                    None => {
-                        let len = self.staging[i].len();
-                        self.staging[i].resize(len + t.cell_size, 0);
-                        self.present[i].push(false);
-                    }
+                    let len = self.staging[i].len();
+                    self.staging[i].resize(len + t.cell_size, 0);
+                    self.present[i].push(false);
                 }
             }
         }
 
         for (i, t) in self.cells_plan.iter().enumerate() {
             if Self::is_writable(t) {
-                self.baseline[i] = self.staging[i].clone();
+                self.baseline[i].clone_from(&self.staging[i]);
             }
         }
+    }
 
+    fn view(&mut self, cells: &mut Vec<*mut u8>) -> sys::QueryView {
+        // Pointer tables remain call-local: no raw ECS/cell pointers are kept
+        // in the Send + Sync system closure between scheduler invocations.
+        cells.clear();
         // Row-major `entity_count × cell_count`, matching what `sys::QueryView`
         // documents. `present` is indexed [term][row] while this walks
         // row-major, so the range loop is the transpose, not something to
         // iterate away.
-        self.cells
-            .reserve(self.entities.len() * self.cells_plan.len());
+        cells.reserve(self.entities.len() * self.cells_plan.len());
         #[allow(clippy::needless_range_loop)]
         for row in 0..self.entities.len() {
             for (i, t) in self.cells_plan.iter().enumerate() {
-                self.cells.push(if self.present[i][row] {
+                cells.push(if self.present[i][row] {
+                    // SAFETY: gather completed all column growth; this row is
+                    // present and within the allocated staging column.
                     unsafe { self.staging[i].as_mut_ptr().add(row * t.cell_size) }
                 } else {
                     std::ptr::null_mut()
                 });
             }
         }
-    }
-
-    fn view(&mut self) -> sys::QueryView {
         sys::QueryView {
-            cells: self.cells.as_mut_ptr(),
+            cells: cells.as_mut_ptr(),
             entities: self.entities.as_ptr(),
             entity_count: self.entities.len(),
             cell_count: self.cells_plan.len(),
@@ -3848,6 +3862,22 @@ fn build_dispatcher(
             QueryParamBuilder::new(move |builder: &mut QueryBuilder<FilteredEntityMut>| {
                 build_query(builder, &terms);
             })
+        })
+        .collect();
+
+    let mut states: Vec<ViewState> = plans
+        .iter()
+        .map(|plan| {
+            ViewState::new(
+                plan.iter().filter(|t| t.access.has_cell()).cloned().collect(),
+                plan.iter()
+                    .filter_map(|t| match t.access {
+                        sys::Access::Added => Some((t.id, TickKind::Added)),
+                        sys::Access::Changed => Some((t.id, TickKind::Changed)),
+                        _ => None,
+                    })
+                    .collect(),
+            )
         })
         .collect();
 
@@ -3967,27 +3997,6 @@ fn build_dispatcher(
             // a direct pointer is possible later — those layouts ARE the
             // plugin's own — but it needs a careful aliasing argument, so
             // correctness first.
-            let mut states: Vec<ViewState> = plans
-                .iter()
-                .map(|plan| {
-                    ViewState::new(
-                        plan.iter()
-                            .filter(|t| t.access.has_cell())
-                            .cloned()
-                            .collect(),
-                        // Tick filters carry a component but produce no cell, so
-                        // they are absent from the list above and need their own.
-                        plan.iter()
-                            .filter_map(|t| match t.access {
-                                sys::Access::Added => Some((t.id, TickKind::Added)),
-                                sys::Access::Changed => Some((t.id, TickKind::Changed)),
-                                _ => None,
-                            })
-                            .collect(),
-                    )
-                })
-                .collect();
-
             for (state, q) in states.iter_mut().zip(queries.iter_mut()) {
                 state.gather(q, system_ticks);
             }
@@ -4012,7 +4021,13 @@ fn build_dispatcher(
             // gather already ran above, so this only avoided one FFI call and
             // the resource-slot setup on an idle system.
 
-            let views: Vec<sys::QueryView> = states.iter_mut().map(ViewState::view).collect();
+            let mut cell_tables: Vec<Vec<*mut u8>> =
+                (0..states.len()).map(|_| Vec::new()).collect();
+            let views: Vec<sys::QueryView> = states
+                .iter_mut()
+                .zip(&mut cell_tables)
+                .map(|(state, cells)| state.view(cells))
+                .collect();
 
             // Resolved once per call rather than per access: a system may read
             // the same resource from several parameters, and each `get_mut_by_id`
@@ -4140,28 +4155,37 @@ fn build_dispatcher(
 
 /// Copy one component out of storage into the plugin-facing representation.
 ///
-/// `None` means the entity does not have it, which only happens for an optional
-/// term — a required one was a precondition of matching the query.
-fn read_cell(e: &FilteredEntityRef, t: &TermPlan) -> Option<Vec<u8>> {
+/// Append directly to the query's column, avoiding a temporary allocation for
+/// every cell. False leaves the destination untouched for an absent optional term.
+fn append_cell(e: &FilteredEntityRef, t: &TermPlan, destination: &mut Vec<u8>) -> bool {
     match t.marshal {
         Marshal::Transform => {
-            let src = *e.get::<Transform>()?;
-            let m = to_mirror(&src);
+            let Some(src) = e.get::<Transform>() else {
+                return false;
+            };
+            let m = to_mirror(src);
             // SAFETY: `sys::Transform` is `#[repr(C)]` and plain-old-data.
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     (&m as *const sys::Transform).cast::<u8>(),
                     size_of::<sys::Transform>(),
                 )
-            }
-            .to_vec();
-            Some(bytes)
+            };
+            destination.extend_from_slice(bytes);
+            true
         }
         // SAFETY: presence was just checked, and the component occupies
         // `cell_size` bytes because that is where the size came from.
-        Marshal::Raw => e
-            .get_by_id(t.id)
-            .map(|ptr| unsafe { std::slice::from_raw_parts(ptr.as_ptr(), t.cell_size).to_vec() }),
+        Marshal::Raw => {
+            let Some(ptr) = e.get_by_id(t.id) else {
+                return false;
+            };
+            // SAFETY: the registered layout supplies cell_size, and this read
+            // remains inside the entity borrow. Only copied bytes escape it.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), t.cell_size) };
+            destination.extend_from_slice(bytes);
+            true
+        }
     }
 }
 

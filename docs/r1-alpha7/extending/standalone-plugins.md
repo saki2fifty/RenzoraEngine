@@ -1586,3 +1586,14 @@ compiles the file through the shared compiler cache and
 loads it through the same C-ABI mechanism this page documents. See
 [plugins.md § Loose single-file plugins](./plugins.md#loose-single-file-plugins)
 for the authoring contract and the supported scopes.
+
+## Query memory reuse
+
+The host reuses each system's component staging, change-detection baseline,
+presence masks and entity buffers between calls. An empty or smaller query clears
+old rows without discarding capacity. Component values still cross through the
+same copied C-ABI representation; plugins must not retain call pointers.
+
+This reduces allocation overhead but does not make dispatch allocation-free:
+pointer tables, resource slots and command buffers still have separate lifetimes.
+Parallel scheduling and bounded reload cleanup are separate improvements.

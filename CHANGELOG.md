@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 21:14 UTC
+
+- Began reducing plugin processing overhead by reusing query memory between frames and avoiding temporary allocations for every component read. Broader performance and reload improvements remain in progress.
+
 ## September 5, 2026 — 20:53 UTC
 
 - Moved ordinary builds to separate editor and game executables, matching the engine-extension builds. Play starts the companion game executable.
