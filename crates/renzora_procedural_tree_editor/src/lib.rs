@@ -1,61 +1,21 @@
-//! Procedural trees — seeded branch and leaf meshes, generated on demand.
-//!
-//! Insert a [`Tree`] on an entity and the generator builds the branch mesh on
-//! that entity plus a child leaf-mesh entity. In the editor, Add Entity →
-//! "Procedural Tree".
-//!
-//! # What changed when this became a native plugin
-//!
-//! It used to be three crates: `bevy_procedural_tree` (the vendored generator),
-//! `renzora_procedural_tree` (the runtime glue) and
-//! `renzora_procedural_tree_editor` (the preset and inspector). All three are
-//! here now, and the reason is the native-plugin dependency rule: a plugin is
-//! compiled by a bare `rustc` against the staged SDK, and the only engine crates
-//! it is handed are `bevy`, `renzora` and `renzora_ember`. A workspace crate
-//! that depends on Bevy — which the generator does — cannot be reached at all,
-//! and cargo is forbidden from resolving one, because a second Bevy compilation
-//! would give this plugin different `TypeId`s from the engine and let it read
-//! the host's `World` through the wrong layouts.
-//!
-//! So the generator was **vendored inward** rather than depended on. It sits
-//! under [`tree`] as a module tree, still carrying its upstream licences and
-//! `README.md` at the plugin root. Its only third-party dependency, `fastrand`,
-//! has no Bevy in its graph and is built by cargo into a private rlib.
-//!
-//! The editor half merged in for a different reason: a native plugin is compiled
-//! with **no cargo features**, so the `#[cfg(feature = "editor")]` that used to
-//! gate this registration would be permanently false and the inspector would
-//! vanish without a word. The registrations are unconditional now — the editor
-//! contract is always present in the SDK's `renzora`, and in a shipped game the
-//! registries simply go unread.
+//! Editor preset and inspector for the shared procedural tree settings.
 
 use bevy::prelude::*;
 
-pub mod tree;
-
-use renzora::{
-    AppEditorExt, EntityPreset, FieldDef, FieldType, FieldValue, HideInHierarchy, InspectorEntry,
-    WindSway,
-};
-use tree::{Leaves, Tree, TreeMeshSettings, TreeProceduralGenerationPlugin, TreeType};
+use renzora::procedural_tree::{Leaves, Tree, TreeMeshSettings, TreeType};
+use renzora::{AppEditorExt, EntityPreset, FieldDef, FieldType, FieldValue, InspectorEntry};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Runtime-scope plugin that installs the procedural tree generator.
+/// Install the procedural tree preset and inspector in the editor only.
 #[derive(Default)]
-pub struct ProceduralTreePlugin;
+pub struct ProceduralTreeEditorPlugin;
 
-impl Plugin for ProceduralTreePlugin {
+impl Plugin for ProceduralTreeEditorPlugin {
     fn build(&self, app: &mut App) {
-        info!("[procedural_tree] native plugin");
-        app.add_plugins(TreeProceduralGenerationPlugin);
-        app.add_systems(
-            Update,
-            (tag_generated_leaves, prune_stale_leaves, sway_generated_trees),
-        );
-
-        // No `cfg(feature = "editor")` — see the module docs. A native plugin
-        // has no cargo features, so the gate would be permanently false.
+        if !renzora::builtin_plugin_enabled(app, "procedural_tree") {
+            return;
+        }
         app.register_entity_preset(EntityPreset {
             id: "procedural_tree",
             display_name: "Procedural Tree",
@@ -75,74 +35,6 @@ impl Plugin for ProceduralTreePlugin {
             },
         });
         app.register_inspector(inspector_entry());
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Runtime glue
-// ---------------------------------------------------------------------------
-
-/// Tag each tree's generated leaf-mesh child with [`HideInHierarchy`] so it stays
-/// out of the outliner and out of scene saves (it's regenerated from the parent
-/// `Tree` on load). The branch mesh lives on the parent entity, which stays
-/// selectable.
-fn tag_generated_leaves(
-    mut commands: Commands,
-    trees: Query<&Leaves>,
-    needs_tag: Query<(), (With<Mesh3d>, Without<HideInHierarchy>)>,
-) {
-    for leaves in trees.iter() {
-        if needs_tag.get(leaves.0).is_ok() {
-            commands.entity(leaves.0).insert(HideInHierarchy);
-        }
-    }
-}
-
-/// Give every generated tree its wind response.
-///
-/// Two different tunings, because they are two different materials on two
-/// different meshes: the trunk bends slowly and does not flutter at all, while
-/// the leaf canopy is floppier and flutters fully. Sharing one `WindSway`
-/// between them would either give the trunk a rustle or take the rustle off the
-/// leaves.
-///
-/// Only ever *inserts*, so a value an author changed in the inspector — or one
-/// restored from a scene — is never overwritten on the next frame.
-fn sway_generated_trees(
-    mut commands: Commands,
-    trees: Query<(Entity, &Leaves), With<Tree>>,
-    needs_sway: Query<(), Without<WindSway>>,
-) {
-    for (trunk, leaves) in trees.iter() {
-        if needs_sway.get(trunk).is_ok() {
-            commands.entity(trunk).insert(WindSway {
-                // Wood is stiff, and the trunk mesh's `UV_1` weights already
-                // ramp from 0 at the base — this scales what is left.
-                response: 0.55,
-                flutter: 0.0,
-                amplitude: 0.25,
-                ..default()
-            });
-        }
-        if needs_sway.get(leaves.0).is_ok() {
-            commands.entity(leaves.0).insert(WindSway {
-                response: 1.0,
-                flutter: 1.0,
-                amplitude: 0.4,
-                ..default()
-            });
-        }
-    }
-}
-
-/// Despawn stray leaf entities with no mesh — the empty husks a pre-tag scene
-/// save could leave behind. A freshly generated leaf child always carries a
-/// `Mesh3d`, so this only ever removes orphans.
-fn prune_stale_leaves(mut commands: Commands, stale: Query<(Entity, &Name), Without<Mesh3d>>) {
-    for (entity, name) in stale.iter() {
-        if name.as_str() == "ProcGenTreeLeaves" {
-            commands.entity(entity).despawn();
-        }
     }
 }
 
@@ -301,7 +193,55 @@ fn inspector_entry() -> InspectorEntry {
     }
 }
 
-// `Runtime`, explicitly. `plugin!` defaults to `Editor` where `add!` defaulted
-// to `Runtime`, and a tree is scene content a shipped game renders — the editor
-// preset and inspector above ride along harmlessly.
-renzora::plugin!(ProceduralTreePlugin, Runtime);
+renzora::add!(ProceduralTreeEditorPlugin, Editor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_and_inspector_use_the_shared_tree_and_distinct_seeds() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        app.add_plugins(ProceduralTreeEditorPlugin);
+        let spawn = app
+            .world()
+            .resource::<renzora::SpawnRegistry>()
+            .iter()
+            .find(|preset| preset.id == "procedural_tree")
+            .unwrap()
+            .spawn_fn;
+        let first = spawn(app.world_mut());
+        let second = spawn(app.world_mut());
+        assert_ne!(
+            app.world().get::<Tree>(first).unwrap().seed,
+            app.world().get::<Tree>(second).unwrap().seed
+        );
+        let entry = inspector_entry();
+        assert_eq!(entry.fields.len(), 6);
+        assert!((entry.has_fn)(app.world(), first));
+        let radius = entry
+            .fields
+            .iter()
+            .find(|field| field.name == "Trunk Radius")
+            .unwrap();
+        (radius.set_fn)(app.world_mut(), first, FieldValue::Float(0.7));
+        assert_eq!(
+            settings(app.world(), first)
+                .unwrap()
+                .branch
+                .trunk_base_radius,
+            0.7
+        );
+        entry.remove_fn.unwrap()(app.world_mut(), first);
+        assert!(app.world().get::<Tree>(first).is_none());
+    }
+
+    #[test]
+    fn disabled_feature_registers_no_preset() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["procedural_tree".into()]));
+        app.add_plugins(ProceduralTreeEditorPlugin);
+        assert!(!app.world().contains_resource::<renzora::SpawnRegistry>());
+    }
+}

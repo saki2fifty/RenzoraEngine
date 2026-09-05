@@ -1,23 +1,18 @@
-pub mod enums;
-pub mod settings;
+pub use renzora::procedural_tree::{enums, settings, Leaves, Tree};
 pub mod errors;
 
 pub mod meshgen;
 
-use bevy::{ecs::{lifecycle::HookContext, world::DeferredWorld}, prelude::*};
+use bevy::{
+    ecs::{lifecycle::HookContext, world::DeferredWorld},
+    prelude::*,
+};
 use fastrand::Rng;
-// The engine's serde, not a private one. A native plugin that resolved its own
-// copy from crates.io would get a `Serialize` that is a DIFFERENT trait from the
-// one `Vec3` and friends implement in the shared images, and the derives below
-// would fail to satisfy their bounds. Hence the `#[serde(crate = ...)]` on every
-// derive in this module tree — the derive macro emits paths to `renzora::serde`.
-use renzora::serde::{Deserialize, Serialize};
 
 use self::meshgen::generate_tree_meshes;
 
 pub use enums::{LeafBillboard, TreeType};
 pub use settings::TreeMeshSettings;
-
 
 pub struct TreeProceduralGenerationPlugin;
 
@@ -28,54 +23,23 @@ impl Plugin for TreeProceduralGenerationPlugin {
         app.init_resource::<TreeDefaultMaterials>();
         app.register_type::<TreeDefaultMaterials>();
         app.register_type::<Tree>();
+        app.world_mut()
+            .register_component_hooks::<Tree>()
+            .on_add(new_tree_component_added);
         // Fork note: `Leaves` is intentionally NOT registered for reflection.
         // It holds an `Entity` link to the generated leaf child that does not
         // remap across scene loads; keeping it out of the registry means
         // renzora's scene serializer never persists it. The leaf child is
         // regenerated from `Tree` by the `on_add` hook on load.
 
-        app.add_systems(PostUpdate, update_all_tree_meshes_with_global_settings.run_if(resource_changed::<TreeMeshSettings>));
+        app.add_systems(
+            PostUpdate,
+            update_all_tree_meshes_with_global_settings
+                .run_if(resource_changed::<TreeMeshSettings>),
+        );
         app.add_systems(PostUpdate, update_all_tree_meshes_with_local_settings);
     }
 }
-
-
-
-#[derive(Component, Reflect, Clone, Debug, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
-#[reflect(Component, Default, Serialize, Deserialize)]
-#[component(on_add = new_tree_component_added)]
-pub struct Tree {
-    /// the seed for the rng (same seed and TreeMeshSettings = same tree mesh)
-    /// the seed is always local to each tree instance (regardless if the tree is using global TreeMeshSettings)
-    pub seed: u64,
-    /// the settings to use for this tree; if set to none the settings from the global TreeMeshSettings resource are used
-    pub tree_mesh_settings_override: Option<TreeMeshSettings>,
-    /// defaults to Color::WHITE
-    ///
-    /// Fork note: skipped during (de)serialization — asset handles don't remap
-    /// across scene loads, so the material falls back to the default on reload.
-    #[serde(skip)]
-    #[reflect(ignore)]
-    pub bark_material_override: Option<MeshMaterial3d<StandardMaterial>>,
-    /// defaults to green -> Color::LinearRgba(LinearRgba { red: 0.0, green: 1.0, blue: 0.0, alpha: 1.0 }
-    /// recommendation: AlphaMode::Mask(0.x) is recommend to be set for the leaves (depending on the texture used)
-    #[serde(skip)]
-    #[reflect(ignore)]
-    pub leaf_material_override: Option<MeshMaterial3d<StandardMaterial>>,
-}
-
-impl Default for Tree {
-    fn default() -> Self {
-        Self {
-            seed: 0,
-            tree_mesh_settings_override: Some(TreeMeshSettings::default()),
-            bark_material_override: None,
-            leaf_material_override: None,
-        }
-    }
-}
-
 
 #[derive(Resource, Reflect)]
 struct TreeDefaultMaterials {
@@ -121,7 +85,9 @@ impl FromWorld for TreeDefaultMaterials {
             )
         };
 
-        let mut materials = world.get_resource_mut::<Assets<StandardMaterial>>().unwrap();
+        let mut materials = world
+            .get_resource_mut::<Assets<StandardMaterial>>()
+            .unwrap();
         Self {
             // Default bark: a neutral brown so an untextured tree still reads as
             // wood (override via `Tree::bark_material_override` for a real bark
@@ -149,24 +115,16 @@ impl FromWorld for TreeDefaultMaterials {
     }
 }
 
-/// Marks the parent tree entity, linking it to its generated leaf-mesh child.
-///
-/// Fork note: made `pub` (was private) so the renzora wrapper can find the
-/// generated child and tag it (`HideInHierarchy`) without name-matching.
-#[derive(Component, Reflect)]
-pub struct Leaves(pub Entity);
-
 fn new_tree_component_added(mut world: DeferredWorld, context: HookContext) {
     let tree_entity = context.entity;
 
     // Generate meshes
     // TODO: remove unwrap
     let tree: Tree = (*world.entity(tree_entity).components::<&Tree>()).clone();
-    let tree_mesh_settings = tree.tree_mesh_settings_override.or_else(
-      || {
-            world.get_resource::<TreeMeshSettings>().cloned()
-      }
-    ).unwrap();
+    let tree_mesh_settings = tree
+        .tree_mesh_settings_override
+        .or_else(|| world.get_resource::<TreeMeshSettings>().cloned())
+        .unwrap();
 
     let mut rng: Rng = Rng::with_seed(tree.seed);
 
@@ -181,33 +139,34 @@ fn new_tree_component_added(mut world: DeferredWorld, context: HookContext) {
 
             let default_materials = world.get_resource::<TreeDefaultMaterials>().unwrap();
             // bark material
-            let branch_material = tree.bark_material_override.clone().unwrap_or_else(|| default_materials.bark_material.clone());
+            let branch_material = tree
+                .bark_material_override
+                .clone()
+                .unwrap_or_else(|| default_materials.bark_material.clone());
             // leaf material
-            let leaf_material = tree.leaf_material_override.clone().unwrap_or_else(|| default_materials.leaf_material.clone());
+            let leaf_material = tree
+                .leaf_material_override
+                .clone()
+                .unwrap_or_else(|| default_materials.leaf_material.clone());
 
             // Spawn/Insert
             let mut commands = world.commands();
-            let leaves_id = commands.spawn((
-                Name::new("ProcGenTreeLeaves"),
-                leaves_mesh,
-                leaf_material,
-            )).id();
+            let leaves_id = commands
+                .spawn((Name::new("ProcGenTreeLeaves"), leaves_mesh, leaf_material))
+                .id();
 
             let mut tree_commands = commands.entity(tree_entity);
 
             // Fork note: upstream also overwrote the parent's `Name` with
             // "ProcGenTreeBranches". We don't — the parent keeps the name the
             // user/preset gave it, which is what shows in the hierarchy.
-            tree_commands.insert((
-                Leaves(leaves_id),
-                branches_mesh,
-                branch_material
-            )).add_child(leaves_id);
-        },
+            tree_commands
+                .insert((Leaves(leaves_id), branches_mesh, branch_material))
+                .add_child(leaves_id);
+        }
         Err(err) => error!("Error during tree mesh generation: {}", err),
     }
 }
-
 
 fn update_all_tree_meshes_with_local_settings(
     trees: Query<(Entity, &Tree, &MeshMaterial3d<StandardMaterial>, &Leaves), Changed<Tree>>,
@@ -216,8 +175,7 @@ fn update_all_tree_meshes_with_local_settings(
     global_tree_settings: Res<TreeMeshSettings>,
     default_materials: Res<TreeDefaultMaterials>,
     mut commands: Commands,
-)
-{
+) {
     // For now we are regenerating the whole tree mesh each time
     // TODO: Try to modify in place (or at least only branch/leaf levels or textures that need modification)
     for (tree_entity, tree, current_bark_material, leaves_entity) in trees.iter() {
@@ -237,34 +195,44 @@ fn update_all_tree_meshes_with_local_settings(
                 commands.entity(leaves_entity.0).insert(leaves_mesh);
 
                 // check if the textures changed
-                match tree.bark_material_override { // what is the target state of the bark material
+                match tree.bark_material_override {
+                    // what is the target state of the bark material
                     Some(ref bark_material_from_local_settings) => {
                         if !current_bark_material.eq(bark_material_from_local_settings) {
-                            commands.entity(tree_entity).insert(bark_material_from_local_settings.clone());
+                            commands
+                                .entity(tree_entity)
+                                .insert(bark_material_from_local_settings.clone());
                         }
-                    },
+                    }
                     None => {
                         if !current_bark_material.eq(&default_materials.bark_material) {
-                            commands.entity(tree_entity).insert(default_materials.bark_material.clone());
+                            commands
+                                .entity(tree_entity)
+                                .insert(default_materials.bark_material.clone());
                         }
-                    },
+                    }
                 }
 
                 if let Ok(current_leaf_material) = mesh_materials.get(leaves_entity.0) {
-                    match tree.leaf_material_override { // what is the target state of the leaf material
+                    match tree.leaf_material_override {
+                        // what is the target state of the leaf material
                         Some(ref leaf_material_from_local_settings) => {
                             if !current_leaf_material.eq(leaf_material_from_local_settings) {
-                                commands.entity(leaves_entity.0).insert(leaf_material_from_local_settings.clone());
+                                commands
+                                    .entity(leaves_entity.0)
+                                    .insert(leaf_material_from_local_settings.clone());
                             }
-                        },
+                        }
                         None => {
                             if !current_leaf_material.eq(&default_materials.leaf_material) {
-                                commands.entity(leaves_entity.0).insert(default_materials.leaf_material.clone());
+                                commands
+                                    .entity(leaves_entity.0)
+                                    .insert(default_materials.leaf_material.clone());
                             }
-                        },
+                        }
                     }
                 }
-            },
+            }
             Err(err) => error!("Error during tree mesh generation: {}", err),
         }
     }
@@ -290,10 +258,9 @@ fn update_all_tree_meshes_with_global_settings(
 
                     commands.entity(tree_entity).insert(branches_mesh);
                     commands.entity(leaves_entity.0).insert(leaves_mesh);
-                },
+                }
                 Err(err) => error!("Error during tree mesh generation: {}", err),
             }
         }
     }
-
 }

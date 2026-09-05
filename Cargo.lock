@@ -7676,6 +7676,7 @@ dependencies = [
  "renzora_particle_editor",
  "renzora_physics",
  "renzora_physics_editor",
+ "renzora_procedural_tree_editor",
  "renzora_scene",
  "renzora_scripting",
  "renzora_scripting_editor",
@@ -8543,6 +8544,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "renzora_procedural_tree"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "fastrand",
+ "renzora",
+]
+
+[[package]]
+name = "renzora_procedural_tree_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+]
+
+[[package]]
 name = "renzora_ragdoll"
 version = "0.1.0"
 dependencies = [
@@ -8632,6 +8650,7 @@ dependencies = [
  "renzora_parkour",
  "renzora_physics",
  "renzora_postprocess",
+ "renzora_procedural_tree",
  "renzora_ragdoll",
  "renzora_rust_script",
  "renzora_scripting",

@@ -1,0 +1,12 @@
+[package]
+name = "renzora_procedural_tree_editor"
+version = "0.1.0"
+edition = "2021"
+description = "Procedural tree preset and inspector"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+
+[lints]
+workspace = true

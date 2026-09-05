@@ -3,7 +3,7 @@
 */
 
 use bevy::prelude::*;
-use renzora::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::enums::{LeafBillboard, TreeType};
 
@@ -17,14 +17,13 @@ use super::enums::{LeafBillboard, TreeType};
 // We keep `Resource` (it gives us `Component` for free, so this stays usable as
 // both a resource and a per-entity component) and still reflect both.
 #[derive(Resource, Reflect, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
+#[type_path = "procedural_tree::tree::settings"]
 #[reflect(Resource, Component, Default, Serialize, Deserialize)]
 pub struct TreeMeshSettings {
     pub tree_type: TreeType,
     pub branch: BranchParams,
     pub leaves: LeafParams,
 }
-
 
 impl Default for TreeMeshSettings {
     fn default() -> Self {
@@ -36,14 +35,13 @@ impl Default for TreeMeshSettings {
     }
 }
 
-
 /**
  * All branches have a random angle to their parent branch/trunk.
  * This branch force controls a direction vector and an amount to lerp between the random direction and this vector by the given strength.
  * This can be used i.e. for trees that generally have branches that point in a specific direction (i.e. up:Aspen or down:Willow).
  */
 #[derive(Reflect, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
+#[type_path = "procedural_tree::tree::settings"]
 pub struct BranchForce {
     /// in which direction should all branches be pointed based on their radius (larger radius = smaller influence of this force)
     /// value will be normalized internally; no need to do it beforehand
@@ -54,13 +52,17 @@ pub struct BranchForce {
     /// starting at which branch radius should the force not have any effect
     /// default is 0.1 (a branch of a thickness of 20cm should not be bothered by outside forces)
     /// must be positive
-    pub radius_cutoff: f32
+    pub radius_cutoff: f32,
 }
 
 impl Default for BranchForce {
     fn default() -> Self {
         Self {
-            direction: Vec3 { x: 0.0, y: 1.0, z: 0.0 },
+            direction: Vec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
             strength: 0.05,
             radius_cutoff: 0.1,
         }
@@ -71,13 +73,13 @@ impl Default for BranchForce {
  * amount of recursion for branches (0 = only trunk, no branches)
  */
 #[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
+#[type_path = "procedural_tree::tree::settings"]
 #[repr(u8)]
 pub enum BranchRecursionLevel {
     Zero = 0,
-    One  = 1,
-    Two  = 2,
-    Three= 3,
+    One = 1,
+    Two = 2,
+    Three = 3,
     //Four = 4, // four recursion levels create way to small branches (polygons in the subpixel range)
 }
 
@@ -96,20 +98,25 @@ impl TryFrom<u8> for BranchRecursionLevel {
 }
 
 impl From<BranchRecursionLevel> for u8 {
-    fn from(z: BranchRecursionLevel) -> u8 { z as u8 }
+    fn from(z: BranchRecursionLevel) -> u8 {
+        z as u8
+    }
 }
 
 impl From<BranchRecursionLevel> for usize {
-    fn from(z: BranchRecursionLevel) -> usize { z as usize }
+    fn from(z: BranchRecursionLevel) -> usize {
+        z as usize
+    }
 }
 
 impl From<BranchRecursionLevel> for f32 {
-    fn from(z: BranchRecursionLevel) -> f32 { z as usize as f32 }
+    fn from(z: BranchRecursionLevel) -> f32 {
+        z as usize as f32
+    }
 }
 
-
 #[derive(Reflect, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
+#[type_path = "procedural_tree::tree::settings"]
 pub struct BranchParams {
     /// amount of recursion for branches (0 = only trunk, no branches)
     pub levels: BranchRecursionLevel,
@@ -183,7 +190,7 @@ impl Default for BranchParams {
  * Control how they look like and how they are positioned relative to the last level of branches (or on the trunk if levels = 0).
  */
 #[derive(Reflect, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(crate = "renzora::serde")]
+#[type_path = "procedural_tree::tree::settings"]
 pub struct LeafParams {
     /// single or double/perpendicular
     pub leaf_billboard: LeafBillboard,
@@ -198,7 +205,7 @@ pub struct LeafParams {
     /// variance of leaf sizes (negative values are ignored)
     ///
     /// internal formula for a single leaf is: (rng(-1.0..1.0) * size_variance + 1.0) * size
-    pub size_variance: f32
+    pub size_variance: f32,
 }
 
 impl Default for LeafParams {

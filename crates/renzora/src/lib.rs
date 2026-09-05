@@ -176,6 +176,7 @@ pub mod content_problems;
 pub mod wgsl;
 pub mod vignette;
 pub use vignette::VignetteSettings;
+pub mod procedural_tree;
 
 // ── Editor contract (Operation Merge fold) ───────────────────────────────
 // The thin editor types shared across the binary↔bundle boundary live here in

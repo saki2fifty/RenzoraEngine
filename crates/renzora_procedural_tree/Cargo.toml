@@ -1,0 +1,16 @@
+[package]
+name = "renzora_procedural_tree"
+version = "0.1.0"
+edition = "2021"
+description = "Seeded procedural tree meshes and runtime wind integration"
+
+[features]
+u32_indices = []
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false }
+fastrand = "2.3"
+
+[lints]
+workspace = true

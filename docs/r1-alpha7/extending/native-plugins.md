@@ -136,6 +136,8 @@ Auto exposure follows the same split: `renzora_auto_exposure` handles runtime me
 
 The starfield uses `renzora_night_stars` plus editor-only `renzora_night_stars_editor`. Existing `NightStarsData`, the `night_stars` preference and seven inspector fields are unchanged. The renderer embeds its shader under the new workspace crate namespace and retains the existing material type name.
 
+Procedural trees use `renzora_procedural_tree` for mesh generation and wind integration, and `renzora_procedural_tree_editor` for the preset and inspector. Shared tree/settings types live in `renzora::procedural_tree` and keep their original scene names. Embedded leaf textures and generator attribution remain with the runtime crate; the `procedural_tree` preference is unchanged.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

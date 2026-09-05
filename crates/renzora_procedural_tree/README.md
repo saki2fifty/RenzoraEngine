@@ -7,13 +7,11 @@ Procedurally generated 3D trees for Bevy. The generator under `src/tree/` is
 - Itself a Rust port of **ez-tree** by dgreenheck: <https://github.com/dgreenheck/ez-tree>
 - License: MIT OR Apache-2.0 (see `LICENSE_MIT` / `LICENSE_APACHE`)
 
-It used to be its own workspace crate, consumed by a `renzora_procedural_tree`
-plugin and a `renzora_procedural_tree_editor` companion. All three collapsed into
-this one native plugin: a native plugin is handed only `bevy`, `renzora` and
-`renzora_ember`, so a Bevy-dependent workspace crate is unreachable from it and
-cargo is forbidden from resolving one (a second Bevy would mean different
-`TypeId`s from the engine). Vendoring inward was the way to keep it. See
-`src/lib.rs` for the full reasoning.
+The generator and runtime glue are linked into the engine workspace. The
+`renzora_procedural_tree_editor` companion owns presets and inspector controls.
+Shared tree/settings types live in `renzora::procedural_tree`, retaining their
+original reflected scene names. The runtime plugin installs the generation hook;
+the contract crate has no dependency on this generator or its random-number library.
 
 ## Fork changes vs upstream 0.3.0
 
@@ -38,7 +36,7 @@ cargo is forbidden from resolving one (a second Bevy would mean different
   Upstream's *default* (no override) was flat green / white, which renders each
   leaf billboard as a solid rectangle (the perpendicular "Double" pair reads as
   an "X"). The textures are embedded via `include_bytes!` so the look works out
-  of the box for a dlopen plugin with no loose asset files. Requires Bevy's
+  of the box without loose asset files. Requires Bevy's
   `png` feature (enabled in this workspace).
 - `edition` set to 2021 to match the workspace.
 
