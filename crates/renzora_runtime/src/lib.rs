@@ -79,9 +79,6 @@ pub use renzora_native_plugin;
 // Always compiled now. Whether it's added is decided at RUNTIME by the
 // `is_editor` arg to `add_engine_plugins` (the editor renders to its own
 // offscreen image, so viewport stretch only applies to a shipped game).
-/// Loading the editor image beside the executable — see the module docs for why
-/// one binary can be both the editor and the game.
-pub mod editor_image;
 /// Editor / runtime extension-host assembly: the single source of
 /// truth for the shared `Arc<BuildService>` between loose plugins and
 /// Rust scripts. U4-3 owns this; the two feature crates depend on

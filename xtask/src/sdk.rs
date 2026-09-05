@@ -158,10 +158,6 @@ impl From {
     }
 }
 
-pub fn build(repo: &Path, plat: &Platform, dist_root: &Path) -> Result<PathBuf, ExitCode> {
-    build_from(repo, plat, dist_root, &From::default())
-}
-
 /// Stage the SDK for a build that may not be this host's.
 pub fn build_from(
     repo: &Path,

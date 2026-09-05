@@ -3,7 +3,7 @@
 // windowless so shipped games don't pop a console. Editor and server sessions
 // grab a console at startup via `attach_console()`; a shipped game stays
 // console-free unless `project.toml` opts in (`console_logging`). The editor
-// experience is layered on at runtime by the editor bundle dll beside the exe.
+// runs in the separate `renzora-editor` executable.
 #![cfg_attr(
     all(
         target_os = "windows",
@@ -12,11 +12,6 @@
     ),
     windows_subsystem = "windows"
 )]
-
-// The first-run setup window — unpacking the SDK and building native plugins
-// before the editor exists. Editor sessions only; see the call site.
-#[cfg(not(target_arch = "wasm32"))]
-mod setup_ui;
 
 use bevy::prelude::*;
 
@@ -135,16 +130,9 @@ pub fn start() {
 
 // ── Native entry point ───────────────────────────────────────────────────
 
-// One binary, three runtime-decided modes:
-//   editor    : the editor bundle dll is present beside the exe (default dev
-//               build). The runtime app boots; `load_global_plugins` dlopens
-//               the bundle, which layers the splash + editor plugins on top.
-//   game      : no bundle (or `--no-editor`). The same binary runs as the
-//               exported game — windowed client, OS title bar.
-//   server    : `--server` (headless, no GPU) or `--host` (windowed listen
-//               server). Never an editor session.
-// The single binary IS the exported game; removing the editor bundle is the
-// only difference between shipping the editor and shipping the game.
+// Game, dedicated server, listen server and VR are runtime modes. Only the
+// separate editor executable can install editor plugins; neighboring files
+// must not change this executable's role.
 #[cfg(not(all(target_arch = "wasm32", feature = "runtime")))]
 fn main() {
     // `--host` wins if both are passed. A server/host launch is never an
@@ -157,54 +145,16 @@ fn main() {
     // launches this exact flag on a child process. Ignored for server/host.
     let vr_mode =
         !host_mode && !server_mode && std::env::args().any(|a| a == "--vr");
-    // Is this the editor? Decided by whether `renzora_editor.<dll|so|dylib>`
-    // sits beside the executable — one binary, and the presence of one file is
-    // the whole difference between shipping the editor and shipping the game.
-    //
-    // Answered HERE, before anything is assembled, because `is_editor` is
-    // threaded through `add_default_rendering` and `add_engine_plugins` and
-    // changes what they add. It is a single `is_file`; the image itself is not
-    // loaded until after the engine foundation exists.
-    //
-    // A server or host launch is never an editor session, even with the image
-    // present — the editor spawns those as child processes for Play.
-    let is_editor = !server_mode
-        && !host_mode
-        && !vr_mode
-        && !std::env::args().any(|a| a == "--no-editor")
-        && renzora_runtime::editor_image::present();
+    // Kept explicit at shared assembly calls: this process is never an editor.
+    let is_editor = false;
     let _ = (server_mode, host_mode, vr_mode);
 
     // Install the panic hook now that we know the session kind — it picks the
     // crash-file location + dialog from `is_editor` (it can't read the World).
     renzora_runtime::renzora_engine::crash::install_panic_hook(is_editor);
 
-    // ── First-run setup, before Bevy ─────────────────────────────────────────
-    // A downloaded release arrives with the SDK still compressed and every
-    // native plugin still source-only, so the first launch after an install or
-    // an update has real work to do. It has to happen HERE, before `App`
-    // assembly: that is when `NativePluginLoader` loads plugins, so unpacking
-    // any later would be too late for the very thing that needed it.
-    //
-    // Not gated on `is_editor`, deliberately. A game exported WITH MODDING ships
-    // the SDK and accepts source plugins, so it has the same work to do and the
-    // same reason to say so — a first launch that silently compiles for a minute
-    // looks like a hang. A game exported without modding has no SDK at all, so
-    // `needed()` answers false after a couple of directory stats and no window
-    // ever appears. The condition is "is there work", not "who am I".
-    #[cfg(not(target_arch = "wasm32"))]
-    if renzora_runtime::renzora_native_plugin::prebuild::needed() {
-        setup_ui::run();
-        renzora_runtime::renzora_native_plugin::prebuild::restart();
-    }
-
-    // Windows release is `windows_subsystem = "windows"` (no console). Editor
-    // sessions grab one so their log output is visible; a shipped game stays
-    // console-free unless `project.toml` opts in. (The dedicated server grabs
-    // its own below.)
-    if is_editor {
-        renzora_runtime::attach_console();
-    }
+    // Legacy Rust-ABI SDK prebuild cannot run in a statically linked runtime.
+    // Source-modding compilation uses the versioned compiler service below.
 
     let mut app = init_app();
 
@@ -256,11 +206,7 @@ fn main() {
     // for editor/source-modding sessions and `Unavailable` for
     // runtime / server / VR / etc. The same U4-2 flag works for
     // `renzora_editor_app/src/main.rs` and the acceptance harness.
-    let session_kind = if is_editor {
-        renzora_runtime::host_assembly::SessionKind::Editor
-    } else {
-        renzora_runtime::host_assembly::SessionKind::Runtime
-    };
+    let session_kind = renzora_runtime::host_assembly::SessionKind::Runtime;
     let compiler_config = renzora_runtime::host_assembly::installed_compiler_config(
         std::env::current_exe().ok().as_deref()
             .and_then(std::path::Path::parent)
@@ -271,17 +217,14 @@ fn main() {
         renzora_runtime::host_assembly::build_compiler_service(
             &renzora_runtime::host_assembly::SharedServiceFactory,
             compiler_config.clone(),
-            if is_editor { "renzora" } else { "renzora-runtime" },
+            "renzora-runtime",
         )
     } else {
         // U4-2: ordinary runtime sessions do not even attempt to
         // construct a `BuildService`. No cache root, no worker
         // pool, no SDK stamp hash, no filesystem side effects.
         renzora_runtime::host_assembly::CompilerService::Unavailable {
-            diagnostic: format!(
-                "[{}] runtime sessions do not compile source",
-                if is_editor { "renzora" } else { "renzora-runtime" }
-            ),
+            diagnostic: "[renzora-runtime] runtime sessions do not compile source".to_string(),
         }
     };
 
@@ -296,28 +239,19 @@ fn main() {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("plugins")))
         .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
-    let (disabled_loose, trusted_loose) = if is_editor {
-        (
-            renzora_runtime::renzora::load_disabled_plugins(),
-            renzora_runtime::renzora::load_trusted_loose_plugins(),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
     let extension_config = renzora_runtime::host_assembly::ExtensionHostConfig {
         session: session_kind,
-        session_tag: if is_editor { "renzora" } else { "renzora-runtime" }.to_string(),
+        session_tag: "renzora-runtime".to_string(),
         compiler_config,
         plugins_dir,
-        disabled_plugin_ids: disabled_loose.clone(),
-        trusted_plugin_ids: trusted_loose,
+        disabled_plugin_ids: Vec::new(),
+        trusted_plugin_ids: Vec::new(),
     };
-    let installed_extension_host = renzora_runtime::host_assembly::assemble_extension_host(
+    renzora_runtime::host_assembly::assemble_extension_host(
         &mut app,
         &extension_config,
         &compiler_service,
     );
-    let shared_arc = installed_extension_host.shared_arc.clone();
     if let Some(diag) = compiler_service.diagnostic() {
         eprintln!("{diag}");
         renzora_runtime::renzora::core::console_log::console_error("Compiler", diag.to_string());
@@ -338,47 +272,8 @@ fn main() {
         ));
     }
 
-    // The editor image, if this is an editor session. AFTER the engine
-    // foundation, so the editor layers on top of the runtime plugins rather than
-    // racing them — the ordering the static call site used to guarantee.
-    if is_editor {
-        renzora_runtime::editor_image::install(&mut app);
-    }
-
     // C-ABI plugins from `<exe-dir>/plugins/`, after both.
     load_global_plugins(&mut app, is_editor);
-
-    // T4-1 / T4-2: hand the same `Arc` to the loose host when this
-    // is an editor session. The assembly function injects the
-    // Arc into the host's `shared_build_service` field; the host's
-    // `build` then installs THE SAME Arc into `LooseBuildService`.
-    // When the compiler is unavailable the loose host installs
-    // without a build service; precompiled plugins remain available
-    // and the editor's other functionality continues.
-    if is_editor {
-        app.add_plugins(installed_extension_host.loose_host);
-        // U4-4: install the production OS-watcher adapter so
-        // the lifecycle's event seam receives real filesystem
-        // events. Tests skip this plugin and push events through
-        // the `ScriptSourceEventQueue` directly.
-        app.add_plugins(renzora_rust_script::source_watcher::RustScriptSourceWatcherPlugin::default());
-    }
-
-    // U4-3: when both services came up, the loose-host
-    // `LooseBuildService` wraps the same Arc as
-    // `RustScriptBuildService`. The check is `debug_assert!`-gated
-    // because it runs every editor startup; the matching test
-    // in `phase4_acceptance.rs::p4_t4_1_single_install_path` is
-    // the release-grade proof.
-    if let (Some(arc), Some(loose_resource)) = (
-        shared_arc.as_ref(),
-        app.world().get_resource::<renzora_loose_plugins::LooseBuildService>(),
-    ) {
-        debug_assert!(
-            std::ptr::eq(arc.as_ref() as *const _, loose_resource.0.as_ref() as *const _),
-            "U4-3: loose-host BuildService and RustScriptBuildService must wrap the same Arc"
-        );
-    }
 
     app.run();
 }

@@ -87,9 +87,11 @@ impl ExternalRuntime {
 /// 3. `<exe_dir>/../runtime/renzora[.exe]` — the same, one level up.
 pub fn find_runtime_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
+    find_runtime_binary_beside(&exe, if cfg!(target_os = "windows") { ".exe" } else { "" })
+}
 
-    let suffix = if cfg!(target_os = "windows") { ".exe" } else { "" };
+fn find_runtime_binary_beside(exe: &Path, suffix: &str) -> Option<PathBuf> {
+    let exe_dir = exe.parent()?;
     let names = [format!("renzora{suffix}"), format!("renzora-runtime{suffix}")];
 
     for name in &names {
@@ -102,7 +104,7 @@ pub fn find_runtime_binary() -> Option<PathBuf> {
             // Never hand back the binary we are already running. On a dev build
             // the editor can sit in the same directory under a name that matches,
             // and spawning ourselves is the bug this function had.
-            if candidate == exe || !candidate.exists() {
+            if candidate == exe || !candidate.is_file() {
                 continue;
             }
             return Some(candidate);
@@ -413,6 +415,41 @@ pub fn apply_runtime_pause_render(
 mod tests {
     use super::*;
     use renzora::core::console_log::LogLevel;
+
+    #[test]
+    fn play_finds_sibling_runtime_on_both_filename_conventions() {
+        let root = tempfile::tempdir().expect("fixture");
+        for suffix in ["", ".exe"] {
+            let editor = root.path().join(format!("renzora-editor{suffix}"));
+            let runtime = root.path().join(format!("renzora{suffix}"));
+            std::fs::write(&editor, []).expect("editor fixture");
+            assert_eq!(find_runtime_binary_beside(&editor, suffix), None);
+            std::fs::create_dir(&runtime).expect("directory is not a binary");
+            assert_eq!(find_runtime_binary_beside(&editor, suffix), None);
+            std::fs::remove_dir(&runtime).expect("empty fixture directory");
+            std::fs::write(&runtime, []).expect("runtime fixture");
+            assert_eq!(find_runtime_binary_beside(&editor, suffix), Some(runtime.clone()));
+            assert_eq!(find_runtime_binary_beside(&runtime, suffix), None);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires RENZORA_PHASE7_RUNTIME and a graphical display"]
+    fn external_play_spawns_the_real_runtime() {
+        let binary = PathBuf::from(std::env::var_os("RENZORA_PHASE7_RUNTIME")
+            .expect("explicit native runtime fixture"));
+        let root = tempfile::tempdir().expect("project fixture");
+        renzora::CurrentProject {
+            path: root.path().to_path_buf(),
+            config: renzora::ProjectConfig::default(),
+        }.save_config().expect("project configuration");
+        let mut child = spawn_runtime(&binary, root.path(), false).expect("Play child launch");
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        let running = matches!(child.try_wait(), Ok(None));
+        let _ = child.kill();
+        child.wait().expect("reap Play child");
+        assert!(running, "runtime exited before the startup observation completed");
+    }
 
     #[test]
     fn colour_escapes_are_stripped() {

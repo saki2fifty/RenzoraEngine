@@ -6,7 +6,7 @@ Renzora is built around Bevy's ECS: components hold entity data, resources hold 
 
 `renzora_runtime` provides the shared runtime assembly. `renzora_editor` installs the editor on top of it. The native engine-plugin build creates two executables: `renzora-editor` and `renzora`. External play mode launches the sibling runtime; both files and their companion files must be staged together.
 
-The repository still retains its older shared-image launch configuration during migration. The root's dynamic-linking defaults and the editor's `shared-image` feature are disabled only in isolated replacement build workspaces. The native replacement path does not load Bevy plugins from DLLs. This does not mean the old SDK and loaders have already been removed from all build paths.
+Ordinary native builds also use this separate executable pair. The editor library is `rlib`-only, and default builds do not enable Bevy dynamic linking. Placing an old editor library beside `renzora` cannot turn a game into the editor. Legacy SDK utilities remain pending cleanup; they are not the supported extension interface.
 
 ## Plugin registration and shared contracts
 
@@ -57,7 +57,7 @@ The runtime and project data are then packaged by the normal export pipeline. Ru
 
 ## Validation boundaries
 
-The Phase 5 acceptance work exercises actual Linux editor/runtime builds, rendered script execution, controlled startup and native export behavior. Windows MSVC cross-checks cover compilation, not a Windows GUI run. Windows EXE production remains deferred. macOS runtime execution has not been performed on this Linux host; portable path/process tests are not a substitute for it.
+Acceptance work includes actual Linux editor/runtime builds, rendered script execution, controlled startup and native export behavior. The ordinary static pair also passes startup probes for the editor, runtime, dedicated server and listen server, plus a real Play child-launch regression. Windows cross-compilation and manual Windows graphics testing are separate checks; a successful build does not establish interactive behavior. macOS runtime execution has not been performed on this Linux host; portable path/process tests are not a substitute for it.
 
 ## Related documentation
 

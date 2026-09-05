@@ -52,9 +52,9 @@ fn maybe_config(cfg: Option<Res<GameState>>) {
 
 ## The shared-contract pattern
 
-Renzora is **one binary** that decides at runtime whether it is the editor, the shipped game, or a dedicated server, plus a removable `renzora_editor` bundle (a cdylib loaded beside the exe) and any dynamic plugins dropped into `plugins/`. Those are **separate compiled artifacts** that all run in one process.
+The editor and runtime are separate executables. Each statically links the engine crates it needs and owns its own ECS world; external Play starts another process rather than sharing editor resources with the game.
 
-That creates a hard rule for shared state: a resource only works as a single source of truth if every artifact agrees on its `TypeId`. If two dylibs each compiled their own copy of a type, the `World` would treat them as two unrelated resources. The fix is to define the boundary-crossing types **once**, in the `renzora` SDK crate, which ships as `renzora.dll` (`crate-type = ["dylib", "rlib"]`). The host binary, the dlopen'd editor bundle, and dynamic plugins all link that one compiled copy, so a `Res<EditorSession>` in the game binary and a `ResMut<EffectRouting>` in a plugin point at the same instance.
+Define shared engine-facing types once in the `renzora` contract crate so feature crates use the same definition. Standalone plugins use the negotiated C ABI instead of exchanging Bevy resources or relying on Rust `TypeId` across a DLL boundary. Engine extensions are statically linked into the appropriate executable.
 
 These are the **contract resources/types** that live in `renzora` for exactly this reason:
 
@@ -269,7 +269,7 @@ Resources declared by a C-ABI plugin are a separate case — they are not Rust t
 
 ### The runtime-warnings buffer (the exception)
 
-One piece of shared state is deliberately **not** a resource. The Scene Diagnostics warning feed lives in `renzora::runtime_warnings` as a process-global `static` ring buffer, because it has to be written by the capture layer at `LogPlugin` build time — before the editor bundle is even loaded — and read later from inside the bundle (a different dylib). A `Resource` clone would duplicate across that boundary, so it is hosted in the one shared `renzora.dll` as a static instead:
+The Scene Diagnostics warning feed lives in `renzora::runtime_warnings` as a process-global `static` ring buffer. It receives messages from logging code, including during plugin construction before the editor's systems run. The static editor and runtime have their own process-local buffers; this is no longer a shared-DLL boundary:
 
 ```rust
 use renzora::runtime_warnings::{recent_warnings, CapturedWarning};

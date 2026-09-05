@@ -78,13 +78,13 @@ Android (`aarch64-linux-android` + `x86_64-linux-android`) uses the Android **ND
 
 ### WebAssembly — wasm-bindgen + binaryen
 
-The web target (`wasm32-unknown-unknown`) is built game-runtime-only, then post-processed:
+The web runtime target (`wasm32-unknown-unknown`) is built and post-processed separately from the web editor:
 
 1. `cargo build` emits `renzora.wasm`.
 2. `wasm-bindgen` (v0.2.108) generates the JS glue: `renzora-runtime.js` + `renzora-runtime_bg.wasm` (`--target web`).
 3. `wasm-opt` (from `binaryen`) shrinks the module with `-Oz` and the feature flags the runtime needs (`bulk-memory`, `sign-ext`, `reference-types`, `multivalue`, …).
 
-> The web build is **runtime-only** — there is no WebAssembly editor (the binary has no compile-time `editor` feature, and the editor bundle is a desktop-only dlopen target). On `wasm32` there is no `dlopen`, so no language-backend plugin is loaded and text scripting does not run; audio/DAW/mixer/networking compile to no-op stubs.
+> The build script has separate runtime and editor Wasm lanes. Neither loads a desktop editor DLL or native C-ABI library. Desktop Rust extension loading is not implied by a successful web build; browser capabilities remain target-specific.
 
 ## Building with `renzora build`
 
@@ -154,19 +154,17 @@ Two details worth knowing:
 
 ## Output layout
 
-A desktop build is the engine binary plus the shared libraries it links by name. For example, `dist/windows-x64/` contains:
+A native desktop editor distribution includes the executable pair and required companions. For example:
 
 ```
 dist/windows-x64/
-├── renzora.exe              # the engine binary (editor + runtime + server)
-├── renzora.dll              # the SDK contract crate (shared TypeIds)
-├── renzora_editor.dll       # the removable editor bundle (delete → shipped game)
-├── bevy_dylib-<hash>.dll    # the exact bevy_dylib the binary imports
-├── std-<hash>.dll           # the Rust std shared lib (prefer-dynamic)
-└── plugins/                 # distribution-plugin cdylibs
+├── renzora-editor.exe       # editor
+├── renzora.exe              # game / server runtime
+├── rust-sdk/                # small guest source SDK
+└── plugins/                 # standalone C-ABI plugins
 ```
 
-On Linux the binary is `renzora` (no extension) with `librenzora.so` / `librenzora_editor.so` / `libbevy_dylib-*.so` / `libstd-*.so` beside it; on macOS the suffix is `.dylib`. The non-desktop lanes emit a single artifact each:
+Linux and macOS use `renzora-editor` and `renzora`, without `.exe`. Default builds do not need shared Bevy, contract or Rust standard-library images. Docker runtime-only outputs omit the editor; an installed engine-extension release also needs its matching build kit. Non-desktop runtime artifacts remain target-specific:
 
 | Target | Artifact | Path |
 |---|---|---|
@@ -176,18 +174,11 @@ On Linux the binary is `renzora` (no extension) with `librenzora.so` / `librenzo
 
 On Linux, the editor output is additionally wrapped into an `AppDir` and packaged as `Renzora Engine-x86_64.AppImage` when `appimagetool` is available.
 
-### Shared libraries travel beside the binary
+### Keep the required companions together
 
-Renzora's dynamic-plugin system requires the host binary, the dlopened editor bundle, and every distribution plugin to share **one** compiled copy of Bevy and of the `renzora` SDK so their `TypeId`s match across the dlopen boundary. The repo's `.cargo/config.toml` arranges this with `-C prefer-dynamic` + `bevy/dynamic_linking`, and embeds an rpath (`$ORIGIN` on Linux, `@loader_path` on macOS) so the binary finds those libraries next to itself.
+Ordinary plugins use a negotiated C ABI and share no Bevy types across the library boundary. Engine extensions are compiled into replacement executables. Rust `TypeId` equality is not the compatibility mechanism for standalone plugins.
 
-Because of that, `build-all.sh` copies, per target:
-
-- the **exact** `bevy_dylib-<hash>` the host binary imports (read from the binary itself — not just the newest by mtime, which could be a hash the binary doesn't link);
-- `renzora.{dll,so,dylib}` and the `renzora_editor` bundle, beside the exe;
-- every distribution-plugin `cdylib` into `plugins/`;
-- the matching **Rust std** shared library (`std-*.dll` / `libstd-*.so` / `libstd-*.dylib`) — `prefer-dynamic` links std dynamically, so it must ship too.
-
-> `crt-static` is intentionally **disabled** for the Windows target: it changes crate disambiguators, which would break `TypeId` equality across the dylib boundary and the whole dynamic-plugin system.
+Keep the selected standalone libraries, assets and any required platform companions (such as the OpenXR loader) with the runtime. Static engine linking does not remove operating-system library requirements. Do not add old SDK libraries from a warm Cargo cache to a new static package.
 
 ## `build.rs` and cross-compilation
 

@@ -47,7 +47,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 | `templates/ios/` | the Xcode app shell (`RenzoraRuntime.xcodeproj`, `AppDelegate.swift`, `Info.plist`, `LaunchScreen.storyboard`) |
 | Renderer | `wgpu` → **Metal**, on a UIKit `UIWindow` managed by `winit` |
 
-> An iOS build is **runtime only** — it links `renzora_runtime`, never the editor bundle. The editor is a desktop-only removable cdylib and does not run on iOS.
+> An iOS build is **runtime only** — it links `renzora_runtime`, not the editor package. The native editor is a separate desktop executable and is not part of the iOS runtime artifact.
 
 > **tvOS / Apple TV is not supported.** See [tvOS is not supported](#tvos-is-not-supported) below before you plan around it.
 

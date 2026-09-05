@@ -4,10 +4,10 @@
 # `cargo renzora` is the native (no-Docker) build+stage+run. It routes through
 # the `xtask` helper instead of a bare `cargo run`, because a bare run leaves the
 # distribution plugin cdylibs flat in target/dist/ where the loader (which scans
-# <exe-dir>/plugins/) never finds them. `xtask` compiles the workspace, stages a
-# clean dist/<platform>/ exactly like the Docker build-all.sh (bevy_dylib +
-# renzora + the editor bundle beside the exe; plugins in plugins/), then launches
-# it. `cargo renzora dist` stages without launching. With rust-toolchain.toml
+# <exe-dir>/plugins/) never finds them. `xtask` builds the static executable pair
+# and standalone companions, then stages dist/<platform>/ with plugins/ and the
+# small Rust guest SDK. `cargo renzora dist` builds and stages without launching.
+# With rust-toolchain.toml
 # pinning rustc, this mirrors the container locally on the host platform; Docker
 # stays the path for cross-platform/release builds.
 #
@@ -15,7 +15,7 @@
 # a member (it has to build even when a dangling generated dependency stops the
 # engine workspace from loading — see xtask/Cargo.toml). The path is relative to
 # the current directory, so run `cargo renzora` from the repo root.
-renzora = "run --manifest-path xtask/Cargo.toml --"
+renzora = "run --profile release --manifest-path xtask/Cargo.toml --"
 # ⚠ These two select a SINGLE package, so they resolve `renzora` without its
 # `editor` feature and recompile ~86 shared packages against the `--workspace`
 # cache (see the note under `dist` below). Fine for an occasional headless
@@ -35,9 +35,9 @@ server = "run --profile dist --bin renzora -- --server"
 # `build-all` because it stops at the two binaries instead of also building
 # every other workspace target.
 #
-# ── Why every build alias says `--workspace` ───────────────────────────────
+# ── Why editor builds select both packages together ───────────────────────
 # Cargo resolves features once per invocation, across the packages it selected.
-# A `--workspace` build resolves `renzora` WITH its `editor` feature (the editor
+# A paired build resolves `renzora` WITH its `editor` feature (the editor
 # package asks for it); selecting one package alone resolves it WITHOUT. Those
 # are different feature sets, so they get different `-C metadata` hashes and
 # therefore different `.rlib` filenames — and ~86 shared packages (bevy,
@@ -45,8 +45,9 @@ server = "run --profile dist --bin renzora -- --server"
 # invocations then evict each other forever: alternating them recompiles the
 # engine every single time.
 #
-# (Not to be confused with `cargo renzora dist`, which STAGES an already-built
-# tree into dist/<platform>/. This one only compiles + links.)
+# `cargo renzora dist` additionally stages the built tree into dist/<platform>/.
+# These aliases only compile and link. Avoid --workspace for the supported pair:
+# it also selects retained legacy shared-image packages.
 #
 # That is exactly what the old `build-runtime = "build --profile dist --bin
 # renzora"` alias did — and it wrote to the same `target/dist/renzora.exe` path
@@ -54,12 +55,12 @@ server = "run --profile dist --bin renzora -- --server"
 # been REMOVED. Building only the runtime is no longer a thing you need: the
 # runtime binary produced by `cargo dist` already contains no editor code,
 # because `renzora_app` does not depend on any editor crate.
-dist = "build --profile dist --workspace --exclude renzora-android --exclude renzora-ios"
-build-editor = "build --profile dist --workspace"
-build-all = "build --profile dist --workspace"
+dist = "build --profile dist -p renzora_app -p renzora_editor_app"
+build-editor = "build --profile dist -p renzora_app -p renzora_editor_app"
+build-all = "build --profile dist -p renzora_app -p renzora_editor_app"
 build-plugins = "build --profile dist --workspace"
 
-# WASM (game only — the editor bundle is a desktop dlopen target; no wasm editor)
+# WASM game target; the web editor uses the separate xtask web workflow.
 build-web = "build --profile dist --bin renzora --no-default-features --features wasm --target wasm32-unknown-unknown"
 
 # Android

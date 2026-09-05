@@ -63,6 +63,12 @@ impl Plugin for GaussianSplatPlugin {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn build(&self, app: &mut App) {
+        app.register_type::<GaussianSplat>();
+        // The upstream planar-storage plugin requires a render sub-app during
+        // build. Headless servers keep the scene contract, not GPU machinery.
+        if app.get_sub_app(bevy::render::RenderApp).is_none() {
+            return;
+        }
         info!("[runtime] GaussianSplatPlugin (bevy_gaussian_splatting)");
         app.add_plugins(bevy_gaussian_splatting::GaussianSplattingPlugin);
 
@@ -86,6 +92,23 @@ impl Plugin for GaussianSplatPlugin {
 
         #[cfg(feature = "editor")]
         editor::register(app);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod headless_tests {
+    use super::*;
+
+    #[test]
+    fn headless_host_keeps_scene_type_without_installing_gpu_renderer() {
+        let mut app = App::new();
+        app.add_plugins(GaussianSplatPlugin);
+        assert!(!app.is_plugin_added::<bevy_gaussian_splatting::GaussianSplattingPlugin>());
+        assert!(app.world().resource::<AppTypeRegistry>().read()
+            .get(std::any::TypeId::of::<GaussianSplat>()).is_some());
+        app.finish();
+        app.cleanup();
+        app.update();
     }
 }
 

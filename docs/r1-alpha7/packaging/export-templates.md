@@ -84,12 +84,11 @@ There is deliberately no fourth step: falling back to the previous *version* wou
 The desktop "template" is just the runtime binary. Build it via the renzora CLI (Docker):
 
 ```bash
-# Builds the desktop binary + renzora_editor bundle + one shared bevy_dylib.
-# Every editor build also produces the lean runtime binary.
-renzora build
+# Build and stage the normal native editor/runtime pair.
+cargo renzora dist
 ```
 
-`renzora build` produces the `renzora`/`renzora.exe` binary plus its shared libraries (`bevy_dylib`, `renzora.dll`, `std-*`). That binary, with `renzora_editor.*` removed, is the desktop template.
+The runtime `renzora`/`renzora.exe`, its selected runtime companions and capability metadata form the desktop template. The separate `renzora-editor` executable is excluded. Default builds link Bevy and the engine contract statically; deleting an editor DLL is not part of packaging. A normal runtime is not a lean runtime: lean exports perform their own feature-selected rebuild.
 
 For cross-platform output in one pass, pass the platform tokens — `renzora build` writes the arch-suffixed `dist/` layout the scanner expects (it runs `docker/build-all.sh` inside each platform's `ghcr.io/renzora/<platform>` container, pulling only the images those tokens need):
 

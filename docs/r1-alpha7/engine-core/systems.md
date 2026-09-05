@@ -27,7 +27,7 @@ fn setup_scoreboard(/* ... */) { /* spawn UI once */ }
 fn award_points(mut score: ResMut<Score>) { score.points += 1; }
 fn refresh_label(score: Res<Score>) { info!("score: {}", score.points); }
 
-// Register the plugin in the global inventory. Runtime scope by default.
+// Declare the plugin for generated static wiring. Runtime scope by default.
 renzora::add!(ScoreboardPlugin);
 ```
 
@@ -51,9 +51,9 @@ renzora::add!(MyFoundation, Runtime, priority = -100); // earlier in the fan-out
 | Scope | Where its systems run | Use for |
 |-------|-----------------------|---------|
 | `Runtime` (default) | The editor viewport **and** the exported game | Gameplay, rendering effects, physics, UI, audio — anything the shipped game needs |
-| `Editor` | The editor session only (the removable `renzora_editor` bundle) | Panels, inspectors, gizmos, authoring tools — things that must never ship in a game |
+| `Editor` | The separate editor executable | Panels, inspectors, gizmos, authoring tools — things that must never ship in a game |
 
-Because a `Runtime` plugin's systems run inside the editor viewport too, your gameplay is live while you edit. `Editor` plugins live in the `renzora_editor` cdylib bundle that sits beside the executable; delete that one file and the same binary becomes the shipped game, with every `Editor`-scope system gone.
+Runtime plugins also run in the editor's runtime world, subject to their play-state conditions. Editor plugins are statically linked into `renzora-editor`; the shipped `renzora` runtime does not link the editor package.
 
 > A feature that needs editor tooling **on top of** runtime behaviour ships **two** plugins, one of each scope — for example `GameUiPlugin` (Runtime) plus `GameUiEditorPlugin` (Editor). Do not try to give one plugin both scopes; it cannot.
 
@@ -61,7 +61,7 @@ Because a `Runtime` plugin's systems run inside the editor viewport too, your ga
 
 ## When your systems start running
 
-`renzora_runtime::add_engine_plugins(app, is_editor)` builds the runtime side of every session. It installs an **ordered foundation** first, then fans out every other `Runtime`-scope plugin from the global registry:
+`renzora_runtime::add_engine_plugins(app, is_editor)` builds the runtime side of every session. It installs an **ordered foundation** first, then installs the generated `Runtime`-scope plugin list:
 
 | Order | Plugin | Crate | Role |
 |-------|--------|-------|------|
@@ -70,9 +70,9 @@ Because a `Runtime` plugin's systems run inside the editor viewport too, your ga
 | 3 | `ScriptingPlugin` | `renzora_scripting` | Hooks and command queue; language backends are plugins |
 | 4 | `PhysicsPlugin` | `renzora_physics` | physics integration + script bindings |
 | 5 | `ViewportStretchPlugin` | `renzora_runtime` | pixel-art scaling — **game builds only** (`!is_editor`) |
-| 6+ | every `Runtime`-scope `add!` plugin | various | fanned out via `for_each_static_plugin(Runtime)` |
+| 6+ | every `Runtime`-scope `add!` plugin | various | installed through generated static wiring |
 
-`Editor`-scope plugins are **not** installed here. They arrive only through the editor bundle's `plugin_install_scope` entry point, called with `host_scope = Editor` when an editor session is detected. There is no compile-time `editor` feature.
+`Editor`-scope plugins are **not** installed here. The editor executable calls `renzora_editor::install` after runtime assembly, and its generated list installs the editor plugins directly. No Bevy `App` crosses a dynamic-library boundary.
 
 The fan-out (step 7) visits plugins in ascending `priority` (default `0`), but that ordering controls only **when each plugin's `build` runs**, not when its systems execute each frame.
 

@@ -130,7 +130,7 @@ Script packaging failures stop export. When shipping the small Rust modding SDK,
 
 ## Existing native plugins during migration
 
-The repository still retains the older `renzora::plugin!` shared-image loader and its metadata SDK on the existing launch path. It is distinct from the manifest-based Tier 2 workflow above. Do not convert a plugin merely by changing its library extension or delete the old SDK before its users have migrated.
+Legacy `renzora::plugin!` loader and metadata-SDK source files remain pending cleanup, but the normal static editor/runtime path does not enable them. Use the manifest-based Tier 2 workflow above for full Bevy access. Changing an old plugin's filename or library extension does not migrate its API.
 
 Replacement build preparation explicitly preserves the eleven existing native distribution plugins: ai_chat, auto_exposure, clouds, gamepad, mesh_draw, night_stars, pool_water, procedural_tree, spline, text3d and vignette. Their editor/runtime scope is preserved through generated static wiring. Final removal of legacy loaders and export machinery is later migration cleanup.
 

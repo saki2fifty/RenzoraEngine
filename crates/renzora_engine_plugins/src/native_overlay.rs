@@ -62,11 +62,15 @@ fn configure(
             return Err(format!("native overlay requires package {expected}"));
         }
     }
-    if editor
+    let legacy_shared_image = editor
         .get("features")
         .and_then(|features| features.get("shared-image"))
-        .is_none()
-    {
+        .is_some();
+    let static_editor = editor.get("lib")
+        .and_then(|library| library.get("crate-type"))
+        .and_then(Item::as_array)
+        .is_some_and(|formats| formats.len() == 1 && formats.get(0).and_then(|format| format.as_str()) == Some("rlib"));
+    if !legacy_shared_image && !static_editor {
         return Err("build kit does not support the standalone editor feature split".into());
     }
     let binaries = app
@@ -186,7 +190,7 @@ mod tests {
             .expect("defaults")
             .iter()
             .any(|feature| feature.as_str() == Some("shared-image")));
-        assert!(original_app.contains("required-features = [\"wasm\"]"));
+        assert!(!original_app.contains("required-features = [\"wasm\"]"));
         assert!(app["bin"]
             .as_array_of_tables()
             .expect("bins")
@@ -212,5 +216,48 @@ mod tests {
             .expect("bin")
             .insert("required-features", value(required));
         assert!(configure(&mut root, &mut editor, &mut app).is_err());
+    }
+
+    #[test]
+    fn unknown_library_format_is_not_silently_replaced() {
+        let (mut root, mut editor, mut app) = manifests();
+        let mut formats = Array::new();
+        formats.push("cdylib");
+        editor["lib"]["crate-type"] = value(formats);
+        assert!(configure(&mut root, &mut editor, &mut app).is_err());
+    }
+
+    #[test]
+    fn recognized_legacy_manifest_still_migrates() {
+        let (mut root, mut editor, mut app) = manifests();
+        editor["features"]["shared-image"] = value(Array::new());
+        editor["features"]["default"]
+            .as_array_mut()
+            .expect("defaults")
+            .push("shared-image");
+        editor["lib"]["crate-type"]
+            .as_array_mut()
+            .expect("formats")
+            .push("dylib");
+        root["features"]["default"]
+            .as_array_mut()
+            .expect("defaults")
+            .push("dynamic_linking");
+        let mut required = Array::new();
+        required.push("wasm");
+        app["bin"]
+            .as_array_of_tables_mut()
+            .expect("bins")
+            .get_mut(0)
+            .expect("editor")
+            .insert("required-features", value(required));
+        configure(&mut root, &mut editor, &mut app).expect("recognized legacy graph");
+        assert_eq!(editor["lib"]["crate-type"].as_array().expect("formats").len(), 1);
+        assert!(!app["bin"]
+            .as_array_of_tables()
+            .expect("bins")
+            .get(0)
+            .expect("editor")
+            .contains_key("required-features"));
     }
 }

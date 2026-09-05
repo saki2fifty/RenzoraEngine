@@ -80,7 +80,7 @@ For a project's restart-required extension, use the different manifest and stage
 
 Standalone libraries use `renzora_plugin`, not the full Bevy contract. Their version and interface-prefix negotiation define the C-ABI boundary. Bevy `TypeId` equality is not a stable ABI or a safety guarantee for arbitrary engine DLLs.
 
-The older shared-image `renzora::plugin!` loader remains on the legacy launch path during migration. It is not the declaration for new Tier 2 extensions, and removing its files is a separate cleanup step.
+The older shared-image `renzora::plugin!` loader remains in source pending cleanup but is disabled in the normal static build. It is not the declaration for new Tier 2 extensions.
 
 ## What a plugin can do
 

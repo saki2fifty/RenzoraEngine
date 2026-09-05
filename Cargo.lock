@@ -7693,9 +7693,7 @@ dependencies = [
  "renzora_distance_fog_editor",
  "renzora_dof",
  "renzora_dof_editor",
- "renzora_dylib",
  "renzora_editor_framework",
- "renzora_ember_dylib",
  "renzora_ember_editor",
  "renzora_engine",
  "renzora_engine_editor",
@@ -8699,7 +8697,6 @@ dependencies = [
  "blake3",
  "dirs 6.0.0",
  "image",
- "libloading 0.8.9",
  "renzora",
  "renzora_animation",
  "renzora_antialiasing",
@@ -9250,6 +9247,7 @@ dependencies = [
  "renzora_ui",
  "renzora_undo",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

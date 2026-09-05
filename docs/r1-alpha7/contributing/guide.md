@@ -39,7 +39,7 @@ opening your first AI-assisted PR.
 
 ## Development setup
 
-The full build story — the one-binary / editor-as-removable-cdylib model and the cross-compile images — is documented in [Building from a Checkout](/docs/r1-alpha7/setup/building-from-source). The short version:
+The separate editor/runtime build and cross-compile environments are documented in [Building from a Checkout](/docs/r1-alpha7/setup/building-from-source). The short version:
 
 ```bash
 cargo renzora                    # build the workspace and run the EDITOR
@@ -52,7 +52,7 @@ renzora test                     # the full suite, exactly as CI runs it (contai
 
 > **Always pass `--profile dist`.** A bare cargo command defaults to the `dev` profile and creates a *second* full set of artefacts under `target/debug/`; this workspace is far too large for two of them, and a full disk surfaces as bogus compile errors in crates you never touched rather than as a disk error.
 
-> You do not need Docker to develop on Renzora. Docker is a **cross-compiler** — it builds export templates for platforms you don't own — and a way to reproduce CI exactly. It is not the install path. In-workspace plugins are statically linked `rlib`s wired in by a build-time generator, while [standalone plugins](/docs/r1-alpha7/extending/standalone-plugins) are C-ABI cdylibs that link no Bevy. The current native editor build still uses the removable `renzora_editor` bundle beside the runtime executable; this is separate from the standalone-plugin ABI. There is **no `editor` compile-time feature** on the runtime binary.
+> You do not need Docker for native development. In-workspace plugins are statically linked `rlib`s with generated wiring; [standalone plugins](/docs/r1-alpha7/extending/standalone-plugins) use a C ABI without linking Bevy. Native builds stage `renzora-editor` and `renzora` together. The runtime has no editor role or loadable editor bundle. Containers remain useful for configured cross-target builds.
 
 ### Toolchain
 

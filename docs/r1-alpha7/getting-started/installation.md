@@ -117,12 +117,12 @@ That removed the last reason to containerise an ordinary build. Docker is still 
 
 One caveat if you're contributing: `cargo test` can't link the full workspace natively on Windows (the test harness blows past the PE format's 65,535-symbol export limit). Run the suite with `renzora test`, which uses the container. `cargo check` and `cargo clippy` work natively everywhere.
 
-### Good to know: one binary, editor as a removable bundle
+### Good to know: separate editor and game executables
 
-There is exactly one workspace binary: `renzora` (`renzora.exe` on Windows). The editor is **not** a compile-time feature — it ships as a removable bundle (`renzora_editor.dll` / `librenzora_editor.so` / `.dylib`) placed **beside the exe**:
+The desktop installation contains `renzora-editor` and `renzora` (with `.exe` on Windows). Keep them together: external Play starts the sibling runtime.
 
-- Bundle present → the binary launches as the **editor**.
-- Delete that one file (or pass `--no-editor`) → the same binary is the **shipped game**.
+- Open `renzora-editor` to edit projects.
+- Exported games use `renzora` and omit editor code. Old editor libraries do not change what it launches.
 
 You don't need the deeper details to get started — the cross-compile toolchain and every launch flag are covered in the build reference below and in the Advanced docs.
 

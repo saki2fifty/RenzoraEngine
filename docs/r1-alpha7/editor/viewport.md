@@ -411,7 +411,7 @@ The choice is remembered across sessions (per-user, in `~/.renzora/editor.toml`)
 A few things to know about the runtime window:
 
 - Your scene is **saved to disk first** (same as regular Play), because the spawned runtime reads the project's files — it starts from the project's **main scene**, just like an exported game.
-- The engine is **one binary**: the editor relaunches its own executable with `--no-editor --project <your project>`, which boots it straight into game mode. If a dedicated `renzora-runtime` binary is staged next to the editor (packaged `renzora build` output), that leaner binary is used instead — same result either way.
+- The editor launches the sibling `renzora` executable with the project path. It never falls back to launching itself. Older split layouts and the legacy `renzora-runtime` filename remain discovery fallbacks; a missing runtime is reported rather than opening another editor.
 - Because it's a separate process, it's fully insulated from editor state: no editor cameras, gizmos, or overlays can leak in.
 - **Its log appears in the editor's Console**, tagged `Runtime`, for as long as the game is running — everything it prints, including plugin-load failures and panics. The runtime is a windowed process with no terminal of its own, so without this its output goes nowhere and a game that misbehaves only outside the editor has nothing to show for it. The console also records how the run ended, and flags a non-zero exit code as an error.
 - First launch can take a little while (the runtime loads the engine, plugins, and your project from cold); the editor shows its paused overlay until the game window appears.

@@ -31,3 +31,6 @@ bytemuck = { version = "1.5", features = ["derive"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"

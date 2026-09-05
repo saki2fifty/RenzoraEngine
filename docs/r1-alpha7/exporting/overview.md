@@ -4,10 +4,7 @@ Exporting turns your project into a shippable game: a runtime executable plus yo
 
 ## The shipped game is the engine without the editor
 
-The installed engine-plugin build workflow produces separate editor and runtime executables. Export uses the runtime, not the editor. The older source launch path still supports a removable editor bundle during migration:
-
-- Bundle present → the binary runs as the **editor**.
-- Delete that one file (or pass `--no-editor`) → the **same** binary is your **shipped game**.
+Source builds and installed engine-plugin builds produce separate editor and runtime executables. Export uses `renzora`, not `renzora-editor`. Adding or deleting an old editor library cannot change the runtime's role.
 
 Copy-based export uses a matching prebuilt runtime. Lean export rebuilds it with the selected features. Projects with engine plugins rebuild their current runtime code through the matching build kit; editor-only extensions are not included.
 

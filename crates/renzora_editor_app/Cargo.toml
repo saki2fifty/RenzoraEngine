@@ -4,49 +4,12 @@ version = "0.2.0"
 edition = "2021"
 build = "build.rs"
 
-# The editor executable.
-#
-# A SEPARATE PACKAGE from `renzora_app`, not a second `[[bin]]` in it — and that
-# is the whole mechanism by which the runtime binary stays editor-free. Binary
-# targets inside one package share that package's dependency set, and plugin
-# registration is link-time (`inventory::submit!` ctors run for every linked
-# crate). A shared dep set would therefore put all ~80 editor crates into the
-# runtime binary's link graph AND its plugin registry.
-#
-# Two packages keep the dep sets disjoint while `cargo build --workspace` still
-# compiles every shared crate exactly ONCE and links twice — resolver-2 resolves
-# features once per invocation, so `renzora_runtime` et al. are built a single
-# time and both binaries link the same rlibs. The marginal cost of the editor is
-# a link step, not a second compile.
-#
-# HARD RULE: always build via `--workspace`. `cargo build -p renzora_app` alone
-# resolves `renzora` without the `editor` feature, which changes its metadata
-# hash and forces a recompile of 86 shared packages — the "two full builds"
-# everyone is trying to avoid.
-#
-# ── wasm only, now that the editor is a loadable image ──────────────────────
-#
-# On native there is ONE binary: `renzora` looks for `renzora_editor.<dll|so|
-# dylib>` beside itself and is the editor when it finds one. This executable has
-# nothing left to do there.
-#
-# It cannot merely be left building either. `renzora_editor` is now `["rlib",
-# "dylib"]`, and a binary linking the rlib while the dylib exists gives rustc two
-# formats to choose between for every shared crate:
-#
-#     error: cannot satisfy dependencies so `thiserror` only shows up once
-#
-# — twenty of those, naming the dependency closure rather than the cause.
-#
-# wasm has no dynamic linking at all, so the editor there stays a second
-# `.wasm` bundle built from this package. `required-features` is what keeps it
-# out of a `--workspace` build without removing it from the workspace, which
-# would also put it out of reach of the `-p renzora_editor_app` the wasm lane
-# uses.
+# Separate packages keep editor dependencies out of the game's link graph.
+# Build both packages in one Cargo invocation to share dependency compilation;
+# selecting every workspace member would also select retired dylib packages.
 [[bin]]
 name = "renzora-editor"
 path = "src/main.rs"
-required-features = ["wasm"]
 
 [dependencies]
 bevy = { workspace = true }
@@ -95,13 +58,11 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [features]
-# Selected only by isolated Tier 2 replacement builds. Their plugins are
-# statically linked; the legacy SDK prebuild/restart path must not run.
+default = ["tier2-native"]
+# Compatibility flag for older build-kit overlays. All normal native editor
+# builds use static engine plugins and skip legacy Rust-ABI prebuild.
 tier2-native = []
-# Gates the `[[bin]]` above, so a native `--workspace` build does not produce a
-# second executable that is both redundant and unlinkable. Empty on purpose: it
-# selects a target rather than turning any code on. The wasm lane passes it
-# explicitly (`cargo build -p renzora_editor_app --features wasm`).
+# Retained for the existing wasm build command; the binary is not feature-gated.
 wasm = []
 
 [build-dependencies]

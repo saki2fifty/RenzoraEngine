@@ -50,3 +50,6 @@ renzora_native_build = { path = "../crates/renzora_native_build" }
 # Source-SDK packaging is shared with replacement builds. Its optional TOML
 # parser adds no Bevy or compiler-service dependency to this build helper.
 renzora_rust_sdk = { path = "../crates/renzora_rust_sdk", features = ["packaging"] }
+
+[dev-dependencies]
+tempfile = "3"

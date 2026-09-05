@@ -2,6 +2,13 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 20:53 UTC
+
+- Moved ordinary builds to separate editor and game executables, matching the engine-extension builds. Play starts the companion game executable.
+- Removed the startup path that could turn a game into the editor when an old editor library was present beside it.
+- Corrected a headless-server startup failure caused by enabling Gaussian-splat rendering without a graphics renderer; the rebuilt server passed its startup check.
+- Built a separate Windows test package with both executables and all bundled plugin DLLs, ready for manual testing without replacing the existing installation.
+
 ## September 5, 2026 — 19:46 UTC
 
 - Completed the move of all eleven built-in native plugins into the engine and editor, preserving their roles, saved settings and scene data.

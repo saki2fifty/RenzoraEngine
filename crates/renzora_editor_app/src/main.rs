@@ -14,8 +14,6 @@
 //! executable"; removing editor code from a shipped game is now a property of
 //! which binary you ship, not of which files you delete beside it.
 
-mod setup_ui;
-
 fn executable_directory() -> Option<std::path::PathBuf> {
     std::env::current_exe()
         .ok()?
@@ -29,20 +27,6 @@ fn main() {
     // `windows_subsystem = "windows"` precisely so shipped games don't get one.
     renzora_runtime::renzora_engine::crash::install_panic_hook(true);
     renzora_runtime::attach_console();
-
-    // ── Setup, before Bevy ───────────────────────────────────────────────────
-    // A downloaded release arrives with the SDK still compressed and every native
-    // plugin still source-only, so the first launch after an install or update
-    // has real work to do. It has to happen HERE, before `App` assembly: that is
-    // when `NativePluginLoader` loads plugins, so unpacking any later would be
-    // too late for the very thing that needed it.
-    //
-    // Ordinary launches answer `needed() == false` after a couple of directory
-    // stats and fall straight through. See `renzora_native_plugin::prebuild`.
-    if !cfg!(feature = "tier2-native") && renzora_native_plugin::prebuild::needed() {
-        setup_ui::run();
-        renzora_native_plugin::prebuild::restart();
-    }
 
     // U4-2 + U4-3: production compiler-service assembly. Editor
     // sessions construct the shared `Arc<BuildService>` BEFORE

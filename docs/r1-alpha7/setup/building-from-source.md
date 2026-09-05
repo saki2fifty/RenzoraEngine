@@ -18,9 +18,11 @@ cargo run --profile release --manifest-path xtask/Cargo.toml -- dist
 
 This invokes the same helper behind `cargo renzora dist`, while explicitly selecting its release profile. It synchronizes plugin wiring, builds the normal checkout configuration and stages the platform directory without launching it. Omit `dist` to use the helper's build-and-run mode.
 
-The repository retains its legacy shared-image defaults during migration. The native engine-plugin build is a separate, isolated configuration described below. Do not assume that deleting a shared library from a normal checkout build converts it into a static replacement build.
+The desktop helper builds `renzora_app` and `renzora_editor_app` together and stages both executables. It opens `renzora-editor` by default; explicit `--server`, `--host` and `--vr` launches use `renzora`. `cargo dist` compiles this pair without staging. Do not substitute a whole-workspace build: retained legacy dylib packages are not part of the supported desktop graph.
 
-Normal staging includes the small `rust-sdk/` source package for live Rust plugins and scripts, as well as files required by the retained legacy path. To refresh only the small package:
+Default native builds link the engine statically. The installed engine-plugin build uses the same executable split in an isolated, reproducible workspace, as described below. Old shared libraries are not substitutes for either executable.
+
+Normal staging includes the small `rust-sdk/` source package for live Rust plugins and scripts. It no longer prepares the compiled Bevy metadata SDK or builds Rust-ABI plugins. To refresh only the small package:
 
 ```sh
 cargo run --profile release --manifest-path xtask/Cargo.toml -- source-sdk --out <installation-directory>
@@ -68,7 +70,7 @@ Run it inside the configured Windows toolchain environment. The target, linker a
 
 A cross-built executable is not by itself a validated installed Tier 2 release. A kit must match the platform and exact toolchain that will rebuild extensions on the user's machine. The legacy metadata SDK has additional host-proc-macro constraints; it must not be substituted for the new source kit.
 
-The current Phase 5 evidence includes full Linux builds and GUI probes plus Windows MSVC checks. Windows EXE production remains deferred, and no macOS GUI run is claimed. See [Cross-compilation](../packaging/cross-compilation.md) and [Export Templates](../packaging/export-templates.md) for the platform-specific packaging paths.
+Validation includes full Linux editor/runtime builds, startup probes under a virtual display and a real Play child-launch test. Windows MSVC compilation checks do not replace graphics and interaction testing on a Windows machine. No macOS GUI run is claimed. See [Cross-compilation](../packaging/cross-compilation.md) and [Export Templates](../packaging/export-templates.md) for the platform-specific packaging paths.
 
 ## Runtime and project extensions
 

@@ -6,41 +6,15 @@
 //! (rustup auto-selects 1.95.0). This binary handles the second half WITHOUT a
 //! container, for the host platform only:
 //!
-//!   1. `cargo build --profile dist --workspace` — compile BOTH executables
-//!      (`renzora`, the runtime/shipped game, and `renzora-editor`) plus every
-//!      distribution plugin cdylib. One invocation: the ~700 shared crates
-//!      compile once and are linked into both binaries.
+//!   1. Build `renzora_app` and `renzora_editor_app` together with the dist
+//!      profile, then build standalone C-ABI companions separately.
 //!   2. Stage `dist/<platform>/`: the two executables + the shared libraries +
 //!      the OpenXR loader beside each other, every plugin cdylib into `plugins/`.
 //!   3. (`run` only) launch the staged editor.
 //!
-//! ## The shared libraries
-//!
-//! `renzora_app`'s default features include `dynamic_linking`, so Bevy lives in
-//! one `bevy_dylib` that both executables import rather than a private copy
-//! baked into each. Measured on Windows, that took the pair from 460 MB to
-//! 397 MB, and it takes relinking the whole of Bevy out of every build.
-//!
-//! It is also the prerequisite for a plugin ever holding `&mut World`: Rust
-//! derives a type's `TypeId` from how it was compiled, so two independently
-//! linked copies of Bevy disagree about what `Transform` is. One shared image
-//! means one answer.
-//!
-//! Two files therefore have to land beside the executables, and a missing one
-//! is not a clean error — the OS loader refuses the binary before `main`:
-//!
-//!   * `bevy_dylib.<ext>`, from `target/dist/`.
-//!   * `std-<hash>.<ext>`, from the rustc sysroot. This one is easy to forget
-//!     because nothing in the workspace asks for it: linking *any* dylib makes
-//!     rustc link std dynamically too, so it arrives as a side effect of
-//!     `dynamic_linking` rather than of `prefer-dynamic` (which this repo does
-//!     not set). The filename hashes the toolchain, so it must be re-staged
-//!     whenever `rust-toolchain.toml` moves.
-//!
-//! The editor is still a second *executable* rather than the removable
-//! `renzora_editor.dll` it used to be. That is unrelated to the above and has
-//! not changed: `renzora_viewport::external_runtime` spawns `renzora` as a child
-//! process for play mode, so both binaries must be staged together regardless.
+//! Both executables statically link their engine code. Standalone extensions
+//! use the C ABI, not shared Bevy images. `renzora_viewport::external_runtime`
+//! spawns `renzora` for Play, so both executables must be staged together.
 //!
 //! Why a staging step at all: a bare `cargo run` leaves the plugin cdylibs flat
 //! in `target/dist/` next to the exe, but the dynamic loader scans
@@ -402,7 +376,7 @@ fn build_and_stage(repo: &Path, plat: &Platform, features: &[&str]) -> Result<Pa
             // hashes the build configuration — so regenerating it here is what
             // stops a stale one from ever sitting next to a fresh editor. It hardlinks,
             // so it costs neither disk nor noticeable time (see `sdk.rs`).
-            sdk::build(repo, plat, &out)?;
+            // Static hosts use the small guest SDK, never Rust-ABI metadata.
             if let Err(error) = renzora_rust_sdk::stage(repo, &out) {
                 eprintln!("[xtask] source SDK staging failed: {error}");
                 return Err(ExitCode::FAILURE);
@@ -411,9 +385,6 @@ fn build_and_stage(repo: &Path, plat: &Platform, features: &[&str]) -> Result<Pa
             // `plugins/` is built exactly the way a user's installed one is —
             // which is the point: an author working from source exercises the
             // real path rather than a dev-only shortcut.
-            if !native_plugin::build_all(repo, &out) {
-                return Err(ExitCode::FAILURE);
-            }
             Ok(out)
         }
         Err(e) => {
@@ -446,13 +417,10 @@ fn build(repo: &Path, features: &[&str]) -> bool {
         "build",
         "--profile",
         &profile,
-        "--workspace",
-        "--exclude",
-        "renzora-android",
-        "--exclude",
-        "renzora-ios",
-        "--exclude",
-        "xtask",
+        "-p",
+        "renzora_app",
+        "-p",
+        "renzora_editor_app",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -679,6 +647,17 @@ fn stage(repo: &Path, plat: &Platform) -> std::io::Result<PathBuf> {
     let plugins = out.join("plugins");
     std::fs::create_dir_all(&plugins)?;
 
+    // Check the complete pair before replacing any previously staged files.
+    for name in ["renzora", "renzora-editor"] {
+        let binary = src.join(format!("{name}{}", plat.exe_suffix));
+        if !binary.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("required executable is missing: {}", binary.display()),
+            ));
+        }
+    }
+
     // Wipe prior artifacts so a removed plugin doesn't linger in dist/. Only the
     // exe + shared libs are swept; any other dist content (configs, assets a
     // packager dropped in) is left alone.
@@ -712,26 +691,12 @@ fn stage(repo: &Path, plat: &Platform) -> std::io::Result<PathBuf> {
         make_executable(&updater_bin)?;
     }
 
-    // ── The editor image ─────────────────────────────────────────────────────
-    // One binary, and the presence of this file is what makes it the editor.
-    // `renzora` looks for it beside itself at startup; without it the same
-    // executable is the shipped game, which is why an export simply does not
-    // stage it rather than shipping a different binary.
-    //
-    // A `dylib`, not a second `.exe`. That was possible again the moment Bevy
-    // became a shared image: the editor takes `&mut App` across the boundary,
-    // which is sound only while both sides link one `bevy_dylib`, one
-    // `renzora_dylib`, one `renzora_ember_dylib` and one `renzora_runtime_dylib`.
-    let editor_name = format!("{}renzora_editor.{}", plat.lib_prefix, plat.ext);
+    // Keep the editor beside its companion runtime so Play can resolve it.
+    let editor_name = format!("renzora-editor{}", plat.exe_suffix);
     let editor_src = src.join(&editor_name);
-    if editor_src.exists() {
-        link_or_copy(&editor_src, &out.join(&editor_name))?;
-    } else {
-        eprintln!(
-            "[xtask] WARN: {} missing — staged a runtime-only tree (build with `cargo dist`)",
-            editor_name
-        );
-    }
+    link_or_copy(&editor_src, &out.join(&editor_name))?;
+    #[cfg(unix)]
+    make_executable(&out.join(&editor_name))?;
 
     // ── OpenXR loader (VR) ───────────────────────────────────────────────────
     // The Khronos loader every OpenXR app must ship: `openxr::Entry::load()`
@@ -753,20 +718,9 @@ fn stage(repo: &Path, plat: &Platform) -> std::io::Result<PathBuf> {
     // start, which is exactly the failure this approach exists to prevent.
     stage_shared_libs(&src, &out, plat)?;
 
-    // ── Distribution plugin cdylibs → plugins/ ───────────────────────────────
+    // Only standalone plugin build outputs are deployable. The engine target
+    // directory can retain obsolete Rust dylibs and compiler proc macros.
     let mut count = 0;
-    for entry in std::fs::read_dir(&src)? {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = file_name(&path);
-        if !name.ends_with(&format!(".{}", plat.ext)) || is_not_a_plugin(&name, plat) {
-            continue;
-        }
-        link_or_copy(&path, &plugins.join(&name))?;
-        count += 1;
-    }
 
     // ── Source plugin cdylibs (plugins/) → plugins/ ──────────────────────────
     // Separate pass because they are separate cargo projects, so the workspace
@@ -780,7 +734,7 @@ fn stage(repo: &Path, plat: &Platform) -> std::io::Result<PathBuf> {
         for f in files.flatten() {
             let path = f.path();
             let name = file_name(&path);
-            if path.is_file() && name.ends_with(&format!(".{}", plat.ext)) {
+            if path.is_file() && name.ends_with(&format!(".{}", plat.ext)) && !is_not_a_plugin(&name, plat) {
                 // Cargo never sweeps the shared `plugins/target/`, so deleting a
                 // plugin's source leaves its cdylib sitting there and an
                 // unfiltered copy would restage it on every build — the deleted
@@ -900,19 +854,14 @@ fn stage_shared_libs(src: &Path, out: &Path, plat: &Platform) -> std::io::Result
     // only source that is right by construction. Same lesson as the SDK artifact
     // list, in a different place.
     //
-    // Both executables are scanned: they are built from one `--workspace`
-    // invocation and so agree today, but staging what each one actually asks for
-    // costs nothing and cannot be wrong.
+    // Inspect both executables rather than assuming their imports match.
     let deps = src.join("deps");
     let mut wanted = std::collections::BTreeSet::new();
-    // The executable and the editor image both import shared libraries, and the
-    // image imports more of them than the exe does — it is the editor, so it
-    // pulls the UI toolkit and every editor crate's dependencies. Asking both is
-    // what keeps a staged tree complete now that the editor is a library rather
-    // than a second executable that was scanned here.
+    // Normal static builds require no Bevy/Rust shared images. Keep this
+    // compatibility scan until the legacy build utilities are retired.
     let host_binaries = [
         format!("renzora{}", plat.exe_suffix),
-        format!("{}renzora_editor.{}", plat.lib_prefix, plat.ext),
+        format!("renzora-editor{}", plat.exe_suffix),
     ];
     for name in &host_binaries {
         let path = out.join(name);
@@ -1039,7 +988,8 @@ fn launch(repo: &Path, out: &Path, plat: &Platform, default_no_xr: bool) -> Exit
     // than to this: it reads them in `main` to boot headless, as a listen
     // server, or into a headset, and each of those is never an editor session
     // even with the image present. So they are simply forwarded.
-    let bin = out.join(format!("renzora{}", plat.exe_suffix));
+    let executable = launch_executable(&extra);
+    let bin = out.join(format!("{executable}{}", plat.exe_suffix));
     if !bin.exists() {
         eprintln!("[xtask] {} was not staged", bin.display());
         return ExitCode::FAILURE;
@@ -1064,6 +1014,52 @@ fn launch(repo: &Path, out: &Path, plat: &Platform, default_no_xr: bool) -> Exit
             eprintln!("[xtask] failed to launch {}: {e}", bin.display());
             ExitCode::FAILURE
         }
+    }
+}
+
+fn launch_executable(arguments: &[String]) -> &'static str {
+    if arguments.iter().any(|arg| matches!(arg.as_str(), "--server" | "--host" | "--vr")) {
+        "renzora"
+    } else {
+        "renzora-editor"
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_and_xr_editor_launches_use_editor() {
+        assert_eq!(launch_executable(&[]), "renzora-editor");
+        assert_eq!(launch_executable(&["--xr".into()]), "renzora-editor");
+    }
+
+    #[test]
+    fn explicit_game_modes_use_runtime() {
+        for flag in ["--server", "--host", "--vr"] {
+            assert_eq!(launch_executable(&[flag.into()]), "renzora");
+        }
+    }
+
+    #[test]
+    fn staging_requires_pair_and_ignores_engine_target_libraries() {
+        let root = tempfile::tempdir().expect("fixture");
+        let plat = platform();
+        let source = root.path().join("target").join(profile());
+        std::fs::create_dir_all(&source).expect("target");
+        std::fs::create_dir_all(root.path().join("crates")).expect("crates");
+        let runtime = format!("renzora{}", plat.exe_suffix);
+        let editor = format!("renzora-editor{}", plat.exe_suffix);
+        std::fs::write(source.join(&runtime), b"runtime").expect("runtime");
+        assert!(stage(root.path(), &plat).is_err());
+        std::fs::write(source.join(&editor), b"editor").expect("editor");
+        let obsolete = format!("{}obsolete.{}", plat.lib_prefix, plat.ext);
+        std::fs::write(source.join(&obsolete), b"old library").expect("obsolete");
+        let output = stage(root.path(), &plat).expect("complete pair");
+        assert_eq!(std::fs::read(output.join(runtime)).expect("staged runtime"), b"runtime");
+        assert_eq!(std::fs::read(output.join(editor)).expect("staged editor"), b"editor");
+        assert!(!output.join("plugins").join(obsolete).exists());
     }
 }
 

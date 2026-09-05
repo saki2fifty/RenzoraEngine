@@ -240,8 +240,7 @@ copy_shared_libs() {
         WANT=$(grep -aoE "(lib)?bevy_dylib-[0-9a-f]+\.$EXT" "$HOST_BIN" 2>/dev/null | head -1)
     local BEVY_DLL=""
     [ -n "$WANT" ] && BEVY_DLL=$(ls "$SRC"/deps/"$WANT" 2>/dev/null | head -1)
-    # Fallback to newest-by-mtime only if the import name couldn't be read.
-    [ -z "$BEVY_DLL" ] && BEVY_DLL=$(ls -t "$SRC"/deps/libbevy_dylib-*."$EXT" "$SRC"/deps/bevy_dylib-*."$EXT" 2>/dev/null | head -1 || true)
+    # Never stage a cached Bevy dylib when this static runtime imports none.
     [ -n "$BEVY_DLL" ] && cp "$BEVY_DLL" "$OUT/"
 
     # SDK — shared dylibs that the host binary AND every distribution
@@ -267,7 +266,7 @@ copy_shared_libs() {
         "$SRC/librenzora_ember_dylib.$EXT"  "$SRC/renzora_ember_dylib.$EXT" \
         "$SRC/librenzora.$EXT"              "$SRC/renzora.$EXT" \
         "$SRC/librenzora_editor.$EXT"       "$SRC/renzora_editor.$EXT"; do
-        [ -f "$f" ] && cp "$f" "$OUT/"
+        [ -f "$f" ] && [ -f "$HOST_BIN" ] && grep -aqF "$(basename "$f")" "$HOST_BIN" && cp "$f" "$OUT/"
     done
 
     # Plugins — every cdylib distribution plugin output. Excludes the
@@ -573,8 +572,7 @@ build_desktop() {
     # workspace members but mobile-only; exclude them from desktop.
     echo "=== Building $PLATFORM ($FEATURE) ==="
     if [ "$FEATURE" = "editor" ]; then
-        cargo build --profile "$PROFILE" --workspace \
-            --exclude renzora-android --exclude renzora-ios \
+        cargo build --profile "$PROFILE" -p renzora_app -p renzora_editor_app \
             $TARGET_DIR_FLAG $TARGET_FLAG || return 1
     else
         cargo build --profile "$PROFILE" --bin renzora --no-default-features \
