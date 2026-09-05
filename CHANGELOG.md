@@ -6,6 +6,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 
 - Separated vignette rendering from its editor controls while retaining saved scene settings and the existing enable switch.
 - Moved automatic exposure into the engine and kept its inspector editor-only, preserving night-darkening settings and cached exposure curves.
+- Separated the night-star renderer from its editor controls while preserving its shader, artwork and saved settings.
 
 ## September 5, 2026 — 13:05 UTC
 

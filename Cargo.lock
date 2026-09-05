@@ -7669,6 +7669,7 @@ dependencies = [
  "renzora_navmesh_editor",
  "renzora_network",
  "renzora_network_editor",
+ "renzora_night_stars_editor",
  "renzora_oit",
  "renzora_oit_editor",
  "renzora_parkour_editor",
@@ -8375,6 +8376,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "renzora_night_stars"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+]
+
+[[package]]
+name = "renzora_night_stars_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+]
+
+[[package]]
 name = "renzora_oit"
 version = "0.1.0"
 dependencies = [
@@ -8610,6 +8627,7 @@ dependencies = [
  "renzora_navmesh",
  "renzora_net",
  "renzora_network",
+ "renzora_night_stars",
  "renzora_oit",
  "renzora_parkour",
  "renzora_physics",

@@ -1,11 +1,9 @@
-//! Night Stars — a procedural starfield on a sky dome, as a native plugin.
+//! Night Stars — a procedural starfield on a sky dome.
 //!
 //! `NightStarsData` and `Sun` both live in the contract crate: `level_presets`
 //! constructs the former when building a night sky, and this plugin reads the
 //! latter to fade the field by sun elevation. Both are named by a binary and by
 //! this runtime-loaded library, so both need one definition.
-
-pub mod inspector;
 
 use bevy::pbr::Material;
 use bevy::prelude::*;
@@ -19,12 +17,12 @@ pub use renzora::NightStarsData;
 // Data types
 // ============================================================================
 
-
 // ============================================================================
 // Star Material
 // ============================================================================
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[type_path = "night_stars"]
 pub struct NightStarsMaterial {
     /// density, brightness, star_size, twinkle_speed
     #[uniform(0)]
@@ -39,9 +37,7 @@ pub struct NightStarsMaterial {
 
 impl Material for NightStarsMaterial {
     fn fragment_shader() -> ShaderRef {
-        // Crate name is part of the path — `night_stars`, not
-        // `renzora_night_stars`. Wrong name resolves to nothing at runtime.
-        ShaderRef::Path("embedded://night_stars/night_stars.wgsl".into())
+        ShaderRef::Path("embedded://renzora_night_stars/night_stars.wgsl".into())
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -196,6 +192,9 @@ pub struct NightStarsPlugin;
 
 impl Plugin for NightStarsPlugin {
     fn build(&self, app: &mut App) {
+        if !renzora::builtin_plugin_enabled(app, "night_stars") {
+            return;
+        }
         info!("[runtime] NightStarsPlugin");
         bevy::asset::embedded_asset!(app, "night_stars.wgsl");
 
@@ -203,11 +202,93 @@ impl Plugin for NightStarsPlugin {
             .init_resource::<NightStarsState>()
             .add_plugins(MaterialPlugin::<NightStarsMaterial>::default())
             .add_systems(Update, sync_night_stars);
-
-        inspector::register(app);
     }
 }
 
-// `Runtime`, explicitly: `plugin!` defaults to `Editor` where `add!` defaulted
-// to `Runtime`, so omitting it would stop shipping the starfield to games.
-renzora::plugin!(NightStarsPlugin, Runtime);
+renzora::add!(NightStarsPlugin, Runtime);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            bevy::render::sync_world::SyncWorldPlugin,
+        ));
+        app.init_asset::<Mesh>();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        app.add_plugins(NightStarsPlugin);
+        app
+    }
+
+    #[test]
+    fn embedded_shader_resolves_with_unchanged_contents() {
+        let app = app();
+        let ShaderRef::Path(path) = NightStarsMaterial::fragment_shader() else {
+            panic!("expected embedded shader");
+        };
+        let server = app.world().resource::<AssetServer>();
+        let source = server.get_source(path.source()).unwrap();
+        let mut reader = bevy::tasks::block_on(source.reader().read(path.path())).unwrap();
+        let mut bytes = Vec::new();
+        bevy::tasks::block_on(reader.read_to_end(&mut bytes)).unwrap();
+        assert_eq!(bytes, include_bytes!("night_stars.wgsl"));
+        assert_eq!(
+            NightStarsMaterial::type_path(),
+            "night_stars::NightStarsMaterial"
+        );
+    }
+
+    #[test]
+    fn dome_reuses_assets_follows_camera_and_disappears_when_disabled() {
+        let mut app = app();
+        let source = app.world_mut().spawn(NightStarsData::default()).id();
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), Transform::from_xyz(1.0, 2.0, 3.0)))
+            .id();
+        app.world_mut().run_system_once(sync_night_stars).unwrap();
+        let state = app.world().resource::<NightStarsState>();
+        let dome = state.entity.unwrap();
+        let material = state.material_handle.clone().unwrap();
+        let mesh = state.mesh_handle.clone().unwrap();
+        assert!(app.world().get::<renzora::HideInHierarchy>(dome).is_some());
+        assert_eq!(
+            app.world().get::<Transform>(dome).unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation = Vec3::X;
+        app.world_mut().run_system_once(sync_night_stars).unwrap();
+        let state = app.world().resource::<NightStarsState>();
+        assert_eq!(state.entity, Some(dome));
+        assert_eq!(state.material_handle.as_ref(), Some(&material));
+        assert_eq!(state.mesh_handle.as_ref(), Some(&mesh));
+        assert_eq!(
+            app.world().get::<Transform>(dome).unwrap().translation,
+            Vec3::X
+        );
+        app.world_mut()
+            .get_mut::<NightStarsData>(source)
+            .unwrap()
+            .enabled = false;
+        app.world_mut().run_system_once(sync_night_stars).unwrap();
+        assert!(app.world().resource::<NightStarsState>().entity.is_none());
+        assert!(app.world().get_entity(dome).is_err());
+    }
+
+    #[test]
+    fn saved_disable_preference_skips_material_and_system_installation() {
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["night_stars".into()]));
+        app.add_plugins(NightStarsPlugin);
+        assert!(!app.world().contains_resource::<NightStarsState>());
+        app.update();
+    }
+}

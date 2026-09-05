@@ -134,6 +134,8 @@ Vignette rendering lives in `renzora_vignette`; its inspector controls live sepa
 
 Auto exposure follows the same split: `renzora_auto_exposure` handles runtime metering and compensation, while `renzora_auto_exposure_editor` owns the inspector. The shared settings type, `auto_exposure` preference, artwork and night-darkening controls are preserved.
 
+The starfield uses `renzora_night_stars` plus editor-only `renzora_night_stars_editor`. Existing `NightStarsData`, the `night_stars` preference and seven inspector fields are unchanged. The renderer embeds its shader under the new workspace crate namespace and retains the existing material type name.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

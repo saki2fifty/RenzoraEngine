@@ -340,6 +340,7 @@ renzora_skybox = { path = "../renzora_skybox", optional = true }
 renzora_auto_exposure = { path = "../renzora_auto_exposure" }
 renzora_native_plugin = { path = "../renzora_native_plugin" }
 renzora_net = { path = "../renzora_net" }
+renzora_night_stars = { path = "../renzora_night_stars" }
 renzora_rust_script = { path = "../renzora_rust_script" }
 renzora_spline = { path = "../renzora_spline" }
 renzora_vignette = { path = "../renzora_vignette" }
