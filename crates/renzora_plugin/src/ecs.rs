@@ -1347,6 +1347,9 @@ pub fn resource_id_of<T: Resource>() -> sys::ComponentId {
 /// # Safety
 /// `res_ptr` must return a pointer valid for the duration of the call, or null.
 pub unsafe trait ResourceParam: Sized {
+    /// Mutable services used while fetching this resource. Custom parameters
+    /// retain conservative access unless they explicitly narrow it.
+    const SERVICES: u32 = sys::system_services::ALL;
     fn res_term(ctx: &mut InitCtx, out: &mut alloc::vec::Vec<sys::Term>, access: sys::Access);
     /// # Safety
     /// `call` must be live.
@@ -1354,6 +1357,7 @@ pub unsafe trait ResourceParam: Sized {
 }
 
 unsafe impl<T: Resource> ResourceParam for T {
+    const SERVICES: u32 = 0;
     fn res_term(ctx: &mut InitCtx, out: &mut alloc::vec::Vec<sys::Term>, access: sys::Access) {
         out.push(sys::Term { component: ctx.resource_id_of::<T>(), access });
     }
@@ -1385,6 +1389,7 @@ impl Time {
 }
 
 unsafe impl ResourceParam for Time {
+    const SERVICES: u32 = 0;
     // Declares nothing: the host sends the frame context with every call, so
     // there is no access to negotiate and no scheduling conflict to create.
     fn res_term(_: &mut InitCtx, _: &mut alloc::vec::Vec<sys::Term>, _: sys::Access) {}
@@ -1473,6 +1478,7 @@ static NO_INPUT: sys::InputState = sys::InputState {
 };
 
 unsafe impl ResourceParam for Input {
+    const SERVICES: u32 = 0;
     // Declares nothing, like `Time`: the host sends input with every call, so
     // there is no access to negotiate and two systems reading input never
     // conflict.
@@ -1887,10 +1893,13 @@ impl<'a> EntityCommands<'a> {
 /// it is sound, but nothing in the types enforces that.
 ///
 /// # Safety
-/// `terms` must declare every component `fetch` reads, or the host will build a
-/// query that does not match what the system touches. `fetch` must not retain
-/// anything past the call.
+/// `declare` must describe every component/resource `fetch` accesses. `SERVICES`
+/// must include the mutable service sources it uses; undeclared sources are
+/// null. `fetch` must not retain anything past the call.
 pub unsafe trait SystemParam: Sized {
+    /// Mutable call services needed by this parameter. The default preserves
+    /// custom parameters' existing access; undeclared sources are null.
+    const SERVICES: u32 = sys::system_services::ALL;
     /// Declare what this parameter needs.
     ///
     /// A `Query` pushes its own term list as a **separate** query; everything
@@ -1910,13 +1919,24 @@ pub unsafe trait SystemParam: Sized {
 }
 
 /// Collects what a system's parameters declare, before it is registered.
-#[derive(Default)]
 pub struct SystemBuilder {
     pub(crate) queries: alloc::vec::Vec<alloc::vec::Vec<sys::Term>>,
     pub(crate) resources: alloc::vec::Vec<sys::Term>,
+    pub(crate) services: u32,
+}
+
+impl Default for SystemBuilder {
+    fn default() -> Self {
+        Self {
+            queries: alloc::vec::Vec::new(),
+            resources: alloc::vec::Vec::new(),
+            services: sys::system_services::ALL,
+        }
+    }
 }
 
 unsafe impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
+    const SERVICES: u32 = 0;
     fn declare(ctx: &mut InitCtx, out: &mut SystemBuilder) {
         let mut terms = alloc::vec::Vec::new();
         D::terms(ctx, &mut terms);
@@ -1931,6 +1951,7 @@ unsafe impl<D: QueryData, F: QueryFilter> SystemParam for Query<'_, D, F> {
 }
 
 unsafe impl<T: ResourceParam> SystemParam for Res<'_, T> {
+    const SERVICES: u32 = T::SERVICES;
     fn declare(ctx: &mut InitCtx, out: &mut SystemBuilder) {
         T::res_term(ctx, &mut out.resources, sys::Access::ResRead);
     }
@@ -1940,6 +1961,7 @@ unsafe impl<T: ResourceParam> SystemParam for Res<'_, T> {
 }
 
 unsafe impl<T: ResourceParam> SystemParam for ResMut<'_, T> {
+    const SERVICES: u32 = T::SERVICES;
     fn declare(ctx: &mut InitCtx, out: &mut SystemBuilder) {
         T::res_term(ctx, &mut out.resources, sys::Access::ResWrite);
     }
@@ -1956,6 +1978,7 @@ unsafe impl<T: ResourceParam> SystemParam for ResMut<'_, T> {
 /// the plugin its system for the session. `Option` is the way to ask without
 /// risking that, and it is spelled exactly as it is in Bevy.
 unsafe impl<T: ResourceParam> SystemParam for Option<Res<'_, T>> {
+    const SERVICES: u32 = T::SERVICES;
     fn declare(ctx: &mut InitCtx, out: &mut SystemBuilder) {
         // Declared exactly as the non-optional form: the host resolves the id
         // and reserves the slot either way, and absence is a null pointer at
@@ -1970,6 +1993,7 @@ unsafe impl<T: ResourceParam> SystemParam for Option<Res<'_, T>> {
 
 /// `Option<ResMut<T>>`. See [`Option<Res<T>>`].
 unsafe impl<T: ResourceParam> SystemParam for Option<ResMut<'_, T>> {
+    const SERVICES: u32 = T::SERVICES;
     fn declare(ctx: &mut InitCtx, out: &mut SystemBuilder) {
         T::res_term(ctx, &mut out.resources, sys::Access::ResWrite);
     }
@@ -2041,6 +2065,8 @@ impl Commands<'_> {
 }
 
 unsafe impl SystemParam for Commands<'_> {
+    // Commands are deferred; they do not borrow service resources in this call.
+    const SERVICES: u32 = 0;
     fn declare(_: &mut InitCtx, _: &mut SystemBuilder) {}
     unsafe fn fetch(call: *const sys::SystemCall, _: &mut usize) -> Self {
         Commands {
@@ -2294,6 +2320,7 @@ impl<T: Component> RemovedComponents<'_, T> {
 }
 
 unsafe impl<T: Component> SystemParam for RemovedComponents<'_, T> {
+    const SERVICES: u32 = 0;
     // Declares nothing. Removal tracking is not component access — the host's
     // source reads a message buffer, not storage — so this can never conflict
     // with another system, which is also true of Bevy's own param.
@@ -2311,6 +2338,7 @@ unsafe impl<T: Component> SystemParam for RemovedComponents<'_, T> {
 }
 
 unsafe impl SystemParam for Images<'_> {
+    const SERVICES: u32 = sys::system_services::IMAGES;
     fn declare(_: &mut InitCtx, _: &mut SystemBuilder) {}
     unsafe fn fetch(call: *const sys::SystemCall, _: &mut usize) -> Self {
         Images {
@@ -2321,6 +2349,7 @@ unsafe impl SystemParam for Images<'_> {
 }
 
 unsafe impl SystemParam for Meshes<'_> {
+    const SERVICES: u32 = sys::system_services::MESHES;
     fn declare(_: &mut InitCtx, _: &mut SystemBuilder) {}
     unsafe fn fetch(call: *const sys::SystemCall, _: &mut usize) -> Self {
         Meshes {
@@ -2384,6 +2413,7 @@ impl Replies<'_> {
 }
 
 unsafe impl SystemParam for Replies<'_> {
+    const SERVICES: u32 = sys::system_services::REPLIES;
     fn declare(_: &mut InitCtx, _: &mut SystemBuilder) {}
     unsafe fn fetch(call: *const sys::SystemCall, _: &mut usize) -> Self {
         Replies {
@@ -2397,6 +2427,7 @@ macro_rules! param_tuples {
     ($(($($p:ident),+))+) => {
         $(
             unsafe impl<$($p: SystemParam),+> SystemParam for ($($p,)+) {
+                const SERVICES: u32 = 0 $(| $p::SERVICES)+;
                 fn declare(ctx: &mut InitCtx, out: &mut SystemBuilder) {
                     $($p::declare(ctx, out);)+
                 }
@@ -2625,7 +2656,10 @@ macro_rules! into_system {
                         guard(&*call, move || materialize::<Fun>()($($p),+))
                     }
 
-                    let mut builder = SystemBuilder::default();
+                    let mut builder = SystemBuilder {
+                        services: 0 $(| $p::SERVICES)+,
+                        ..Default::default()
+                    };
                     $($p::declare(ctx, &mut builder);)+
                     (builder, thunk::<$($p,)+ Func>, core::ptr::null_mut())
                 }
@@ -2834,7 +2868,9 @@ impl App {
         };
         // SAFETY: every pointer in `desc` outlives the call; the host copies
         // what it needs into its own plan.
-        let status = unsafe { ((*self.ctx.iface).add_system)(self.ctx.host, &desc) };
+        let status = unsafe {
+            ((*self.ctx.iface).add_system_with_services_v1)(self.ctx.host, &desc, builder.services)
+        };
         if status != sys::RegisterStatus::Ok && self.rejected.is_none() {
             self.rejected = Some(status);
         }

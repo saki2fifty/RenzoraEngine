@@ -33,6 +33,9 @@ mod call_buffers;
 #[cfg(test)]
 mod dispatch_tests;
 
+#[cfg(test)]
+mod service_tests;
+
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::ecs::component::{ComponentDescriptor, ComponentId, StorageType};
 use bevy::ecs::lifecycle::{RemovedComponentEntity, RemovedComponentMessages};
@@ -40,8 +43,8 @@ use bevy::ecs::message::MessageCursor;
 use bevy::ecs::query::QueryBuilder;
 use bevy::ecs::schedule::{ScheduleLabel, Schedules};
 use bevy::ecs::system::{
-    FilteredResourcesMutParamBuilder, ParamBuilder, QueryParamBuilder, SystemChangeTick,
-    SystemParamBuilder,
+    DynParamBuilder, DynSystemParam, FilteredResourcesMutParamBuilder, ParamBuilder,
+    QueryParamBuilder, SystemChangeTick, SystemParamBuilder,
 };
 use bevy::ecs::world::FilteredResourcesMut;
 use std::collections::HashMap;
@@ -597,6 +600,7 @@ static IFACE: sys::Interface = sys::Interface {
     add_audio_backend,
     add_settings_section,
     add_net_backend,
+    add_system_with_services_v1,
 };
 
 /// Public accessor for tests that drive `init_plugin_gen` directly.
@@ -1432,16 +1436,25 @@ unsafe extern "C" fn add_system(
     host: *mut sys::Host,
     desc: *const sys::SystemDesc,
 ) -> sys::RegisterStatus {
+    // SAFETY: forwards the same init-only pointers and legacy access policy.
+    unsafe { add_system_with_services_v1(host, desc, sys::system_services::ALL) }
+}
+
+unsafe extern "C" fn add_system_with_services_v1(
+    host: *mut sys::Host,
+    desc: *const sys::SystemDesc,
+    services: u32,
+) -> sys::RegisterStatus {
     // The fallback is `AccessConflict` rather than `Ok`, because the one thing
     // that realistically panics in here is Bevy's B0001 check on a conflicting
     // access pattern. Reporting `Ok` from the guard would put the plugin back in
     // the state this return value exists to end: loaded, and silently short a
     // system.
     guard_host("add_system", sys::RegisterStatus::AccessConflict, || {
-        let ctx = &mut *(host as *mut HostCtx);
-        if desc.is_null() {
+        if host.is_null() || desc.is_null() || services & !sys::system_services::ALL != 0 {
             return sys::RegisterStatus::Invalid;
         }
+        let ctx = &mut *(host as *mut HostCtx);
         let desc = &*desc;
         // A system with NO queries is legal and normal: `fn tick(mut s:
         // ResMut<Settings>, time: Res<Time>)` touches no entities at all. This
@@ -1482,8 +1495,9 @@ unsafe extern "C" fn add_system(
         };
 
         let gate = ctx.gate.clone();
-        let system =
-            build_dispatcher(ctx.world, plans, res_plan, desc.entry, desc.user as usize, gate);
+        let system = build_dispatcher(
+            ctx.world, plans, res_plan, desc.entry, desc.user as usize, gate, services,
+        );
         ctx.world
             .resource_mut::<Schedules>()
             .entry(bevy_label(desc.schedule))
@@ -3821,6 +3835,18 @@ impl ViewState {
     }
 }
 
+/// A missing service must declare no access, not an optional mutable borrow:
+/// Option<ResMut<T>> still conflicts with other users when T exists.
+fn service_param<T: Resource<Mutability = bevy::ecs::component::Mutable>>(
+    enabled: bool,
+) -> DynParamBuilder<'static> {
+    if enabled {
+        DynParamBuilder::new(ParamBuilder::of::<Option<ResMut<T>>>())
+    } else {
+        DynParamBuilder::new(ParamBuilder::of::<()>())
+    }
+}
+
 /// Build the Bevy system that services one registered plugin system.
 ///
 /// `user` is carried as `usize` rather than `*mut c_void` so the closure stays
@@ -3833,6 +3859,7 @@ fn build_dispatcher(
     entry: sys::SystemEntry,
     user: usize,
     gate: GenGate,
+    services: u32,
 ) -> impl System<In = (), Out = ()> {
     let build_terms = plans.clone();
     // Latched off after a panic. Without this a system that panics does so every
@@ -3917,9 +3944,8 @@ fn build_dispatcher(
         // spawning mid-iteration is exactly as safe as a Rust system doing it.
         ParamBuilder::of::<Commands>(),
         // Read-only, and declared by every plugin system whether it reads input or
-        // not. That costs nothing to schedule — a shared borrow never conflicts —
-        // and it avoids the alternative, which is knowing at build time whether the
-        // plugin's signature mentions `Input`.
+        // not. These shared reads do not conflict with other plugin dispatchers;
+        // an engine system writing the input snapshot must still run separately.
         //
         // `Option`, because a host is not obliged to have input at all: a headless
         // server installs no input plugins, and a test app on `MinimalPlugins` has
@@ -3929,20 +3955,20 @@ fn build_dispatcher(
         ParamBuilder::of::<Option<Res<input::PluginInput>>>(),
         // Mesh reading. `Option`, because a headless host has no renderer and so
         // no `Assets<Mesh>` — a plugin there simply never gets geometry back.
-        ParamBuilder::of::<Option<ResMut<Assets<Mesh>>>>(),
+        service_param::<Assets<Mesh>>(services & sys::system_services::MESHES != 0),
         // Read-only, and `Mesh3d` is filter-only across the ABI (a plugin can
         // name it in `With` but never get a data cell for it), so this cannot
         // conflict with the dynamic queries above.
         ParamBuilder::of::<Query<&'static Mesh3d>>(),
         // HTTP delivery. `Option` because a host without an HTTP bridge simply
         // never completes a request, which a plugin sees as "not ready yet".
-        ParamBuilder::of::<Option<ResMut<PluginHttpInbox>>>(),
-        ParamBuilder::of::<Option<ResMut<PluginServiceReplies>>>(),
+        service_param::<PluginHttpInbox>(services & sys::system_services::HTTP != 0),
+        service_param::<PluginServiceReplies>(services & sys::system_services::REPLIES != 0),
         // The slot table, so `MeshSource::write` can resolve a handle the
         // plugin was handed at init.
         ParamBuilder::of::<Option<Res<PluginAssets>>>(),
         // Pixel writes for plugin-created images.
-        ParamBuilder::of::<Option<ResMut<Assets<Image>>>>(),
+        service_param::<Assets<Image>>(services & sys::system_services::IMAGES != 0),
         // Removal tracking. Declares no access at all — it reads a message
         // buffer, not component storage — so it can never conflict with the
         // dynamic queries above, and adding it to every dispatcher costs nothing
@@ -3975,12 +4001,12 @@ fn build_dispatcher(
                             time: Res<Time>,
                             mut commands: Commands,
                             plugin_input: Option<Res<input::PluginInput>>,
-                            mut mesh_assets: Option<ResMut<Assets<Mesh>>>,
+                            mesh_assets: DynSystemParam,
                             mesh_handles: Query<&Mesh3d>,
-                            http_inbox: Option<ResMut<PluginHttpInbox>>,
-                            service_replies: Option<ResMut<PluginServiceReplies>>,
+                            http_inbox: DynSystemParam,
+                            service_replies: DynSystemParam,
                             plugin_assets: Option<Res<PluginAssets>>,
-                            mut image_assets: Option<ResMut<Assets<Image>>>,
+                            image_assets: DynSystemParam,
                             removed_messages: &RemovedComponentMessages,
                             mut removed_cursors: Local<
             HashMap<ComponentId, MessageCursor<RemovedComponentEntity>>,
@@ -4001,6 +4027,16 @@ fn build_dispatcher(
             if gate.stale() {
                 return;
             }
+            // Downcasting can only recover the access the builder registered
+            // with Bevy. Undeclared services use (), with no resource borrow.
+            let mut mesh_assets = mesh_assets
+                .downcast::<Option<ResMut<Assets<Mesh>>>>().flatten();
+            let mut image_assets = image_assets
+                .downcast::<Option<ResMut<Assets<Image>>>>().flatten();
+            let http_inbox = http_inbox
+                .downcast::<Option<ResMut<PluginHttpInbox>>>().flatten();
+            let service_replies = service_replies
+                .downcast::<Option<ResMut<PluginServiceReplies>>>().flatten();
             // Everything the plugin sees lives in staging buffers we own. That
             // costs a copy per cell, but it is what makes the call sound: we
             // never expose a pointer into component storage whose layout the
@@ -4128,11 +4164,19 @@ fn build_dispatcher(
                 input: plugin_input
                     .as_ref()
                     .map_or(core::ptr::null(), |i| &i.0 as *const sys::InputState),
-                meshes: (&mut mesh_src as *mut MeshSourceImpl).cast(),
-                images: (&mut image_src as *mut ImageSourceImpl).cast(),
-                http: (&mut http_src as *mut HttpSourceImpl).cast(),
+                meshes: if services & sys::system_services::MESHES != 0 {
+                    (&mut mesh_src as *mut MeshSourceImpl).cast()
+                } else { std::ptr::null_mut() },
+                images: if services & sys::system_services::IMAGES != 0 {
+                    (&mut image_src as *mut ImageSourceImpl).cast()
+                } else { std::ptr::null_mut() },
+                http: if services & sys::system_services::HTTP != 0 {
+                    (&mut http_src as *mut HttpSourceImpl).cast()
+                } else { std::ptr::null_mut() },
                 removed: (&mut removed_src as *mut RemovedSourceImpl).cast(),
-                replies: (&mut reply_src as *mut ReplySourceImpl).cast(),
+                replies: if services & sys::system_services::REPLIES != 0 {
+                    (&mut reply_src as *mut ReplySourceImpl).cast()
+                } else { std::ptr::null_mut() },
                 diagnostics: (&mut diagnostic_src as *mut DiagnosticSourceImpl).cast(),
             };
 

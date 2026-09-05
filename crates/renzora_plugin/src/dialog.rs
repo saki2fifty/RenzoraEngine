@@ -226,6 +226,7 @@ impl Dialogs<'_> {
 }
 
 unsafe impl crate::ecs::SystemParam for Dialogs<'_> {
+    const SERVICES: u32 = sys::system_services::REPLIES;
     fn declare(ctx: &mut crate::ecs::InitCtx, b: &mut crate::ecs::SystemBuilder) {
         <Replies as crate::ecs::SystemParam>::declare(ctx, b);
     }

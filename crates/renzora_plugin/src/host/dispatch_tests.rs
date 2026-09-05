@@ -204,6 +204,7 @@ fn real_dispatcher_handles_empty_and_smaller_frames_after_warmup() {
             counter: Default::default(),
             at: 0,
         },
+        sys::system_services::ALL,
     );
     let mut schedule = Schedule::default();
     schedule.add_systems(system);
@@ -256,6 +257,7 @@ fn resource_table_refreshes_after_resource_removal_and_reinsertion() {
             counter: Default::default(),
             at: 0,
         },
+        sys::system_services::ALL,
     );
     let mut schedule = Schedule::default();
     schedule.add_systems(system);
@@ -318,6 +320,7 @@ fn run_command_probe(status: sys::SystemStatus) -> (u32, u32) {
             counter: Default::default(),
             at: 0,
         },
+        sys::system_services::ALL,
     );
     let mut schedule = Schedule::default();
     schedule.add_systems(system);

@@ -1599,4 +1599,25 @@ Their old entries are cleared between calls; resource addresses are resolved
 again each time. Deferred commands keep their own payload bytes until execution.
 This reduces allocation overhead but does not make dispatch allocation-free:
 growing buffers and copying command payloads can still allocate.
-Parallel scheduling and bounded reload cleanup are separate improvements.
+Bounded reload cleanup is a separate improvement.
+
+## Parallel system scheduling
+
+Systems built with the current SDK no longer reserve mutable mesh, image,
+HTTP-result and service-reply access unless their parameters need it. Independent
+systems can run in parallel; systems sharing writable components, resources or
+services still wait for each other through Bevy's scheduler. This removes an
+unnecessary scheduling restriction, not a guaranteed frame-rate increase.
+
+The SDK infers access from parameters such as `Meshes`, `Images`, `Http` and
+`Replies` (including `Dialogs`). `Commands` remains deferred and does not itself
+reserve these services. Custom `SystemParam` and `ResourceParam` implementations
+default to conservative access; override `SERVICES` only when the implementation
+can operate with the other sources absent.
+
+At the C ABI, version **4.11** appends `add_system_with_services_v1`. It accepts
+the `system_services` bit mask, refuses unknown bits, and supplies null pointers
+for undeclared mutable service sources. `SystemDesc.flags` remains reserved and
+zero. Existing plugins using `add_system` retain their previous service access;
+rebuilding against the new SDK enables inference. Newly built plugins require a
+4.11-or-newer compatible host and refuse older hosts during negotiation.

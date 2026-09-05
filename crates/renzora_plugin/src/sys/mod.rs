@@ -279,7 +279,25 @@ pub const VERSION_MAJOR: u32 = 4;
 /// crate's own semver, and only a change to the *mechanism* moves this. A plugin
 /// that wants audio some day should not have to declare a minimum ABI that also
 /// encodes animation's history.
-pub const VERSION_MINOR: u32 = 10;
+/// 4.10 -> 4.11 appends `Interface::add_system_with_services_v1`; existing
+/// `add_system` calls retain all mutable services and all prior field layouts.
+pub const VERSION_MINOR: u32 = 11;
+
+/// Mutable call services accepted by `Interface::add_system_with_services_v1`.
+/// Bits are frozen; unknown bits are refused. Zero declares no mutable services.
+/// Component and resource terms remain independently required.
+pub mod system_services {
+    /// Mesh reads and writes (the source supports both operations).
+    pub const MESHES: u32 = 1;
+    /// Image pixel writes.
+    pub const IMAGES: u32 = 2;
+    /// Consuming HTTP responses and streaming chunks.
+    pub const HTTP: u32 = 4;
+    /// Consuming service replies, including dialog results.
+    pub const REPLIES: u32 = 8;
+    /// Conservative access for legacy or custom parameters.
+    pub const ALL: u32 = MESHES | IMAGES | HTTP | REPLIES;
+}
 
 /// The single symbol a plugin cdylib must export. See [`ExtensionInit`].
 pub const INIT_SYMBOL: &str = "renzora_plugin_init";
@@ -2793,6 +2811,17 @@ interface! {
     /// mean a session's cookies and connection pool split across two of them.
     add_net_backend:
         unsafe extern "C" fn(host: *mut Host, desc: *const NetBackendDesc) -> RegisterStatus,
+
+    // ── Added in MINOR 4.11 ──────────────────────────────────────────────
+    // Append only: old plugins still call add_system with all services.
+    /// Register with explicit mutable service access; see [`system_services`].
+    /// Undeclared sources in `SystemCall` are null. Unknown bits are refused.
+    /// `SystemDesc::flags` remains reserved and must be zero.
+    add_system_with_services_v1: unsafe extern "C" fn(
+        host: *mut Host,
+        desc: *const SystemDesc,
+        services: u32,
+    ) -> RegisterStatus,
 }
 
 /// How the inspector should edit one numeric field.

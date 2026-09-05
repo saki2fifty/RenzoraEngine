@@ -545,6 +545,7 @@ const GOLDEN: &[Golden] = &[
             // `renzora.http` service, which is the same protocol pointed the
             // other way (a plugin asking the host to fetch).
             "add_net_backend: unsafe extern \"C\" fn(host: *mut Host, desc: *const NetBackendDesc) -> RegisterStatus",
+            "add_system_with_services_v1: unsafe extern \"C\" fn( host: *mut Host, desc: *const SystemDesc, services: u32, ) -> RegisterStatus",
         ],
     },
     Golden {

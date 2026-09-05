@@ -335,6 +335,7 @@ impl Http<'_> {
 }
 
 unsafe impl crate::ecs::SystemParam for Http<'_> {
+    const SERVICES: u32 = sys::system_services::HTTP;
     fn declare(_: &mut crate::ecs::InitCtx, _: &mut crate::ecs::SystemBuilder) {}
     unsafe fn fetch(call: *const sys::SystemCall, _: &mut usize) -> Self {
         Http {

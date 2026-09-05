@@ -150,6 +150,7 @@ impl Diagnostics<'_> {
 // something the plugin can name, and the host declares its own access on the
 // dispatcher system.
 unsafe impl crate::ecs::SystemParam for Diagnostics<'_> {
+    const SERVICES: u32 = 0;
     fn declare(_: &mut crate::ecs::InitCtx, _: &mut crate::ecs::SystemBuilder) {}
     unsafe fn fetch(call: *const sys::SystemCall, _: &mut usize) -> Self {
         Diagnostics {

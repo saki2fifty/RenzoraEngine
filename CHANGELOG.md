@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 22:51 UTC
+
+- Allowed independent Rust plugin systems to run in parallel instead of waiting on services they do not use. Systems that share writable data still run safely in turn.
+- Preserved existing plugins' access; rebuilding with the updated plugin SDK enables the narrower scheduling automatically. New plugin builds require a compatible updated editor or runtime.
+
 ## September 5, 2026 — 21:34 UTC
 
 - Reduced repeated plugin memory allocation by reusing call tables and command lists, while keeping each call's data separate. Added checks for failed calls and resources being removed and restored.
