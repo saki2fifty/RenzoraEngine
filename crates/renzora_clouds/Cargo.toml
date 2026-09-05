@@ -1,0 +1,12 @@
+[package]
+name = "renzora_clouds"
+version = "0.1.0"
+edition = "2021"
+description = "Volumetric cloud rendering and GPU noise baking"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false }
+
+[lints]
+workspace = true

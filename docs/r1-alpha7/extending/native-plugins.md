@@ -142,6 +142,8 @@ Procedural trees use `renzora_procedural_tree` for mesh generation and wind inte
 
 Pool water uses `renzora_pool_water` for rendering and ripple simulation and `renzora_pool_water_editor` for its 14 inspector fields. Settings have one definition in `renzora::pool_water`, preserving the scene name `pool_water::PoolWater` and the existing `pool_water` enable preference. Shader contents are unchanged; their embedded lookup uses the runtime crate's namespace.
 
+Clouds use `renzora_clouds` for rendering and GPU noise baking, with the 28-field inspector in `renzora_clouds_editor`. Both keep the existing shared `CloudsData` and `clouds` preference. The two embedded shaders use the runtime crate namespace; lighting, quality gating and noise-generation behavior are unchanged.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 5, 2026 — 14:31 UTC
 
 - Moved pool-water rendering into the engine with separate editor controls, preserving saved settings, ripple simulation and water shaders.
+- Separated volumetric clouds from their editor controls, retaining atmosphere lighting, noise baking, saved settings and quality controls.
 
 ## September 5, 2026 — 14:06 UTC
 

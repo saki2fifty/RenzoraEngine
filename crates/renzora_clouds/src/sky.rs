@@ -233,7 +233,12 @@ impl<'a> Sky<'a> {
     /// `sun_direction` points *toward* the sun and is in world space, where +Y
     /// is up, which is also the deck's local up — over any scene the engine can
     /// hold, the surface under it is flat.
-    pub fn transfer(&self, deck_altitude: f32, sun_direction: Vec3, reference: &SkyReference) -> SkyTransfer {
+    pub fn transfer(
+        &self,
+        deck_altitude: f32,
+        sun_direction: Vec3,
+        reference: &SkyReference,
+    ) -> SkyTransfer {
         if !reference.is_usable() {
             return SkyTransfer::NONE;
         }
@@ -274,7 +279,10 @@ impl<'a> Sky<'a> {
                 self.radiance(origin, sunward, sun).as_vec3(),
                 reference.horizon,
             ),
-            horizon_away: ratio(self.radiance(origin, away, sun).as_vec3(), reference.horizon),
+            horizon_away: ratio(
+                self.radiance(origin, away, sun).as_vec3(),
+                reference.horizon,
+            ),
         }
     }
 }

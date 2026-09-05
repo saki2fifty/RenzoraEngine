@@ -1,0 +1,12 @@
+[package]
+name = "renzora_clouds_editor"
+version = "0.1.0"
+edition = "2021"
+description = "Editor-only cloud inspector"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+
+[lints]
+workspace = true

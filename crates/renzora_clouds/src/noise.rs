@@ -118,8 +118,7 @@ impl FromWorld for CloudNoisePipelines {
     fn from_world(world: &mut World) -> Self {
         let shader: Handle<Shader> = world
             .resource::<AssetServer>()
-            // Crate name in the path — `clouds`, not `renzora_clouds`.
-            .load("embedded://clouds/clouds_bake.wgsl");
+            .load("embedded://renzora_clouds/clouds_bake.wgsl");
 
         let layout = BindGroupLayoutDescriptor::new(
             "cloud_noise_layout",
@@ -198,12 +197,13 @@ fn bake_cloud_noise(
 
     {
         let _span = info_span!("clouds.bake_noise").entered();
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_noise_bake"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_noise_bake"),
+                    timestamp_writes: None,
+                });
         pass.set_bind_group(0, &bind_group, &[]);
 
         pass.set_pipeline(base_pipeline);

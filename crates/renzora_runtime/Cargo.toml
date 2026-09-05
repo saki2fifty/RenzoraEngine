@@ -338,6 +338,7 @@ renzora_skybox = { path = "../renzora_skybox", optional = true }
 # loading the workspace, including to run the generator that would fix
 # it. If you hit that, delete the offending line below.
 renzora_auto_exposure = { path = "../renzora_auto_exposure" }
+renzora_clouds = { path = "../renzora_clouds" }
 renzora_native_plugin = { path = "../renzora_native_plugin" }
 renzora_net = { path = "../renzora_net" }
 renzora_night_stars = { path = "../renzora_night_stars" }

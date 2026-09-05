@@ -22,7 +22,6 @@ use bevy::light::atmosphere::ScatteringMedium;
 use bevy::light::Atmosphere;
 use bevy::prelude::*;
 
-pub mod inspector;
 pub mod material;
 pub mod noise;
 pub mod sky;
@@ -35,17 +34,7 @@ pub use sky::SkyTransfer;
 // Data
 // ============================================================================
 
-/// The authored settings now live in the **contract crate**, not here.
-///
-/// `renzora_level_presets` builds a sky by inserting `CloudsData`, and it is
-/// compiled into the editor binary while this renderer is a plugin loaded at
-/// runtime — a binary cannot name a type that lives in a plugin. Moving it to
-/// `renzora` gives both sides one definition and therefore one `TypeId`; two
-/// definitions would mean the preset inserts a component this plugin's queries
-/// never match, and the sky silently never appears.
-///
-/// Re-exported so the rest of this crate (and anything that used
-/// `renzora_clouds::CloudsData`) keeps its old path.
+/// Shared authored settings, also used by presets and the editor inspector.
 pub use renzora::CloudsData;
 
 // ============================================================================
@@ -77,7 +66,6 @@ const MIN_TRANSMITTANCE: f32 = 0.02;
 /// story. Widen [`DAY_ELEVATION`] for a slower fade.
 const NIGHT_ELEVATION: f32 = 0.0;
 const DAY_ELEVATION: f32 = 8.0;
-
 
 /// Step caps below `High`. Both marches are per-pixel, so the tier cap is the
 /// difference between clouds costing a slice of the frame and costing the frame.
@@ -279,12 +267,7 @@ fn atmosphere_transfer(
             atmosphere.outer_radius,
             Some(atmosphere.medium.id()),
         ),
-        None => (
-            fallback,
-            FALLBACK_INNER_RADIUS,
-            FALLBACK_OUTER_RADIUS,
-            None,
-        ),
+        None => (fallback, FALLBACK_INNER_RADIUS, FALLBACK_OUTER_RADIUS, None),
     };
 
     let deck_altitude = (clouds_data.bottom_height + clouds_data.top_height) * 0.5;
@@ -295,9 +278,7 @@ fn atmosphere_transfer(
     // The reference is three ray integrations and depends on nothing that moves,
     // so only the four live ones are paid for per frame.
     let (use_fallback, reference) = match &state.sky_reference {
-        Some((cached, used_fallback, reference)) if *cached == key => {
-            (*used_fallback, *reference)
-        }
+        Some((cached, used_fallback, reference)) if *cached == key => (*used_fallback, *reference),
         _ => {
             // Measure the scene's own medium, and fall back to Earth's if it
             // turns out not to scatter — which is how a switched-off sky reads.
@@ -318,8 +299,11 @@ fn atmosphere_transfer(
     if use_fallback {
         earth().transfer(deck_altitude, sun_dir, &reference)
     } else {
-        sky::Sky::new(medium, inner_radius, outer_radius)
-            .transfer(deck_altitude, sun_dir, &reference)
+        sky::Sky::new(medium, inner_radius, outer_radius).transfer(
+            deck_altitude,
+            sun_dir,
+            &reference,
+        )
     }
 }
 
@@ -364,10 +348,18 @@ fn sync_clouds(
     // How many candidates exist at all — more than one is itself the bug in the
     // "alternating source" case, and `find` would hide it.
     let enabled_sources = clouds_query.iter().filter(|(_, c)| c.enabled).count();
-    Diag::track(&mut clouds_state.diag.allowed, "quality allows clouds", clouds_allowed);
+    Diag::track(
+        &mut clouds_state.diag.allowed,
+        "quality allows clouds",
+        clouds_allowed,
+    );
     Diag::track(
         &mut clouds_state.diag.source,
-        if enabled_sources > 1 { "source (MULTIPLE enabled!)" } else { "source" },
+        if enabled_sources > 1 {
+            "source (MULTIPLE enabled!)"
+        } else {
+            "source"
+        },
         active_clouds.map(|(e, _)| e),
     );
 
@@ -400,10 +392,17 @@ fn sync_clouds(
     // An id that alternates frame to frame means two active `Camera3d` and an
     // unordered `find` — the dome would be re-centred on a different eye each
     // frame, which reads exactly as flicker.
-    let active_cameras = camera_query.iter().filter(|(_, _, c, _)| c.is_active).count();
+    let active_cameras = camera_query
+        .iter()
+        .filter(|(_, _, c, _)| c.is_active)
+        .count();
     Diag::track(
         &mut clouds_state.diag.camera,
-        if active_cameras > 1 { "camera (MULTIPLE active!)" } else { "camera" },
+        if active_cameras > 1 {
+            "camera (MULTIPLE active!)"
+        } else {
+            "camera"
+        },
         Some(camera_entity),
     );
 
@@ -512,7 +511,11 @@ fn sync_clouds(
         sun_dir,
     );
 
-    let tint = Vec3::new(clouds_data.color.0, clouds_data.color.1, clouds_data.color.2);
+    let tint = Vec3::new(
+        clouds_data.color.0,
+        clouds_data.color.1,
+        clouds_data.color.2,
+    );
     let sun_color = tint * sun_tint * clouds_data.brightness * sun_power * transfer.sun;
 
     // No night term here: `day_factor` fades the deck out in the shader, and the
@@ -542,7 +545,7 @@ fn sync_clouds(
 
     // ── Step budget ──
     let (view_steps, shadow_steps) = match tier {
-         Some(renzora::core::viewport_types::GraphicsQuality::High) | None => {
+        Some(renzora::core::viewport_types::GraphicsQuality::High) | None => {
             (clouds_data.raymarch_steps, clouds_data.shadow_steps)
         }
         _ => (
@@ -560,8 +563,7 @@ fn sync_clouds(
         sun_color: sun_color.extend(0.0),
         ambient_top: ambient_top.extend(0.0),
         ambient_bottom: ambient_bottom.extend(0.0),
-        haze_sunward: (horizon * transfer.horizon_sunward)
-            .extend(clouds_data.atmosphere_strength),
+        haze_sunward: (horizon * transfer.horizon_sunward).extend(clouds_data.atmosphere_strength),
         haze_away: (horizon * transfer.horizon_away).extend(0.0),
         wind_offset: clouds_state.wind_offset.extend(0.0),
         morph_offset: Vec4::new(
@@ -718,12 +720,15 @@ fn sync_clouds(
 // Plugin
 // ============================================================================
 
+/// Install volumetric cloud rendering without inspector dependencies.
 #[derive(Default)]
 pub struct CloudsPlugin;
 
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
-        info!("[clouds] native plugin");
+        if !renzora::builtin_plugin_enabled(app, "clouds") {
+            return;
+        }
         bevy::asset::embedded_asset!(app, "clouds.wgsl");
         bevy::asset::embedded_asset!(app, "clouds_bake.wgsl");
         app.register_type::<CloudsData>()
@@ -733,18 +738,123 @@ impl Plugin for CloudsPlugin {
             ))
             .init_resource::<CloudsState>()
             .add_systems(Update, sync_clouds);
-
-        inspector::register(app);
     }
 }
 
-// `Runtime`, explicitly: `plugin!` defaults to `Editor` where `add!` defaulted
-// to `Runtime`, so omitting it would stop shipping clouds to games.
-renzora::plugin!(CloudsPlugin, Runtime);
+renzora::add!(CloudsPlugin, Runtime);
 
 #[cfg(test)]
 mod tests {
     use super::CloudsData;
+
+    fn app() -> bevy::prelude::App {
+        use bevy::prelude::*;
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::render::sync_world::SyncWorldPlugin,
+        ));
+        app.init_asset::<Mesh>()
+            .init_asset::<Image>()
+            .init_asset::<super::ScatteringMedium>();
+        app.insert_resource(renzora::DisabledPlugins::default());
+        app.add_plugins(super::CloudsPlugin);
+        app.finish();
+        app.cleanup();
+        app
+    }
+
+    #[test]
+    fn embedded_shaders_resolve_and_material_name_stays_stable() {
+        use bevy::prelude::*;
+        let app = app();
+        for (uri, expected) in [
+            (
+                "embedded://renzora_clouds/clouds.wgsl",
+                include_bytes!("clouds.wgsl").as_slice(),
+            ),
+            (
+                "embedded://renzora_clouds/clouds_bake.wgsl",
+                include_bytes!("clouds_bake.wgsl").as_slice(),
+            ),
+        ] {
+            let path = bevy::asset::AssetPath::from(uri);
+            let source = app
+                .world()
+                .resource::<AssetServer>()
+                .get_source(path.source())
+                .unwrap();
+            let mut reader = bevy::tasks::block_on(source.reader().read(path.path())).unwrap();
+            let mut bytes = Vec::new();
+            bevy::tasks::block_on(reader.read_to_end(&mut bytes)).unwrap();
+            assert_eq!(bytes, expected);
+        }
+        assert_eq!(
+            super::CloudMaterial::type_path(),
+            "clouds::material::CloudMaterial"
+        );
+    }
+
+    #[test]
+    fn dome_reuses_assets_follows_camera_and_retires_when_disabled() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        let mut app = app();
+        let source = app.world_mut().spawn(CloudsData::default()).id();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                GlobalTransform::from_translation(Vec3::new(2.0, 3.0, 4.0)),
+            ))
+            .id();
+        app.world_mut().run_system_once(super::sync_clouds).unwrap();
+        let state = app.world().resource::<super::CloudsState>();
+        let dome = state.entity.unwrap();
+        let mesh = state.mesh_handle.clone().unwrap();
+        let material = state.material_handle.clone().unwrap();
+        assert!(app.world().get::<renzora::HideInHierarchy>(dome).is_some());
+        assert_eq!(
+            app.world().get::<Transform>(dome).unwrap().translation,
+            Vec3::new(2.0, 3.0, 4.0)
+        );
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(GlobalTransform::from_translation(Vec3::new(
+                20.0, 30.0, 40.0,
+            )));
+        app.world_mut().run_system_once(super::sync_clouds).unwrap();
+        let state = app.world().resource::<super::CloudsState>();
+        assert_eq!(state.entity, Some(dome));
+        assert_eq!(state.mesh_handle.as_ref(), Some(&mesh));
+        assert_eq!(state.material_handle.as_ref(), Some(&material));
+        assert_eq!(
+            app.world().get::<Transform>(dome).unwrap().translation,
+            Vec3::new(20.0, 30.0, 40.0)
+        );
+        app.world_mut()
+            .get_mut::<CloudsData>(source)
+            .unwrap()
+            .enabled = false;
+        app.world_mut().run_system_once(super::sync_clouds).unwrap();
+        assert!(app.world().get_entity(dome).is_err());
+        assert!(app
+            .world()
+            .resource::<super::CloudsState>()
+            .entity
+            .is_none());
+    }
+
+    #[test]
+    fn disabled_startup_does_not_install_rendering() {
+        use bevy::prelude::*;
+        let mut app = App::new();
+        app.insert_resource(renzora::DisabledPlugins(vec!["clouds".into()]));
+        app.add_plugins(super::CloudsPlugin);
+        assert!(!app.world().contains_resource::<super::CloudsState>());
+        app.update();
+    }
 
     /// The editor keeps preview rigs (material, model thumbnail, particle,
     /// animation studio) alive in the same World, each with its own key and
@@ -812,8 +922,7 @@ mod tests {
         let mut previous = 0.0;
         let mut saw_partial = false;
         for step in 0..=64 {
-            let elev = NIGHT_ELEVATION
-                + (DAY_ELEVATION - NIGHT_ELEVATION) * (step as f32 / 64.0);
+            let elev = NIGHT_ELEVATION + (DAY_ELEVATION - NIGHT_ELEVATION) * (step as f32 / 64.0);
             let d = day(elev);
             assert!(d >= previous, "fade reversed at {elev}°");
             if d > 0.05 && d < 0.95 {
@@ -871,8 +980,7 @@ mod tests {
         let fine_step_km = thickness_km * fine_fraction;
 
         // Mirrors `detail_resolved` in the shader.
-        let cycles_per_step =
-            fine_step_km * 1.6 * clouds.scale * clouds.detail_scale / 32.0;
+        let cycles_per_step = fine_step_km * 1.6 * clouds.scale * clouds.detail_scale / 32.0;
 
         assert!(
             cycles_per_step < safe,
@@ -910,8 +1018,10 @@ mod tests {
                     .map(|line| line.to_string()),
             )
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         validate("clouds", &source);
     }
 }

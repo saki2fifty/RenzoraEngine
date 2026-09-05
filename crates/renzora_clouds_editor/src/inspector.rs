@@ -1,13 +1,4 @@
-//! The Clouds inspector.
-//!
-//! This was a separate `Editor`-scope crate so the lean runtime half carried no
-//! editor contract. As one native plugin it is a module again: `Runtime` scope
-//! loads in the editor *and* a copy-based export, and a game pays a single `Vec`
-//! push into a registry it never reads.
-//!
-//! It already imported the contract types from `renzora` rather than from
-//! `renzora_editor_framework`, so nothing here had to change but the path to
-//! `CloudsData` — which now lives in the contract crate too.
+//! Cloud inspector fields, kept out of the runtime renderer.
 
 use bevy::prelude::*;
 use renzora::{AppEditorExt, CloudsData, FieldDef, FieldType, FieldValue, InspectorEntry};
@@ -172,9 +163,34 @@ fn inspector_entry() -> InspectorEntry {
     }
 }
 
-/// Registered from the one plugin's `build`, unconditionally — a native plugin
-/// is compiled with no cargo features, so a `cfg(feature = "editor")` gate would
-/// be permanently false and the section would vanish with nothing logged.
+/// Register controls against the shared cloud settings.
 pub(crate) fn register(app: &mut App) {
     app.register_inspector(inspector_entry());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_fields_integer_sliders_and_shared_component() {
+        let entry = inspector_entry();
+        assert_eq!(entry.fields.len(), 28);
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        entry.add_fn.unwrap()(&mut world, entity);
+        assert!((entry.has_fn)(&world, entity));
+        let steps = entry
+            .fields
+            .iter()
+            .find(|field| field.name == "Raymarch Steps")
+            .unwrap();
+        assert!(matches!(steps.field_type, FieldType::Int { .. }));
+        (steps.set_fn)(&mut world, entity, FieldValue::Float(23.7));
+        assert_eq!(world.get::<CloudsData>(entity).unwrap().raymarch_steps, 24);
+        entry.set_enabled_fn.unwrap()(&mut world, entity, false);
+        assert!(!world.get::<CloudsData>(entity).unwrap().enabled);
+        entry.remove_fn.unwrap()(&mut world, entity);
+        assert!(!(entry.has_fn)(&world, entity));
+    }
 }
