@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 23:52 UTC
+
+- Made plugin reload retries use separate files, preventing them from overwriting code that is still running.
+- Protected reload files belonging to other running editors. Leftover files from completed sessions are cleaned up when a new session starts.
+
 ## September 5, 2026 — 23:06 UTC
 
 - Stopped plugin reloads from accumulating inactive systems and their working memory. A 1,000-reload test keeps one active system rather than growing the list.

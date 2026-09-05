@@ -30,6 +30,7 @@ pub mod loader;
 
 mod call_buffers;
 mod system_lifecycle;
+mod shadow_images;
 
 pub use system_lifecycle::install as install_system_maintenance;
 

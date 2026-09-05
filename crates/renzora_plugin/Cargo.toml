@@ -150,7 +150,7 @@ net = ["std"]
 # Requires `std` — it links Bevy, `libloading` and the host's own threading, none
 # of which exist without it. That is not a limitation to lift: the host is the
 # editor, and the editor is a windowed GPU application.
-host = ["std", "dep:bevy", "dep:libloading", "dep:notify-debouncer-full", "dep:blake3"]
+host = ["std", "dep:bevy", "dep:libloading", "dep:notify-debouncer-full", "dep:blake3", "dep:tempfile"]
 # The 3D half of the host: `StandardMaterial` / `MeshMaterial3d`, which come from
 # `bevy_pbr`. A 2D-only export strips that, so without this `add_material`
 # refuses with a warning and `MaterialSlot::Standard` does not exist. Plugins
@@ -199,6 +199,8 @@ libm = { version = "0.2", optional = true }
 # need it — `durable_type_path` lives behind `host` because the host is the
 # sole constructor of the durable name.
 blake3 = { version = "1", optional = true }
+# Unique host-owned reload images; never pulled into a standalone guest SDK.
+tempfile = { version = "3", optional = true }
 
 # NOTE: the tests deliberately link NO plugin from `plugins/`. A path dependency
 # on one would drag it back into the engine's workspace — cargo rejects a path dep

@@ -1634,3 +1634,11 @@ active schedule begins on its next run.
 The host reuses a bounded pool of private scheduling sets and releases retired
 systems' owned buffers. This does **not** unload old library images: callback and
 backend-thread lifetime safety still requires those images to remain mapped.
+
+Each editor reload attempt gets a unique private image, including retries of a
+failed generation. Copies are exposed to the loader only after copying finishes;
+a detected source size or modification-time change rejects the copy.
+Reload directories are protected by process-held file locks. New sessions clean
+up recognized directories whose owning process has exited, but leave live
+sessions, unknown directories and older flat `.reload/` files alone. Images in
+a running session are retained; this is not an in-session memory or disk limit.

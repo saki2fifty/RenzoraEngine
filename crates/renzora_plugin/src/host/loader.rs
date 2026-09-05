@@ -652,14 +652,13 @@ fn contains_symbol(path: &Path, needle: &[u8]) -> bool {
 /// Copy a plugin image somewhere private before loading it, and return where.
 ///
 /// **This is what makes reload possible on Windows at all.** A mapped DLL is
-/// locked, and the loader never unmaps one (retired systems still point into it),
+/// locked, and the loader retains images until full callback teardown is proven,
 /// so loading `plugins/drift.dll` directly would leave that file permanently
 /// unwritable — `cargo build` could not overwrite it and the staging copy would
 /// fail with "file in use". Loading a copy leaves the original free.
 ///
-/// The generation is in the filename because the previous copy is *also* still
-/// mapped and locked. Copies accumulate, one per reload, alongside the leaked
-/// library images they belong to; the directory is cleared at startup.
+/// Each attempt gets a unique path, even when a failed generation is retried.
+/// A process lease protects its session directory from other editors' cleanup.
 ///
 /// `.reload` has no file extension, so [`load_dir`]'s extension filter skips it
 /// and the copies are never mistaken for plugins to load.
@@ -667,27 +666,13 @@ fn contains_symbol(path: &Path, needle: &[u8]) -> bool {
 /// **Editor-only.** A shipped game opens `plugins/<name>.dll` itself — see
 /// [`load_one`] for why copying is actively harmful there.
 fn shadow_copy(path: &Path, generation: u32) -> std::io::Result<PathBuf> {
-    let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(".reload");
-    std::fs::create_dir_all(&dir)?;
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-    let ext = std::env::consts::DLL_EXTENSION;
-    let dst = dir.join(format!("{stem}-{generation}.{ext}"));
-    std::fs::copy(path, &dst)?;
-    Ok(dst)
+    super::shadow_images::copy(path, generation)
 }
 
-/// Remove shadow copies left by earlier sessions.
-///
-/// Editor-only, like the copies themselves. Safe here and nowhere else: at
-/// `build` time nothing is mapped yet, so no copy is locked. Skipping a file
-/// that refuses to delete is deliberate — a stale image is harmless (nothing
-/// scans this directory), and failing the whole boot over it would not be.
-fn clear_shadow_dir(dir: &Path) {
-    let shadow = dir.join(".reload");
-    if let Ok(entries) = std::fs::read_dir(&shadow) {
-        for entry in entries.flatten() {
-            let _ = std::fs::remove_file(entry.path());
-        }
+/// Reclaim only owned session directories whose process lease has expired.
+fn prepare_shadow_dir(dir: &Path) {
+    if let Err(error) = super::shadow_images::prepare(dir) {
+        warn!("[plugin] could not prepare reload images in {}: {error}", dir.display());
     }
 }
 
@@ -1757,12 +1742,10 @@ impl Plugin for RenzoraPluginHostPlugin {
             .unwrap_or_else(|| PathBuf::from("plugins"));
 
         register_exposed_components(app.world_mut());
-        // Nothing is mapped yet, so last session's shadow copies are still
-        // deletable. After this they are not. Editor-only: only the editor
-        // makes these, and a game runtime launched from the editor's own
-        // directory must not delete images that editor is running on.
+        // Other editor processes may still own mapped images here. Leases let
+        // us reclaim expired sessions without touching their live files.
         if self.is_editor {
-            clear_shadow_dir(&dir);
+            prepare_shadow_dir(&dir);
         }
 
         // Reload machinery, before the initial load so a plugin that somehow
