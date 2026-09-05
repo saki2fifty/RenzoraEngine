@@ -26,6 +26,8 @@ pub use bevy;
 pub mod core;
 pub use core::*;
 
+pub mod runtime_capabilities;
+
 // ── Global illumination contract ─────────────────────────────────────────
 // GI settings components (`RtLighting`, `LumenLighting`) + the Lumen
 // diagnostics snapshot. Shared here so the GI distribution plugin

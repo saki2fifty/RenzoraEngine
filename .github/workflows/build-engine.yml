@@ -510,9 +510,8 @@ jobs:
       # macOS is packed BEFORE it is signed; that only applies to the platforms
       # it still builds.)
       #
-      # So this catches whatever arrived unpacked. `upx -t` succeeds only on an
-      # already-packed file, which makes the pass idempotent and safe to run over
-      # every artifact rather than special-casing a lane.
+      # The adapter also restores readable runtime capability metadata on
+      # already-packed container artifacts. It never executes their code.
       #
       # macOS is pruned, and has to be. Packing rewrites the executable, which
       # invalidates the ad-hoc signature `fixup_macos` applied — and arm64 macOS
@@ -528,14 +527,14 @@ jobs:
           tar -xJf /tmp/upx.tar.xz -C /tmp
           UPX=/tmp/upx-${UPX_VERSION}-amd64_linux/upx
           while IFS= read -r -d '' f; do
-            if "$UPX" -t "$f" >/dev/null 2>&1; then continue; fi
             before=$(stat -c %s "$f")
-            if "$UPX" --best --lzma -q "$f" >/dev/null 2>&1; then
+            if python3 scripts/compress-runtime.py "$UPX" "$f"; then
               after=$(stat -c %s "$f")
               awk -v b="$before" -v a="$after" -v n="$f" \
                 'BEGIN { printf "packed %s: %.1f MB -> %.1f MB (%.0f%% saved)\n", n, b/1048576, a/1048576, (1-a/b)*100 }'
             else
-              echo "WARN: upx declined $f — shipping it uncompressed"
+              echo "ERROR: runtime compression/metadata preparation failed for $f"
+              exit 1
             fi
           done < <(find artifacts -path '*macos*' -prune -o \
                      \( -name 'renzora' -o -name 'renzora.exe' \

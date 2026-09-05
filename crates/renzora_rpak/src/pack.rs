@@ -246,6 +246,15 @@ impl RpakPacker {
         out.write_all(&footer)?;
         out.flush()?;
 
+        // Appending creates a new file rather than copying the executable, so
+        // Unix otherwise drops its execute bits. Never carry privilege bits.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(binary_path)?.permissions().mode() & 0o777;
+            std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(mode))?;
+        }
+
         Ok(())
     }
 }
@@ -1375,8 +1384,21 @@ mod tests {
         let combined_path = dir.join("fake_exe_with_rpak.bin");
 
         std::fs::write(&host_path, b"FAKE_HOST_BINARY_BYTES").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&host_path, std::fs::Permissions::from_mode(0o6750)).unwrap();
+        }
         p.append_to_binary(&host_path, &combined_path, 3)
             .expect("append");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&combined_path).unwrap().permissions().mode() & 0o7777,
+                0o750
+            );
+        }
 
         let archive = RpakArchive::from_binary(&combined_path)
             .expect("read")

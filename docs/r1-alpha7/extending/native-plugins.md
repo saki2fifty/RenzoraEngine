@@ -8,7 +8,9 @@ Normal builds include the migrated built-in game features. The runtime crate als
 
 The lean exporter removes the migrated renderers when 3D rendering is disabled, and removes 3D text when UI is disabled, so those plugins do not silently re-enable excluded subsystems. Individual plugin selection integration remains in progress. Disabling scripting entirely is a separate, currently broken runtime feature combination.
 
-The shared project configuration accepts `builtin_runtime_plugins` as a list of those stable IDs. When present, game startup uses that list instead of the local editor enable preferences for these built-ins; an empty list disables them all. Missing fields retain the old behavior, and editor sessions ignore this game-only selection. This startup support does not yet imply that older export templates support the field or that the export screen writes it.
+The export Plugins tab lists these eight features as **Built-in runtime** choices, separately from plugin files. Export presets save both lists and migrate older native-plugin selections. The exporter writes `builtin_runtime_plugins` into the packed project configuration for both client and server. Game startup uses that list instead of local editor enable preferences; an empty list disables all eight. Missing fields retain the old behavior, and editor sessions ignore this game-only selection.
+
+Copy-based exports disable unselected built-ins at startup; their compiled code remains in the copied runtime. Lean builds also remove the unselected runtime dependencies. Disabling 3D rendering removes the seven rendering built-ins, and disabling UI removes 3D text. Before packaging, the exporter checks the actual runtime's versioned feature record. Older or mismatched templates are rejected instead of silently ignoring the selection. Published compressed templates preserve that record; manually compressed older copies may need UPX to inspect a temporary unpacked copy.
 
 ## Choose the right tier
 
@@ -132,7 +134,7 @@ The repository still retains the older `renzora::plugin!` shared-image loader an
 
 Replacement build preparation explicitly preserves the eleven existing native distribution plugins: ai_chat, auto_exposure, clouds, gamepad, mesh_draw, night_stars, pool_water, procedural_tree, spline, text3d and vignette. Their editor/runtime scope is preserved through generated static wiring. Final removal of legacy loaders and export machinery is later migration cleanup.
 
-Phase 6 is moving those built-ins into ordinary workspace crates. Spline support now lives in `renzora_spline`, retains its shared `SplinePath` scene type and existing `spline` disable preference, and appears as Built-in in Settings. Build-kit preparation uses the migrated crate directly instead of adding another copy. The remaining feature migrations are still in progress.
+All eleven first-party native plugins now live in ordinary workspace crates. Spline support lives in `renzora_spline`, retains its shared `SplinePath` scene type and existing `spline` disable preference, and appears as Built-in in Settings. Build-kit preparation uses migrated crates directly instead of adding duplicate copies. This does not remove third-party C-ABI plugin support or the separate restart-required engine-plugin tier.
 
 Old native folders for migrated built-ins are ignored during startup and export discovery, even if files remain from an earlier installation. Their artwork still ships for the Settings cards; disabling a built-in does not load its old DLL as a fallback.
 

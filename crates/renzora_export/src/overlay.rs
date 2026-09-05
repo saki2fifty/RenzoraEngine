@@ -152,6 +152,8 @@ pub struct ExportOverlayState {
     pub available_plugins: Vec<renzora_plugin::host::loader::PluginInfo>,
     /// Which plugins are selected for export (by id).
     pub selected_plugins: std::collections::HashSet<String>,
+    /// Built-in choices have no DLL path and cannot collide with file plugins.
+    pub selected_builtin_plugins: std::collections::HashSet<String>,
     /// Files beside the binary, or compiled into it. See [`PluginLinkMode`].
     pub plugin_link_mode: PluginLinkMode,
     /// Engine capability toggles (id → on). Off ⇒ its Bevy features are stripped
@@ -220,6 +222,7 @@ impl Default for ExportOverlayState {
             progress: ExportProgress::Idle,
             active_task: None,
             available_plugins: Vec::new(),
+            selected_builtin_plugins: crate::builtins::defaults(),
             selected_plugins: std::collections::HashSet::new(),
             plugin_link_mode: PluginLinkMode::default(),
             capabilities: std::collections::HashMap::new(),
@@ -809,8 +812,19 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
     // the game has off).
     let disabled_bevy_features =
         crate::capabilities::disabled_bevy_features(&export_state.capabilities);
-    let disabled_runtime_features =
+    let mut disabled_runtime_features =
         crate::capabilities::disabled_runtime_features(&export_state.capabilities);
+    let selected_builtin_plugins = crate::builtins::selected(
+        &export_state.selected_builtin_plugins,
+        if packaging_mode == PackagingMode::LeanSingleBinary {
+            &disabled_runtime_features
+        } else {
+            &[]
+        },
+    );
+    disabled_runtime_features.extend(crate::builtins::omitted(&selected_builtin_plugins));
+    disabled_runtime_features.sort();
+    disabled_runtime_features.dedup();
     let lean_profile = crate::capabilities::lean_profile(&export_state.capabilities);
     // UPX is post-build, so unlike the profile knobs it applies to the copy-based
     // packaging modes too — but only where the packer supports the format.
@@ -941,6 +955,7 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
             mesh_lod_levels,
             template_path,
             selected_plugins,
+            selected_builtin_plugins,
             link_plugins_in,
             runtime_dir,
             disabled_bevy_features,
@@ -981,6 +996,7 @@ fn export_worker(
     mesh_lod_levels: u32,
     template_path: Option<std::path::PathBuf>,
     selected_plugins: Vec<renzora_plugin::host::loader::PluginInfo>,
+    selected_builtin_plugins: Vec<String>,
     link_plugins_in: bool,
     runtime_dir: std::path::PathBuf,
     disabled_bevy_features: Vec<String>,
@@ -1047,6 +1063,19 @@ fn export_worker(
         .parent()
         .map(|path| path.to_path_buf())
         .unwrap_or(runtime_dir);
+    // A lean source build is checked after compilation; every copied runtime
+    // is checked now, before writing any package or staging plugin files.
+    if packaging_mode != PackagingMode::LeanSingleBinary || has_native_runtime {
+        let compatible = if packaging_mode == PackagingMode::LeanSingleBinary {
+            crate::builtins::verify_lean(&template_path, &selected_builtin_plugins)
+        } else {
+            crate::builtins::verify(&template_path, &selected_builtin_plugins).map(|_| ())
+        };
+        if let Err(error) = compatible {
+            let _ = tx.send(ExportMsg::Error(error));
+            return;
+        }
+    }
     // Pack assets
     let _ = tx.send(ExportMsg::Progress("Scanning project assets...".into()));
     let tx_pack = tx.clone();
@@ -1118,6 +1147,7 @@ fn export_worker(
     // the export-overlay overrides, then replace project.toml inside the
     // rpak so the runtime sees the chosen window mode / size / console flag.
     let mut export_config = project.config.clone();
+    export_config.builtin_runtime_plugins = Some(selected_builtin_plugins.clone());
     export_config.window.width = window_width;
     export_config.window.height = window_height;
     export_config.window.mode = window_mode;
@@ -1143,15 +1173,9 @@ fn export_worker(
         }
     }
 
-    match toml::to_string_pretty(&export_config) {
-        Ok(s) => packer.add_file("project.toml", s.into_bytes()),
-        Err(e) => {
-            let _ = tx.send(ExportMsg::Error(format!(
-                "Failed to serialize project config: {}",
-                e
-            )));
-            return;
-        }
+    if let Err(e) = crate::builtins::write_project_config(&mut packer, &export_config) {
+        let _ = tx.send(ExportMsg::Error(format!("Failed to serialize project config: {e}")));
+        return;
     }
 
     let file_count = packer.len();
@@ -1455,6 +1479,10 @@ fn export_worker(
                 });
                 match built {
                     Ok(bin) => {
+                        if let Err(error) = crate::builtins::verify_lean(&bin, &selected_builtin_plugins) {
+                            let _ = tx.send(ExportMsg::Error(error));
+                            return;
+                        }
                         let src = compress_exe(&bin, &tx);
                         packer
                             .append_to_binary(&src, &binary_dest, compression_level)
@@ -1641,6 +1669,7 @@ fn export_worker(
                 let server_result = export_server_standalone(
                     &tx,
                     &project,
+                    &export_config,
                     binary_stem,
                     platform,
                     compression_level,
@@ -1687,6 +1716,7 @@ fn export_worker(
 fn export_server_standalone(
     tx: &mpsc::Sender<ExportMsg>,
     project: &CurrentProject,
+    export_config: &renzora::ProjectConfig,
     binary_stem: &str,
     platform: Platform,
     compression_level: i32,
@@ -1698,6 +1728,9 @@ fn export_server_standalone(
         .map_err(|e| format!("Failed to pack server assets: {}", e))?;
 
     server_packer.strip_for_server();
+    // The server launcher uses the same executable, so its project policy must
+    // match the client package rather than reloading the editor's original file.
+    crate::builtins::write_project_config(&mut server_packer, export_config)?;
 
     let server_file_count = server_packer.len();
 
@@ -1753,4 +1786,41 @@ fn write_server_launcher(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod builtin_server_tests {
+    use super::*;
+
+    #[test]
+    fn server_package_uses_export_selection_not_the_authored_project() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let config = renzora::ProjectConfig::default();
+        std::fs::write(
+            project_dir.path().join("project.toml"),
+            toml::to_string(&config).unwrap(),
+        ).unwrap();
+        let project = CurrentProject {
+            path: project_dir.path().into(),
+            config: config.clone(),
+        };
+        let exported = renzora::ProjectConfig {
+            builtin_runtime_plugins: Some(vec!["spline".into()]),
+            ..config
+        };
+        let (tx, _rx) = mpsc::channel();
+        export_server_standalone(
+            &tx, &project, &exported, "game", Platform::LinuxX64, 1, output.path(),
+        ).unwrap();
+        let archive =
+            renzora_rpak::RpakArchive::from_file(&output.path().join("server.rpak")).unwrap();
+        let bytes = archive.get("project.toml").unwrap();
+        let actual: renzora::ProjectConfig =
+            toml::from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(actual.builtin_runtime_plugins, exported.builtin_runtime_plugins);
+        assert_eq!(project.config.builtin_runtime_plugins, None);
+        assert!(std::fs::read_to_string(output.path().join("server.sh"))
+            .unwrap().contains("--rpak"));
+    }
 }

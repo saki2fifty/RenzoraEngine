@@ -2,6 +2,13 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 19:46 UTC
+
+- Completed the move of all eleven built-in native plugins into the engine and editor, preserving their roles, saved settings and scene data.
+- Connected the eight built-in game features to export choices and saved presets. Packaged games keep those choices independently of local editor settings, and lean builds leave unselected code out.
+- Added checks that stop older or mismatched runtime templates from silently ignoring export choices, including compressed release templates.
+- Preserved executable permissions when creating single-file Linux and macOS games.
+
 ## September 5, 2026 — 15:08 UTC
 
 - Made the eight migrated game features optional at build time, while keeping them enabled in normal builds. Export-screen integration is still in progress.

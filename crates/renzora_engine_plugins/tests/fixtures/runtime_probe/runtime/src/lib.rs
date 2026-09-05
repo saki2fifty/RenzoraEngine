@@ -14,13 +14,28 @@ impl Plugin for RuntimeProbePlugin {
     }
 }
 
-fn record_runtime(value: Res<RuntimeProbeValue>) {
+fn record_runtime(value: Res<RuntimeProbeValue>, inventory: Option<Res<renzora::PluginInventory>>) {
     if let Some(root) = std::env::var_os("RENZORA_PHASE5_PROBE_OUTPUT") {
         std::fs::write(
-            std::path::PathBuf::from(root).join("runtime-probe"),
+            std::path::PathBuf::from(&root).join("runtime-probe"),
             value.0.to_string(),
         )
         .expect("acceptance output");
+        if std::env::var_os("RENZORA_PHASE6_BUILTIN_PROBE").is_some() {
+            let inventory = inventory.expect("built-in inventory installed before Startup");
+            let mut states: Vec<_> = inventory
+                .entries
+                .iter()
+                .filter(|entry| renzora::BUILTIN_RUNTIME_PLUGIN_IDS.contains(&entry.id.as_str()))
+                .map(|entry| format!("{}={:?}", entry.id, entry.state))
+                .collect();
+            states.sort();
+            std::fs::write(
+                std::path::PathBuf::from(root).join("builtin-probe"),
+                states.join("\n"),
+            )
+            .expect("built-in acceptance output");
+        }
     }
 }
 

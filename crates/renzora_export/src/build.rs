@@ -2138,12 +2138,13 @@ mod lean_assembly_tests {
             codegen_units_one: false,
         };
         let platform = Platform::current().expect("host platform known");
+        let omitted_builtins = crate::builtins::omitted(&[]);
         let (workspace, has_scripts) = assemble_lean_export_workspace(
             &engine,
             project,
             platform,
             &[],
-            &[],
+            &omitted_builtins,
             profile,
             &[],
             &mut progress,
@@ -2193,5 +2194,17 @@ mod lean_assembly_tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        let dependencies = std::process::Command::new("cargo")
+            .args(["tree", "--offline", "--no-default-features", "--features", "runtime,static_scripts",
+                "-p", "renzora_app", "--prefix", "none"])
+            .current_dir(&workspace)
+            .output()
+            .expect("inspect lean dependency graph");
+        assert!(dependencies.status.success(), "{}", String::from_utf8_lossy(&dependencies.stderr));
+        let graph = String::from_utf8(dependencies.stdout).unwrap();
+        for id in omitted_builtins {
+            assert!(!graph.lines().any(|line| line.starts_with(&format!("renzora_{id} v"))),
+                "omitted built-in remains in the lean dependency graph: {id}");
+        }
     }
 }

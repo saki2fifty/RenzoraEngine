@@ -42,6 +42,18 @@ extern crate renzora_dylib;
 extern crate renzora_ember_dylib;
 
 pub use renzora;
+/// Capabilities of this runtime build, not of the editor's dependency graph.
+pub const BUILTIN_CAPABILITIES: renzora::runtime_capabilities::RuntimeBuiltinCapabilities =
+    renzora::runtime_capabilities::RuntimeBuiltinCapabilities::new([
+        cfg!(feature = "spline"),
+        cfg!(feature = "vignette"),
+        cfg!(feature = "auto_exposure"),
+        cfg!(feature = "night_stars"),
+        cfg!(feature = "procedural_tree"),
+        cfg!(feature = "text3d"),
+        cfg!(feature = "pool_water"),
+        cfg!(feature = "clouds"),
+    ]);
 // Loose-plugin host re-export. The acceptance harness
 // (host_assembly's test code) and the editor entry points
 // both reach `LoosePluginHost` through this crate, so the
@@ -1245,6 +1257,12 @@ fn apply_game_ui_font(
 
 /// Build the full runtime app (rendering + all engine plugins).
 pub fn build_runtime_app() -> App {
+    // Mobile entry points link this function rather than src/main.rs.
+    // Keep the same record in their .so/static-library runtime artifacts.
+    #[used]
+    static CAPABILITIES: [u8; renzora::runtime_capabilities::RUNTIME_CAPABILITIES_LEN] =
+        BUILTIN_CAPABILITIES.encode();
+    std::hint::black_box(&CAPABILITIES);
     let mut app = init_app();
     // mobile/wasm entry point — always a shipped game, never the editor.
     add_default_rendering(&mut app, false);

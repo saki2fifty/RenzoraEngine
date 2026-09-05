@@ -1989,16 +1989,20 @@ fn build_plugins_tab(
         })
     });
     commands.entity(body).add_child(native_note);
+    let builtin_hint = txt(commands, fonts, &renzora::lang::t("export.plugins.builtin_hint"), 11.0, text_muted());
+    commands.entity(body).add_child(builtin_hint);
 
     // Filled by a command that can read the world (the plugin list is stable
     // after the scan).
     commands.queue(move |world: &mut World| {
-        let plugins: Vec<(String, String)> = world
+        let plugins: Vec<(String, String, bool)> = world
             .get_resource::<ExportOverlayState>()
             .map(|s| {
                 s.available_plugins
                     .iter()
-                    .map(|p| (p.id.clone(), format!("{:?}", p.scope)))
+                    .map(|p| (p.id.clone(), format!("{:?}", p.scope), false))
+                    .chain(renzora::BUILTIN_RUNTIME_PLUGIN_IDS.iter()
+                        .map(|id| (id.to_string(), renzora::lang::t("export.plugins.builtin_scope"), true)))
                     .collect()
             })
             .unwrap_or_default();
@@ -2018,7 +2022,7 @@ fn build_plugins_tab(
                     .id();
                 c.entity(list).add_child(note);
             }
-            for (id, scope) in plugins.into_iter() {
+            for (id, scope, builtin) in plugins.into_iter() {
                 let card = c
                     .spawn((
                         Node {
@@ -2119,16 +2123,21 @@ fn build_plugins_tab(
                     sw,
                     move |w| {
                         w.get_resource::<ExportOverlayState>()
-                            .is_some_and(|s| s.selected_plugins.contains(&id2))
+                            .is_some_and(|s| if builtin {
+                                s.selected_builtin_plugins.contains(&id2)
+                            } else {
+                                s.selected_plugins.contains(&id2)
+                            })
                     },
                     {
                         let id3 = id.clone();
                         move |w, v: &bool| {
                             if let Some(mut s) = w.get_resource_mut::<ExportOverlayState>() {
+                                let selected = if builtin { &mut s.selected_builtin_plugins } else { &mut s.selected_plugins };
                                 if *v {
-                                    s.selected_plugins.insert(id3.clone());
+                                    selected.insert(id3.clone());
                                 } else {
-                                    s.selected_plugins.remove(&id3);
+                                    selected.remove(&id3);
                                 }
                             }
                         }

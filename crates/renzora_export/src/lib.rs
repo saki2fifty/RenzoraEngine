@@ -9,6 +9,8 @@ mod apk_signer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod build;
 #[cfg(not(target_arch = "wasm32"))]
+mod builtins;
+#[cfg(not(target_arch = "wasm32"))]
 mod capabilities;
 #[cfg(not(target_arch = "wasm32"))]
 mod engine_plugins;

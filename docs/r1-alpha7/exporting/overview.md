@@ -1,15 +1,15 @@
 # Export Overview
 
-Exporting turns your project into a shippable game — the same `renzora` engine binary with the editor bundle removed, plus your packed assets.
+Exporting turns your project into a shippable game: a runtime executable plus your packed assets, without editor tooling.
 
 ## The shipped game is the engine without the editor
 
-Renzora is one binary. The editor is **not** a compile-time build — it ships as a removable cdylib (`renzora_editor.dll` / `librenzora_editor.so` / `.dylib`) that sits **beside the exe**. The runtime shape is decided at launch:
+The installed engine-plugin build workflow produces separate editor and runtime executables. Export uses the runtime, not the editor. The older source launch path still supports a removable editor bundle during migration:
 
 - Bundle present → the binary runs as the **editor**.
 - Delete that one file (or pass `--no-editor`) → the **same** binary is your **shipped game**.
 
-So an "export" is really: take the already-built game binary for a target platform, leave out `renzora_editor.*`, and ship it next to your project's assets. There is no separate "game build" of the engine to compile.
+Copy-based export uses a matching prebuilt runtime. Lean export rebuilds it with the selected features. Projects with engine plugins rebuild their current runtime code through the matching build kit; editor-only extensions are not included.
 
 > The export scanner only bundles **Runtime-scope** distribution plugins (single-plugin cdylibs from the editor's `plugins/` folder). It skips the editor bundle itself, so the editor can never be accidentally shipped inside a game.
 
@@ -28,9 +28,17 @@ Export is driven by the editor's `renzora_export` crate (`ExportPlugin`, editor-
 | **Console logging** | Whether the shipped build keeps a console/log |
 | **Include server** | Also emit a dedicated-server bundle (desktop only) |
 | **Mesh optimization** | Optional simplify / quantize / LOD generation while packing |
-| **Plugins** | Which Runtime-scope distribution plugins to include, and whether they ship as files or are linked into the binary |
+| **Plugins** | Which built-in runtime features and Runtime-scope plugin files to include; file plugins can remain separate or be linked when supported |
 
 The actual packing runs on a background thread; the modal polls its progress while open.
+
+### Built-in game features
+
+The Plugins tab includes spline, vignette, auto exposure, night stars, procedural trees, 3D text, pool water and clouds. Presets remember these choices independently of plugin files. Copy-based exports turn unselected built-ins off at startup; lean builds also leave their code out. Rendering/UI feature switches take precedence when a built-in requires those systems.
+
+The selection travels inside `project.toml` in the game archive, including the server archive. A player's local editor preferences cannot override it. The exporter checks the runtime artifact itself and rejects older or mismatched templates; a matching release name alone is not enough. Official compression preserves the feature record so this check needs no compiler or unpacking tool. A manually UPX-packed artifact without the visible record requires UPX for inspection.
+
+Single-file Unix exports preserve the source runtime's ordinary executable permissions, without copying privileged permission bits.
 
 ## Supported platforms
 
@@ -71,7 +79,7 @@ That ordering is what makes both packaging modes work without any code changes i
 | **Single binary** (`SingleBinary`) | one self-contained executable (with sibling dylibs) and the `.rpak` appended | Clean desktop distribution, fast to produce |
 | **Lean single binary** (`LeanSingleBinary`) | one **statically linked, stripped** executable with the `.rpak` appended — **no** sibling dylibs at all | Lean release builds (see below) |
 
-The first two modes **copy** the already-built dev runtime, so they ship the engine as separate dylibs (`bevy_dylib`, `renzora`, a dynamic `std`) beside the exe — fast to produce, but bloated. The lean mode instead **recompiles** the game from source into a single static file. See the next section.
+The first two modes **copy** a matching runtime and any libraries required by that template. Legacy templates can have sibling shared libraries; installed engine-plugin builds use static engine integration. Copying does not remove compiled features. The lean mode **recompiles** the game with the selected dependencies. See the next section.
 
 Per platform, packing produces:
 
@@ -82,10 +90,10 @@ Per platform, packing produces:
 
 ## Lean single binary (compiled from source)
 
-The two copy-based modes are great for development but ship the **whole engine** as
-separate dynamic libraries next to the exe (a `bevy_dylib`, the `renzora` SDK
-dylib, and a dynamically-linked `std`). That sharing is exactly what makes the
-dev/editor build fast and keeps the plugin ABI stable — but it bloats a release.
+The two copy-based modes keep whatever code was compiled into the template,
+including disabled built-ins. Legacy shared-library templates also need their
+sibling libraries. This is not a stable Rust/Bevy plugin interface; hot plugins
+use the C-ABI contract, while unrestricted engine plugins are statically rebuilt.
 
 **Lean single binary** mode produces a release build the right way: it
 **recompiles your game's `renzora` binary from source**, statically, into one

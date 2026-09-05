@@ -20,6 +20,12 @@ mod setup_ui;
 
 use bevy::prelude::*;
 
+// Keep deployment metadata in this executable, not a shared engine library.
+// The exporter reads it without running a possibly foreign-architecture file.
+#[used]
+static BUILTIN_CAPABILITIES: [u8; renzora_runtime::renzora::runtime_capabilities::RUNTIME_CAPABILITIES_LEN] =
+    renzora_runtime::BUILTIN_CAPABILITIES.encode();
+
 // ── App setup helpers ────────────────────────────────────────────────────
 //
 // Most setup lives in `renzora_runtime` (the shared meta-crate). The two
@@ -30,6 +36,8 @@ use bevy::prelude::*;
 // `--server`, which swaps in a windowless plugin set inline in `main`.
 
 pub fn init_app() -> App {
+    // A live reference also retains the record through link-time dead stripping.
+    std::hint::black_box(&BUILTIN_CAPABILITIES);
     let mut app = renzora_runtime::init_app();
     let stamp = renzora_runtime::renzora::decode_engine_generation_stamp(
         option_env!("RENZORA_ENGINE_GENERATION_STAMP"),

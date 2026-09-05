@@ -81,6 +81,9 @@ pub struct ExportPreset {
 
     #[serde(default)]
     pub selected_plugins: HashSet<String>,
+    /// None identifies an older preset whose native IDs lived in selected_plugins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_builtin_plugins: Option<HashSet<String>>,
     #[serde(default)]
     pub plugin_link_mode: PluginLinkMode,
     /// Engine capability toggles (id → on). Only the ids that differ from the
@@ -134,6 +137,7 @@ impl ExportPreset {
             mesh_generate_lods: false,
             mesh_lod_levels: default_lod_levels(),
             selected_plugins: HashSet::new(),
+            selected_builtin_plugins: Some(crate::builtins::defaults()),
             plugin_link_mode: PluginLinkMode::default(),
             capabilities: HashMap::new(),
         }
@@ -162,6 +166,7 @@ impl ExportPreset {
             mesh_generate_lods: state.mesh_generate_lods,
             mesh_lod_levels: state.mesh_lod_levels,
             selected_plugins: state.selected_plugins.clone(),
+            selected_builtin_plugins: Some(state.selected_builtin_plugins.clone()),
             plugin_link_mode: state.plugin_link_mode,
             capabilities: state.capabilities.clone(),
         }
@@ -198,6 +203,13 @@ impl ExportPreset {
         state.mesh_generate_lods = self.mesh_generate_lods;
         state.mesh_lod_levels = self.mesh_lod_levels;
         state.selected_plugins = self.selected_plugins.clone();
+        state.selected_builtin_plugins = self.selected_builtin_plugins.clone().unwrap_or_else(|| {
+            self.selected_plugins
+                .iter()
+                .filter(|id| renzora::BUILTIN_RUNTIME_PLUGIN_IDS.contains(&id.as_str()))
+                .cloned()
+                .collect()
+        });
         state.plugin_link_mode = self.plugin_link_mode;
         // Merge rather than replace: a capability added by a newer engine is
         // absent from an older preset, and dropping it would silently strip a
@@ -311,4 +323,47 @@ pub fn unique_name(base: &str, existing: &[ExportPreset]) -> String {
         .map(|n| format!("{base} {n}"))
         .find(|candidate| !existing.iter().any(|p| p.name == *candidate))
         .unwrap_or_else(|| base.to_string())
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+
+    #[test]
+    fn saved_builtin_choices_round_trip_without_changing_dll_choices() {
+        let mut state = ExportOverlayState::default();
+        state.selected_builtin_plugins = ["spline".to_owned()].into_iter().collect();
+        state.selected_plugins = ["clouds".to_owned()].into_iter().collect();
+        let preset = ExportPreset::capture("test", &state);
+        let encoded = toml::to_string(&preset).unwrap();
+        let decoded: ExportPreset = toml::from_str(&encoded).unwrap();
+        let mut restored = ExportOverlayState::default();
+        decoded.apply(&mut restored);
+        assert_eq!(
+            restored.selected_builtin_plugins,
+            state.selected_builtin_plugins
+        );
+        assert_eq!(restored.selected_plugins, state.selected_plugins);
+        assert!(restored.available_plugins.is_empty());
+    }
+
+    #[test]
+    fn old_native_plugin_choices_migrate_without_enabling_unselected_features() {
+        let mut old = ExportPreset::new("old", Platform::LinuxX64);
+        old.selected_builtin_plugins = None;
+        old.selected_plugins = ["spline".into(), "lua".into()].into_iter().collect();
+        let encoded = toml::to_string(&old).unwrap();
+        assert!(!encoded.contains("selected_builtin_plugins"));
+        let decoded: ExportPreset = toml::from_str(&encoded).unwrap();
+        let mut state = ExportOverlayState::default();
+        decoded.apply(&mut state);
+        assert_eq!(
+            state.selected_builtin_plugins,
+            ["spline".into()].into_iter().collect()
+        );
+        assert!(state.selected_plugins.contains("lua"));
+        old.selected_plugins.clear();
+        old.apply(&mut state);
+        assert!(state.selected_builtin_plugins.is_empty());
+    }
 }

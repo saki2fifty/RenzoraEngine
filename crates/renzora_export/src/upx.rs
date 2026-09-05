@@ -107,6 +107,7 @@ pub fn missing_hint() -> String {
 /// export, which are ordinary files with no appended payload — unlike the game
 /// binary, which goes through [`compress_to_temp`].
 pub fn compress_in_place(upx: &Path, file: &Path) -> Result<(u64, u64), String> {
+    let capabilities = crate::builtins::scan_file(file)?.0;
     let before = std::fs::metadata(file)
         .map_err(|e| format!("stat {}: {e}", file.display()))?
         .len();
@@ -121,6 +122,16 @@ pub fn compress_in_place(upx: &Path, file: &Path) -> Result<(u64, u64), String> 
         let msg = String::from_utf8_lossy(&out.stderr);
         let msg = msg.lines().last().unwrap_or("unknown error").trim();
         return Err(msg.to_string());
+    }
+    // Keep deployment metadata readable without requiring UPX on the next
+    // exporter's machine. The rpak is appended later, so its footer stays last.
+    if let Some(capabilities) = capabilities {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(file)
+            .and_then(|mut output| output.write_all(&capabilities.encode()))
+            .map_err(|error| format!("preserve runtime capabilities: {error}"))?;
     }
     let after = std::fs::metadata(file)
         .map_err(|e| format!("stat {}: {e}", file.display()))?
