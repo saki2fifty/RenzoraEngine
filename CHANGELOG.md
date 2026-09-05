@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 21:34 UTC
+
+- Reduced repeated plugin memory allocation by reusing call tables and command lists, while keeping each call's data separate. Added checks for failed calls and resources being removed and restored.
+- Corrected a memory-alignment assumption when reading plugin mesh commands.
+
 ## September 5, 2026 — 21:14 UTC
 
 - Began reducing plugin processing overhead by reusing query memory between frames and avoiding temporary allocations for every component read. Broader performance and reload improvements remain in progress.

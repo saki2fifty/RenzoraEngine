@@ -1594,6 +1594,9 @@ presence masks and entity buffers between calls. An empty or smaller query clear
 old rows without discarding capacity. Component values still cross through the
 same copied C-ABI representation; plugins must not retain call pointers.
 
+Pointer tables, resource slots and the command list also retain their capacity.
+Their old entries are cleared between calls; resource addresses are resolved
+again each time. Deferred commands keep their own payload bytes until execution.
 This reduces allocation overhead but does not make dispatch allocation-free:
-pointer tables, resource slots and command buffers still have separate lifetimes.
+growing buffers and copying command payloads can still allocate.
 Parallel scheduling and bounded reload cleanup are separate improvements.

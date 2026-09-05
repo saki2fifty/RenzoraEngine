@@ -49,6 +49,21 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
 
+pub(super) fn allocations_during(run: impl FnOnce()) -> usize {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ALLOCATIONS.with(|count| count.set(None));
+        }
+    }
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    let reset = Reset;
+    run();
+    let count = ALLOCATIONS.with(|count| count.get().expect("measurement enabled"));
+    drop(reset);
+    count
+}
+
 #[derive(Component)]
 #[repr(C)]
 struct Counter(u32);
@@ -204,4 +219,124 @@ fn real_dispatcher_handles_empty_and_smaller_frames_after_warmup() {
     assert_eq!(world.get::<Counter>(entity).expect("counter").0, 22);
     drop(schedule);
     assert_eq!(*observations, [4, 0, 1, 1]);
+}
+
+#[test]
+fn resource_table_refreshes_after_resource_removal_and_reinsertion() {
+    #[derive(Resource)]
+    struct Value(u32);
+    unsafe extern "C" fn observe(call: *const sys::SystemCall) -> sys::SystemStatus {
+        // SAFETY: the test supplies one resource slot; user points to a Vec
+        // that outlives the schedule. Missing resources are explicitly null.
+        unsafe {
+            let call = &*call;
+            let observations = &mut *(call.user as *mut Vec<Option<u32>>);
+            let ptr = (*call.resources).ptr.cast::<Value>();
+            observations.push(ptr.as_ref().map(|value| value.0));
+        }
+        sys::SystemStatus::Ok
+    }
+    let mut world = World::new();
+    world.init_resource::<Time>();
+    let id = world.register_resource::<Value>();
+    world.insert_resource(Value(5));
+    let mut observations = Box::new(Vec::<Option<u32>>::new());
+    let system = build_dispatcher(
+        &mut world,
+        Vec::new(),
+        vec![TermPlan {
+            id,
+            access: sys::Access::ResRead,
+            marshal: Marshal::Raw,
+            cell_size: size_of::<Value>(),
+        }],
+        observe,
+        observations.as_mut() as *mut Vec<Option<u32>> as usize,
+        GenGate {
+            counter: Default::default(),
+            at: 0,
+        },
+    );
+    let mut schedule = Schedule::default();
+    schedule.add_systems(system);
+    schedule.run(&mut world);
+    world.remove_resource::<Value>();
+    schedule.run(&mut world);
+    world.insert_resource(Value(9));
+    schedule.run(&mut world);
+    drop(schedule);
+    assert_eq!(*observations, [Some(5), None, Some(9)]);
+}
+
+struct CommandProbe {
+    entity: sys::Entity,
+    component: sys::ComponentId,
+    calls: u32,
+    status: sys::SystemStatus,
+}
+
+unsafe extern "C" fn command_probe(call: *const sys::SystemCall) -> sys::SystemStatus {
+    // SAFETY: this fixture owns the user state until the schedule is dropped;
+    // the sink copies the payload synchronously before this stack value dies.
+    unsafe {
+        let call = &*call;
+        let state = &mut *(call.user as *mut CommandProbe);
+        state.calls += 1;
+        let mut value = state.calls + 10;
+        let command = sys::Command {
+            kind: sys::CommandKind::Insert,
+            entity: state.entity,
+            component: state.component,
+            data: (&value as *const u32).cast(),
+            data_len: size_of::<u32>(),
+        };
+        ((*call.commands).push)(call.commands, &command);
+        value = 999;
+        std::hint::black_box(value);
+        state.status
+    }
+}
+
+fn run_command_probe(status: sys::SystemStatus) -> (u32, u32) {
+    let mut world = World::new();
+    world.init_resource::<Time>();
+    let id = world.register_component::<Counter>();
+    let entity = world.spawn(Counter(0)).id();
+    let mut probe = Box::new(CommandProbe {
+        entity: sys::Entity(entity.to_bits()),
+        component: sys::ComponentId(id.index() as u32),
+        calls: 0,
+        status,
+    });
+    let system = build_dispatcher(
+        &mut world,
+        Vec::new(),
+        Vec::new(),
+        command_probe,
+        probe.as_mut() as *mut CommandProbe as usize,
+        GenGate {
+            counter: Default::default(),
+            at: 0,
+        },
+    );
+    let mut schedule = Schedule::default();
+    schedule.add_systems(system);
+    schedule.run(&mut world);
+    schedule.run(&mut world);
+    drop(schedule);
+    (
+        world.get::<Counter>(entity).expect("counter").0,
+        probe.calls,
+    )
+}
+
+#[test]
+fn deferred_command_payload_survives_stack_reuse_and_repeated_calls() {
+    assert_eq!(run_command_probe(sys::SystemStatus::Ok), (12, 2));
+}
+
+#[test]
+fn refused_output_discards_commands_and_does_not_replay_next_frame() {
+    assert_eq!(run_command_probe(sys::SystemStatus::Panicked), (0, 1));
+    assert_eq!(run_command_probe(sys::SystemStatus(999)), (0, 1));
 }

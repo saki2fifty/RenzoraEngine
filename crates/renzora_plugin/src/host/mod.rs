@@ -28,6 +28,8 @@ pub mod dev;
 pub mod input;
 pub mod loader;
 
+mod call_buffers;
+
 #[cfg(test)]
 mod dispatch_tests;
 
@@ -2395,7 +2397,15 @@ struct SinkImpl<'a, 'w, 's> {
     #[allow(dead_code)]
     sink: sys::CommandSink,
     commands: &'a mut Commands<'w, 's>,
-    queued: Vec<(sys::Command, Vec<u8>)>,
+    queued: Vec<QueuedCommand>,
+}
+
+/// Host-owned command metadata contains no borrowed plugin payload pointer.
+struct QueuedCommand {
+    kind: sys::CommandKind,
+    entity: sys::Entity,
+    component: sys::ComponentId,
+    data: Vec<u8>,
 }
 
 /// The four `*Impl` structs are handed to a plugin as a pointer to their **first
@@ -2521,8 +2531,7 @@ impl<'a, 'w, 's> HostCommandSink<'a, 'w, 's> {
     /// caller for `&mut Commands` again would be a second mutable borrow of the
     /// one this sink is built on.
     pub fn drain(mut self) {
-        let queued = std::mem::take(&mut self.0.queued);
-        apply_queued(self.0.commands, queued);
+        apply_queued(self.0.commands, &mut self.0.queued);
     }
 }
 
@@ -2544,21 +2553,20 @@ unsafe extern "C" fn sink_push(sink: *mut sys::CommandSink, cmd: *const sys::Com
     } else {
         std::slice::from_raw_parts(cmd.data, cmd.data_len).to_vec()
     };
-    me.queued.push((
-        sys::Command {
-            kind: cmd.kind,
-            entity: cmd.entity,
-            component: cmd.component,
-            data: std::ptr::null(),
-            data_len: 0,
-        },
+    me.queued.push(QueuedCommand {
+        kind: cmd.kind,
+        entity: cmd.entity,
+        component: cmd.component,
         data,
-    ));
+    });
 }
 
 /// Apply what a system queued. Runs after the system body, never during it.
-fn apply_queued(commands: &mut Commands, queued: Vec<(sys::Command, Vec<u8>)>) {
-    for (cmd, data) in queued {
+fn apply_queued(commands: &mut Commands, queued: &mut Vec<QueuedCommand>) {
+    // Drain retains the outer allocation. Payloads still move into deferred
+    // commands where necessary, so subsequent calls cannot overwrite them.
+    for cmd in queued.drain(..) {
+        let data = cmd.data;
         let Some(entity) = Entity::try_from_bits(cmd.entity.0) else {
             continue;
         };
@@ -2581,7 +2589,7 @@ fn apply_queued(commands: &mut Commands, queued: Vec<(sys::Command, Vec<u8>)>) {
                     continue;
                 }
                 // SAFETY: pushed by `make_renderable`, which writes exactly one.
-                let d = unsafe { *data.as_ptr().cast::<sys::SpawnMeshDesc>() };
+                let d = unsafe { data.as_ptr().cast::<sys::SpawnMeshDesc>().read_unaligned() };
                 commands.queue(move |world: &mut World| {
                     let (mesh, material) = {
                         let Some(store) = world.get_resource::<PluginAssets>() else {
@@ -2615,7 +2623,7 @@ fn apply_queued(commands: &mut Commands, queued: Vec<(sys::Command, Vec<u8>)>) {
                 }
                 // SAFETY: pushed by `set_material`, which writes exactly one.
                 // Only `material` is read; the struct is shared with SpawnMesh.
-                let d = unsafe { *data.as_ptr().cast::<sys::SpawnMeshDesc>() };
+                let d = unsafe { data.as_ptr().cast::<sys::SpawnMeshDesc>().read_unaligned() };
                 commands.queue(move |world: &mut World| {
                     let index = d.material.0 as usize;
                     let Some(slot) = world
@@ -3735,8 +3743,8 @@ impl ViewState {
     }
 
     fn view(&mut self, cells: &mut Vec<*mut u8>) -> sys::QueryView {
-        // Pointer tables remain call-local: no raw ECS/cell pointers are kept
-        // in the Send + Sync system closure between scheduler invocations.
+        // Fill only after column growth; the call guard clears the descriptors
+        // before their ECS borrows end while retaining allocation capacity.
         cells.clear();
         // Row-major `entity_count × cell_count`, matching what `sys::QueryView`
         // documents. `present` is indexed [term][row] while this walks
@@ -3881,6 +3889,9 @@ fn build_dispatcher(
         })
         .collect();
 
+    let mut call_buffers = call_buffers::CallBuffers::new(states.len(), resource_ids.len());
+    let mut queued_commands = Vec::new();
+
     // One builder per system param. The tuple arity here MUST match the
     // closure's parameter count.
     (
@@ -4021,18 +4032,15 @@ fn build_dispatcher(
             // gather already ran above, so this only avoided one FFI call and
             // the resource-slot setup on an idle system.
 
-            let mut cell_tables: Vec<Vec<*mut u8>> =
-                (0..states.len()).map(|_| Vec::new()).collect();
-            let views: Vec<sys::QueryView> = states
-                .iter_mut()
-                .zip(&mut cell_tables)
-                .map(|(state, cells)| state.view(cells))
-                .collect();
+            let mut frame = call_buffers.frame();
+            let (cell_tables, views, slots) = frame.tables();
+            views.extend(
+                states.iter_mut().zip(cell_tables).map(|(state, cells)| state.view(cells)),
+            );
 
             // Resolved once per call rather than per access: a system may read
             // the same resource from several parameters, and each `get_mut_by_id`
             // takes a fresh borrow.
-            let mut slots: Vec<sys::ResourceSlot> = Vec::with_capacity(resource_ids.len());
             for (id, write) in &resource_ids {
                 let ptr = if *write {
                     resources
@@ -4093,7 +4101,7 @@ fn build_dispatcher(
                     push: sink_push,
                 },
                 commands: &mut commands,
-                queued: Vec::new(),
+                queued: std::mem::take(&mut queued_commands),
             };
             let call = sys::SystemCall {
                 views: views.as_ptr(),
@@ -4132,7 +4140,7 @@ fn build_dispatcher(
             // alive for the process lifetime, and every pointer in `call` points
             // at a buffer that outlives this statement.
             let status = unsafe { entry(&call) };
-            let queued = std::mem::take(&mut sink.queued);
+            queued_commands = std::mem::take(&mut sink.queued);
             // `!is_known` counts as failure, not as success. A status this
             // build has no name for came from a plugin built against a newer
             // ABI, and treating it as `Ok` would write back output produced by
@@ -4142,10 +4150,11 @@ fn build_dispatcher(
                 disabled.store(true, std::sync::atomic::Ordering::Relaxed);
                 // Skip write-back: the plugin's partial output is not something
                 // to trust into the world.
+                queued_commands.clear();
                 return;
             }
 
-            apply_queued(&mut commands, queued);
+            apply_queued(&mut commands, &mut queued_commands);
 
             for (state, q) in states.iter().zip(queries.iter_mut()) {
                 state.scatter(q);
