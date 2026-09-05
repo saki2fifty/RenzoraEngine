@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 13:31 UTC
+
+- Separated vignette rendering from its editor controls while retaining saved scene settings and the existing enable switch.
+
 ## September 5, 2026 — 13:05 UTC
 
 ### Built-in plugin migration

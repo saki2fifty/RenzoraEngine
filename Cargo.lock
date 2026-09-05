@@ -7685,6 +7685,7 @@ dependencies = [
  "renzora_undo",
  "renzora_update",
  "renzora_viewport",
+ "renzora_vignette_editor",
  "renzora_volumetric_fog",
  "renzora_volumetric_fog_editor",
  "renzora_water",
@@ -8608,6 +8609,7 @@ dependencies = [
  "renzora_terrain",
  "renzora_tilemap",
  "renzora_tonemapping",
+ "renzora_vignette",
  "renzora_volumetric_fog",
  "renzora_water",
  "renzora_wind",
@@ -9085,6 +9087,22 @@ dependencies = [
  "renzora_ui",
  "renzora_undo",
  "serde_json",
+]
+
+[[package]]
+name = "renzora_vignette"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+]
+
+[[package]]
+name = "renzora_vignette_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
 ]
 
 [[package]]

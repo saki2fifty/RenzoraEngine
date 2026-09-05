@@ -130,6 +130,8 @@ Old native folders for migrated built-ins are ignored during startup and export 
 
 Gamepad diagnostics now live in `renzora_gamepad_editor` and are linked only into the editor. The `gamepad` panel and preference IDs are unchanged; the controller debug panel is not added to game runtime builds.
 
+Vignette rendering lives in `renzora_vignette`; its inspector controls live separately in `renzora_vignette_editor`. Both use the same settings definition from the contract crate. Existing scenes still identify it as `vignette::VignetteSettings`, and the `vignette` enable preference is preserved.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

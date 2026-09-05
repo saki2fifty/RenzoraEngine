@@ -174,6 +174,8 @@ pub mod content_problems;
 
 // The one WGSL↔naga seam (parse/validate) for self-contained shaders.
 pub mod wgsl;
+pub mod vignette;
+pub use vignette::VignetteSettings;
 
 // ── Editor contract (Operation Merge fold) ───────────────────────────────
 // The thin editor types shared across the binary↔bundle boundary live here in
