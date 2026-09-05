@@ -128,6 +128,8 @@ Phase 6 is moving those built-ins into ordinary workspace crates. Spline support
 
 Old native folders for migrated built-ins are ignored during startup and export discovery, even if files remain from an earlier installation. Their artwork still ships for the Settings cards; disabling a built-in does not load its old DLL as a fallback.
 
+Gamepad diagnostics now live in `renzora_gamepad_editor` and are linked only into the editor. The `gamepad` panel and preference IDs are unchanged; the controller debug panel is not added to game runtime builds.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

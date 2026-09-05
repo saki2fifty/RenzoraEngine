@@ -1,0 +1,13 @@
+[package]
+name = "renzora_gamepad_editor"
+version = "0.1.0"
+edition = "2021"
+description = "Editor-only gamepad diagnostics"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false, features = ["editor"] }
+renzora_ember = { path = "../renzora_ember" }
+
+[lints]
+workspace = true

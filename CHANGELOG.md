@@ -9,6 +9,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Moved spline support into a normal engine crate while preserving scene data, curve calculations, and its existing enable/disable setting.
 - Added shared startup reporting for migrated built-in features and kept replacement build kits from duplicating them.
 - Preserved built-in plugin artwork and prevented old installed copies from being loaded again after an upgrade.
+- Moved gamepad diagnostics into the editor while preserving its panel, controller readings, and enable/disable setting.
 
 ## September 5, 2026 — 05:59 UTC
 

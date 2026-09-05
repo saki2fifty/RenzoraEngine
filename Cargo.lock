@@ -7628,6 +7628,7 @@ dependencies = [
  "renzora_export",
  "renzora_foliage_editor",
  "renzora_forward_decal_editor",
+ "renzora_gamepad_editor",
  "renzora_gizmo",
  "renzora_grid",
  "renzora_hanabi",
@@ -7909,6 +7910,15 @@ dependencies = [
  "renzora",
  "renzora_editor_framework",
  "renzora_forward_decal",
+]
+
+[[package]]
+name = "renzora_gamepad_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
+ "renzora_ember",
 ]
 
 [[package]]

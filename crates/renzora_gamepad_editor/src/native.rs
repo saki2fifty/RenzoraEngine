@@ -50,10 +50,8 @@ pub(crate) struct StickMaterial {
 
 impl UiMaterial for StickMaterial {
     fn fragment_shader() -> ShaderRef {
-        // The crate name is part of an `embedded://` path and this crate is now
-        // `gamepad`, not `renzora_gamepad`. Not a compile error if wrong — the
-        // shader just fails to resolve at runtime.
-        "embedded://gamepad/stick.wgsl".into()
+        // Embedded asset namespaces follow the workspace crate name.
+        "embedded://renzora_gamepad_editor/stick.wgsl".into()
     }
 }
 

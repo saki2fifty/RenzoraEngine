@@ -113,7 +113,14 @@ fn migrated_workspace_plugin(
     plugin: &str,
     scope: &str,
 ) -> Result<bool, OverlayError> {
-    let package = format!("renzora_{name}");
+    let (package, plugin) = if scope == "Editor" {
+        (
+            format!("renzora_{name}_editor"),
+            plugin.replace("Plugin", "EditorPlugin"),
+        )
+    } else {
+        (format!("renzora_{name}"), plugin.to_owned())
+    };
     let target = root.join("crates").join(&package);
     if !target.exists() {
         return Ok(false);
