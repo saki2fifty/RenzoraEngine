@@ -47,6 +47,7 @@ pub mod process;
 pub mod recovery;
 pub mod retention;
 pub mod scheduler;
+pub mod sdk;
 pub mod service;
 pub mod staging;
 pub mod status;

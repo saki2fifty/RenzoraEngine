@@ -179,6 +179,15 @@ fn main() -> ExitCode {
         // Without these the container had no way to stage an SDK at all, so
         // every published release shipped without one — the archive step in
         // `package-release.sh` found no `sdk/` and silently produced nothing.
+        "source-sdk" => {
+            let argv: Vec<String> = std::env::args().skip(2).collect();
+            let out = flag_value(&argv, "--out").map(PathBuf::from)
+                .unwrap_or_else(|| repo.join("dist").join(plat.dir));
+            match renzora_rust_sdk::stage(&repo, &out) {
+                Ok(()) => { println!("[xtask] staged {}", out.join("rust-sdk").display()); ExitCode::SUCCESS }
+                Err(error) => { eprintln!("[xtask] source SDK staging failed: {error}"); ExitCode::FAILURE }
+            }
+        }
         "sdk" => {
             let argv: Vec<String> = std::env::args().skip(2).collect();
             let from = sdk::From {
@@ -190,6 +199,10 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|| repo.join("dist").join(plat.dir));
             match sdk::build_from(&repo, &plat, &out_dir, &from) {
                 Ok(out) => {
+                    if let Err(error) = renzora_rust_sdk::stage(&repo, &out_dir) {
+                        eprintln!("[xtask] source SDK staging failed: {error}");
+                        return ExitCode::FAILURE;
+                    }
                     println!("[xtask] staged {}", out.display());
                     ExitCode::SUCCESS
                 }
@@ -294,7 +307,7 @@ fn main() -> ExitCode {
         other => {
             eprintln!(
                 "[xtask] unknown command '{other}' \
-                 (expected: run | xr | dist | sdk | wasm [--no-opt] | plugin <name> | profile | \
+                 (expected: run | xr | dist | sdk | source-sdk | wasm [--no-opt] | plugin <name> | profile | \
                  coverage [--check|--bless] | sync [--check] | remove <crate-name>)"
             );
             ExitCode::from(2)
@@ -390,6 +403,10 @@ fn build_and_stage(repo: &Path, plat: &Platform, features: &[&str]) -> Result<Pa
             // stops a stale one from ever sitting next to a fresh editor. It hardlinks,
             // so it costs neither disk nor noticeable time (see `sdk.rs`).
             sdk::build(repo, plat, &out)?;
+            if let Err(error) = renzora_rust_sdk::stage(repo, &out) {
+                eprintln!("[xtask] source SDK staging failed: {error}");
+                return Err(ExitCode::FAILURE);
+            }
             // After the SDK, because they link against it. A native plugin in
             // `plugins/` is built exactly the way a user's installed one is —
             // which is the point: an author working from source exercises the

@@ -74,6 +74,7 @@ fn handle_request_open_project(
     request: Option<Res<renzora::RequestOpenProject>>,
     mut app_config: ResMut<AppConfig>,
     mut next_state: ResMut<NextState<SplashState>>,
+    running: Option<Res<renzora::EnginePluginRunningGeneration>>,
 ) {
     if request.is_none() {
         return;
@@ -101,6 +102,16 @@ fn handle_request_open_project(
         }
     };
 
+    if running
+        .as_ref()
+        .and_then(|running| running.0.as_ref())
+        .is_some_and(|stamp| !stamp.plugins.is_empty())
+    {
+        // Native systems cannot be removed from this process. Keep its project
+        // intact while the coordinator prepares a correctly linked replacement.
+        commands.insert_resource(renzora::EnginePluginPendingProject(project.path));
+        return;
+    }
     app_config.add_recent_project(project.path.clone());
     let _ = app_config.save();
     commands.insert_resource(project);
@@ -127,7 +138,7 @@ fn handle_request_open_project(
 /// argument or on a failed open.
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_project_arg(mut commands: Commands) {
-    let Some(path) = std::env::args()
+    let Some(path) = std::env::args_os()
         .skip_while(|a| a != "--project")
         .nth(1)
         .map(std::path::PathBuf::from)

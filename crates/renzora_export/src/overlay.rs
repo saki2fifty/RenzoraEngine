@@ -817,25 +817,18 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
     let upx_compress = export_state.upx_compress && crate::upx::supports(platform);
     let project_name = project_name.to_string();
 
-    // The game binary is the already-built renzora(.exe) for this platform.
-    // Operation Merge: the editor's own binary IS the game — copy it (and the
-    // shared libs sitting next to it) to the export dir. No download.
-    let template_path = match world.resource::<TemplateManager>().get(platform) {
-        Some(t) => t.path.clone(),
-        None => {
-            world.resource_mut::<ExportOverlayState>().progress = ExportProgress::Error(format!(
-                "No build found for {} — build it first (`renzora build {}`).",
-                platform.display_name(),
-                platform.dist_dir_name()
-            ));
-            return;
-        }
-    };
+    // A native project builds its own runtime on the worker. Only the
+    // template-copy path requires an existing platform template.
+    let template_path = world
+        .resource::<TemplateManager>()
+        .get(platform)
+        .map(|template| template.path.clone());
     // The shared libs (bevy_dylib, renzora.dll, std) sit next to the binary.
     // The copy filter in the worker ships those but NOT renzora_editor.dll (the
     // editor bundle) or the editor's *.exe tools — so the export is a clean game.
     let runtime_dir = template_path
-        .parent()
+        .as_ref()
+        .and_then(|path| path.parent())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
@@ -910,6 +903,18 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
         });
     }
 
+    let engine_inputs = crate::engine_plugins::Inputs {
+        preparation: world
+            .get_resource::<renzora_engine_plugins::EnginePluginEcsConfig>()
+            .map(|config| config.preparation.clone()),
+        trusted: world
+            .get_resource::<renzora::EnginePluginTrust>()
+            .is_some_and(|trust| trust.project.as_ref() == Some(&project.path)),
+        running_has_plugins: world
+            .get_resource::<renzora::EnginePluginRunningGeneration>()
+            .and_then(|running| running.0.as_ref())
+            .is_some_and(|stamp| !stamp.plugins.is_empty()),
+    };
     // Spawn background thread
     std::thread::spawn(move || {
         export_worker(
@@ -944,6 +949,7 @@ pub(crate) fn run_export(world: &mut World, project_name: &str) {
             upx_compress,
             cancel,
             loose_candidates,
+            engine_inputs,
         );
     });
 }
@@ -973,7 +979,7 @@ fn export_worker(
     mesh_quantize: bool,
     mesh_generate_lods: bool,
     mesh_lod_levels: u32,
-    template_path: std::path::PathBuf,
+    template_path: Option<std::path::PathBuf>,
     selected_plugins: Vec<renzora_plugin::host::loader::PluginInfo>,
     link_plugins_in: bool,
     runtime_dir: std::path::PathBuf,
@@ -983,7 +989,64 @@ fn export_worker(
     upx_compress: bool,
     cancel: Arc<AtomicBool>,
     loose_candidates: Vec<(String, std::path::PathBuf)>,
+    engine_inputs: crate::engine_plugins::Inputs,
 ) {
+    let target = crate::docker::rust_triple(platform).unwrap_or("");
+    let native_lean = (packaging_mode == PackagingMode::LeanSingleBinary).then(|| {
+        crate::engine_plugins::LeanOptions {
+            disabled_bevy: disabled_bevy_features.clone(),
+            disabled_runtime: disabled_runtime_features.clone(),
+            profile: lean_profile,
+            link_plugins: if link_plugins_in {
+                selected_plugins
+                    .iter()
+                    .map(|plugin| {
+                        (
+                            plugin.id.clone(),
+                            plugin.scope == renzora_plugin::sys::PluginScope::Editor,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        }
+    });
+    let native_runtime = match crate::engine_plugins::build_runtime(
+        &engine_inputs,
+        &project.path,
+        target,
+        &cancel,
+        native_lean.as_ref(),
+        &mut |message| {
+            let _ = tx.send(ExportMsg::Progress(message));
+        },
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = tx.send(ExportMsg::Error(error));
+            return;
+        }
+    };
+    let has_native_runtime = native_runtime.is_some();
+    let native_linked_ids = native_runtime
+        .as_ref()
+        .map(|runtime| runtime.linked_ids.clone())
+        .unwrap_or_default();
+    let Some(template_path) = native_runtime
+        .map(|runtime| runtime.binary)
+        .or(template_path)
+    else {
+        let _ = tx.send(ExportMsg::Error(format!(
+            "No build found for {} — install or build its export template first.",
+            platform.display_name()
+        )));
+        return;
+    };
+    let runtime_dir = template_path
+        .parent()
+        .map(|path| path.to_path_buf())
+        .unwrap_or(runtime_dir);
     // Pack assets
     let _ = tx.send(ExportMsg::Progress("Scanning project assets...".into()));
     let tx_pack = tx.clone();
@@ -1123,7 +1186,7 @@ fn export_worker(
     // linking was asked for but a plugin's source could not be found — those
     // fall back to shipping as files, which is why this is the build's answer
     // rather than the user's request.
-    let mut linked_ids: Vec<String> = Vec::new();
+    let mut linked_ids: Vec<String> = native_linked_ids;
 
     // Resolve the packer once, up front: a missing UPX is a skipped step with a
     // note, never a failed export. The user asked for a smaller game, not for the
@@ -1216,9 +1279,8 @@ fn export_worker(
                 Platform::MacOSX64 | Platform::MacOSArm64 => "dylib",
                 _ => "so",
             };
-            // Best-effort: a game that ships without its scripts is still a
-            // playable game, and failing the whole export over one is a worse
-            // trade than saying so.
+            // Missing scripts change game behavior: never report an incomplete
+            // package as a successful export.
             if let Err(e) = crate::build::stage_prebuilt_scripts(
                 &project.path,
                 &output_dir,
@@ -1226,7 +1288,10 @@ fn export_worker(
                 &build_service,
                 &mut sp,
             ) {
-                let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
+                let _ = tx.send(ExportMsg::Error(format!(
+                    "Could not package Rust scripts: {e}"
+                )));
+                return;
             }
             // Same trade for native plugins: a `Runtime`-scope one belongs in
             // the game, and the library the editor built is the thing that
@@ -1240,14 +1305,16 @@ fn export_worker(
                 // without having to know which kind each id was.
                 let native_selection: std::collections::HashSet<String> =
                     selected_plugins.iter().map(|p| p.id.clone()).collect();
-                if let Err(e) = crate::build::stage_runtime_native_plugins(
-                    &editor_dir,
-                    &output_dir,
-                    lib_ext,
-                    Some(&native_selection),
-                    &mut sp,
-                ) {
-                    let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
+                if !has_native_runtime {
+                    if let Err(e) = crate::build::stage_runtime_native_plugins(
+                        &editor_dir,
+                        &output_dir,
+                        lib_ext,
+                        Some(&native_selection),
+                        &mut sp,
+                    ) {
+                        let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
+                    }
                 }
                 // Phase 3 Tier-1 loose plugins. Same selection set, same
                 // library, same destination shape — the loose form is
@@ -1268,7 +1335,8 @@ fn export_worker(
                     if let Err(e) =
                         crate::build::stage_modding_sdk(&editor_dir, &output_dir, &mut sp)
                     {
-                        let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
+                        let _ = tx.send(ExportMsg::Error(e));
+                        return;
                     }
                 }
             }
@@ -1286,6 +1354,13 @@ fn export_worker(
                     .map(|_| ())
             }
             PackagingMode::SingleBinary => {
+                let binary_dest = output_dir.join(&binary_name);
+                let src = compress_exe(&template_path, &tx);
+                packer
+                    .append_to_binary(&src, &binary_dest, compression_level)
+                    .map(|_| ())
+            }
+            PackagingMode::LeanSingleBinary if has_native_runtime => {
                 let binary_dest = output_dir.join(&binary_name);
                 let src = compress_exe(&template_path, &tx);
                 packer

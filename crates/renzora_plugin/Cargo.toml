@@ -207,5 +207,8 @@ blake3 = { version = "1", optional = true }
 # target dir. The tests define their own minimal plugins inline instead, which
 # also means they exercise the API rather than one example's use of it.
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

@@ -365,6 +365,11 @@ impl Plugin for CodeEditorPlugin {
     fn build(&self, app: &mut App) {
         info!("[editor] CodeEditorPlugin");
         app.insert_resource(CodeEditorState::default());
+        app.init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(
+                Last,
+                report_unsaved_code.before(renzora::EnginePluginRestartGate),
+            );
 
         use renzora_editor_framework::SplashState;
         app.add_systems(
@@ -384,6 +389,61 @@ impl Plugin for CodeEditorPlugin {
         // bind directly to the shared `CodeEditorState` resource.
         native_code_editor::register_native_code_editor(app);
         native_problems::register_native_problems(app);
+    }
+}
+
+fn report_unsaved_code(
+    state: Res<CodeEditorState>,
+    mut unsaved: ResMut<renzora::EditorUnsavedWork>,
+) {
+    if state.is_changed() {
+        unsaved.report(
+            "code",
+            state
+                .open_files
+                .iter()
+                .filter(|file| file.is_modified)
+                .count(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn inactive_dirty_code_tabs_still_block_restart() {
+        let mut app = App::new();
+        app.init_resource::<CodeEditorState>()
+            .init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(Last, report_unsaved_code);
+        let file = OpenFile {
+            path: "script.rs".into(),
+            name: "script.rs".into(),
+            content: String::new(),
+            is_modified: true,
+            error: None,
+            last_checked_content: String::new(),
+            last_cursor_index: None,
+            breakpoints: Default::default(),
+            folds: Default::default(),
+        };
+        app.world_mut()
+            .resource_mut::<CodeEditorState>()
+            .open_files
+            .push(file);
+        app.update();
+        assert_eq!(
+            app.world().resource::<renzora::EditorUnsavedWork>().0["code"],
+            1
+        );
+        app.world_mut().resource_mut::<CodeEditorState>().open_files[0].is_modified = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
     }
 }
 

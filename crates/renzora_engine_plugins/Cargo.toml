@@ -7,9 +7,13 @@ description = "Portable build and staging service for restart-required Renzora e
 [dependencies]
 bevy = { workspace = true }
 blake3 = "1"
+dirs = "6"
+getrandom = "0.4"
+notify = "8.2"
 renzora = { path = "../renzora", default-features = false }
 renzora_compiler_cache = { path = "../renzora_compiler_cache" }
 renzora_identity = { path = "../renzora_identity" }
+renzora_rust_sdk = { path = "../renzora_rust_sdk", features = ["packaging"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"

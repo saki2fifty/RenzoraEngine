@@ -7503,6 +7503,7 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "renzora_identity",
+ "renzora_rust_sdk",
  "serde",
  "serde_json",
  "sha2",
@@ -7621,6 +7622,7 @@ dependencies = [
  "renzora_ember_editor",
  "renzora_engine",
  "renzora_engine_editor",
+ "renzora_engine_plugins",
  "renzora_environment_map",
  "renzora_environment_map_editor",
  "renzora_export",
@@ -7813,9 +7815,13 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "blake3",
+ "dirs 6.0.0",
+ "getrandom 0.4.3",
+ "notify",
  "renzora",
  "renzora_compiler_cache",
  "renzora_identity",
+ "renzora_rust_sdk",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
@@ -7854,6 +7860,7 @@ dependencies = [
  "renzora",
  "renzora_compiler_cache",
  "renzora_ember",
+ "renzora_engine_plugins",
  "renzora_identity",
  "renzora_import",
  "renzora_loose_plugins",
@@ -7862,6 +7869,7 @@ dependencies = [
  "renzora_plugin",
  "renzora_rpak",
  "renzora_rust_script",
+ "renzora_rust_sdk",
  "rfd",
  "serde",
  "serde_json",
@@ -8430,6 +8438,7 @@ dependencies = [
  "notify-debouncer-full",
  "renzora_identity",
  "renzora_plugin_derive",
+ "tempfile",
 ]
 
 [[package]]
@@ -8536,6 +8545,8 @@ name = "renzora_runtime"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "blake3",
+ "dirs 6.0.0",
  "image",
  "libloading 0.8.9",
  "renzora",
@@ -8612,6 +8623,15 @@ dependencies = [
  "renzora_static_scripts",
  "sha2",
  "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "renzora_rust_sdk"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.20",
  "toml 0.8.23",
 ]
 

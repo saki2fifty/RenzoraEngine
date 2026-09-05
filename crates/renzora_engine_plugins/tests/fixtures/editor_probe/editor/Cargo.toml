@@ -1,0 +1,13 @@
+[package]
+name = "phase5_editor_probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../../../crates/renzora", default-features = false, features = ["editor"] }
+renzora_scripting = { path = "../../../crates/renzora_scripting" }
+renzora_engine_plugins = { path = "../../../crates/renzora_engine_plugins" }
+
+[lints]
+workspace = true

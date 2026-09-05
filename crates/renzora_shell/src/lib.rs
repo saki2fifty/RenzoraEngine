@@ -35,6 +35,11 @@ pub struct ShellPlugin;
 impl Plugin for ShellPlugin {
     fn build(&self, app: &mut App) {
         info!("[editor] ShellPlugin (bevy_ui editor shell)");
+        app.init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(
+                Last,
+                report_unsaved_documents.before(renzora::EnginePluginRestartGate),
+            );
         app.add_plugins(EmberPlugin);
         // Restore the persisted per-workspace dock layout if one exists, else use
         // the built-in defaults. When restoring, append any *new* built-in
@@ -3891,6 +3896,75 @@ struct ExitPromptCancel;
 /// Are there any documents with unsaved edits?
 fn any_unsaved(tabs: &renzora_ui::DocumentTabState) -> bool {
     tabs.tabs.iter().any(|t| t.is_modified)
+}
+
+fn report_unsaved_documents(
+    tabs: Option<Res<renzora_ui::DocumentTabState>>,
+    theme: Option<Res<renzora_theme::ThemeManager>>,
+    mut unsaved: ResMut<renzora::EditorUnsavedWork>,
+) {
+    if let Some(theme) = theme {
+        if theme.is_changed() {
+            unsaved.report("theme", usize::from(theme.has_unsaved_changes));
+        }
+    } else if unsaved.0.contains_key("theme") {
+        unsaved.report("theme", 0);
+    }
+    if let Some(tabs) = tabs {
+        if tabs.is_changed() {
+            unsaved.report(
+                "documents",
+                tabs.tabs.iter().filter(|tab| tab.is_modified).count(),
+            );
+        }
+    } else if unsaved.0.contains_key("documents") {
+        unsaved.report("documents", 0);
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn saving_documents_does_not_clear_unsaved_theme() {
+        let mut app = App::new();
+        app.init_resource::<renzora_ui::DocumentTabState>()
+            .init_resource::<renzora_theme::ThemeManager>()
+            .init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(Last, report_unsaved_documents);
+        let index = app
+            .world_mut()
+            .resource_mut::<renzora_ui::DocumentTabState>()
+            .add_tab("Scene".into(), None);
+        app.world_mut()
+            .resource_mut::<renzora_ui::DocumentTabState>()
+            .tabs[index]
+            .is_modified = true;
+        app.world_mut()
+            .resource_mut::<renzora_theme::ThemeManager>()
+            .has_unsaved_changes = true;
+        app.update();
+        let work = app.world().resource::<renzora::EditorUnsavedWork>();
+        assert_eq!(work.0["documents"], 1);
+        assert_eq!(work.0["theme"], 1);
+        app.world_mut()
+            .resource_mut::<renzora_ui::DocumentTabState>()
+            .tabs[index]
+            .is_modified = false;
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+        app.world_mut()
+            .remove_resource::<renzora_theme::ThemeManager>();
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+    }
 }
 
 /// Handle a pending [`ExitRequest`]: exit immediately when nothing is dirty,

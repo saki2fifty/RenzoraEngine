@@ -15,7 +15,8 @@ use renzora_compiler_cache::types::COMPILER_SERVICE_SCHEMA;
 use renzora_identity::CanonicalId;
 
 use crate::{
-    select_candidate_generation, stage_generation, GenerationOutputs, PublishedEngineGeneration,
+    select_candidate_generation, stage_generation_with_support, GenerationOutputs,
+    GenerationSupportFile, PublishedEngineGeneration,
 };
 
 /// One executable Cargo must produce for a generation.
@@ -38,6 +39,8 @@ pub struct EngineBuildJob {
     pub cache_root: PathBuf,
     /// Cargo executable selected by the approved toolchain.
     pub cargo: PathBuf,
+    /// Absolute compiler path, verified against the generation's toolchain hash.
+    pub rustc: PathBuf,
     /// Exact compilation target.
     pub target: String,
     /// Approved non-development Cargo profile.
@@ -48,6 +51,8 @@ pub struct EngineBuildJob {
     pub runtime: Option<EngineBinaryTarget>,
     /// Editor output, when at least one editor half is declared.
     pub editor: Option<EngineBinaryTarget>,
+    /// Verified files required beside the replacement executables.
+    pub support: Vec<GenerationSupportFile>,
     /// Identity published with the completed generation.
     pub stamp: EnginePluginGenerationStamp,
 }
@@ -91,6 +96,7 @@ pub enum EngineBuildServiceError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Step {
     Sync,
+    Resolve,
     Compile,
 }
 
@@ -98,6 +104,7 @@ impl Step {
     fn label(self) -> &'static str {
         match self {
             Self::Sync => "generating plugin wiring",
+            Self::Resolve => "resolving external plugin dependencies",
             Self::Compile => "compiling editor and runtime",
         }
     }
@@ -112,19 +119,20 @@ struct RunningJob {
     queued: QueuedJob,
     attempt_id: u64,
     step: Step,
-    /// Held across both child processes so another editor cannot mutate this
-    /// overlay while Cargo is reading it.
+    /// Held through compilation and staging: different overlays share Cargo
+    /// outputs, so locking only the overlay would leave the copy unprotected.
     _overlay_lock: File,
 }
 
 struct PublishingJob {
     revision: u64,
-    result: mpsc::Receiver<Result<(PublishedEngineGeneration, bool), String>>,
+    cache_root: PathBuf,
+    result: mpsc::Receiver<Result<PublishedEngineGeneration, String>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Single-lane background builder. Submitting never blocks on Cargo; callers
-/// periodically poll from an ECS drain system or another event loop.
+/// poll on a worker thread because reaping and atomic publication can block.
 pub struct EngineBuildService {
     supervisor: Arc<CargoSupervisor>,
     next_revision: u64,
@@ -203,19 +211,29 @@ impl EngineBuildService {
         events
     }
 
-    /// Drain completed work and start the newest eligible work without waiting.
+    /// Drain completed work and start eligible work on the coordinator thread.
+    /// Candidate selection is serialized with submission and invalidation.
     pub fn poll(&mut self) -> Vec<EngineBuildEvent> {
         let mut events = Vec::new();
         if let Some(mut publishing) = self.publishing.take() {
             match publishing.result.try_recv() {
-                Ok(Ok((generation, true)))
+                Ok(Ok(generation))
                     if publishing.revision == self.latest_revision.load(Ordering::Acquire) =>
                 {
                     join_finished_worker(&mut publishing);
-                    events.push(EngineBuildEvent::Published {
-                        revision: publishing.revision,
-                        generation: Box::new(generation),
-                    });
+                    match select_candidate_generation(&publishing.cache_root, &generation) {
+                        Ok(true) => events.push(EngineBuildEvent::Published {
+                            revision: publishing.revision,
+                            generation: Box::new(generation),
+                        }),
+                        Ok(false) => events.push(EngineBuildEvent::Superseded {
+                            revision: publishing.revision,
+                        }),
+                        Err(error) => events.push(EngineBuildEvent::Failed {
+                            revision: publishing.revision,
+                            message: error.to_string(),
+                        }),
+                    }
                 }
                 Ok(Ok(_)) => {
                     join_finished_worker(&mut publishing);
@@ -274,7 +292,7 @@ impl EngineBuildService {
 
     fn finish_step(
         &mut self,
-        running: RunningJob,
+        mut running: RunningJob,
         record: AttemptRecord,
         events: &mut Vec<EngineBuildEvent>,
     ) {
@@ -290,12 +308,41 @@ impl EngineBuildService {
             });
             return;
         }
-        if running.step == Step::Sync {
-            match self.spawn(running.queued, Step::Compile, running._overlay_lock) {
+        if running.step == Step::Resolve {
+            let resolved = (|| -> Result<String, String> {
+                let baseline = std::fs::read_to_string(
+                    running
+                        .queued
+                        .job
+                        .workspace
+                        .join(".renzora-base-Cargo.lock"),
+                )
+                .map_err(|error| error.to_string())?;
+                let resolved =
+                    std::fs::read_to_string(running.queued.job.workspace.join("Cargo.lock"))
+                        .map_err(|error| error.to_string())?;
+                crate::lockfile::verify_extension(&baseline, &resolved)?;
+                Ok(blake3::hash(resolved.as_bytes()).to_hex().to_string())
+            })();
+            match resolved {
+                Ok(hash) => running.queued.job.stamp.lockfile_hash = hash,
+                Err(message) => {
+                    events.push(EngineBuildEvent::Failed { revision, message });
+                    return;
+                }
+            }
+        }
+        let next_step = match running.step {
+            Step::Sync => Some(Step::Resolve),
+            Step::Resolve => Some(Step::Compile),
+            Step::Compile => None,
+        };
+        if let Some(next_step) = next_step {
+            match self.spawn(running.queued, next_step, running._overlay_lock) {
                 Ok(next) => {
                     events.push(EngineBuildEvent::Building {
                         revision,
-                        step: Step::Compile.label(),
+                        step: next_step.label(),
                     });
                     self.running = Some(next);
                 }
@@ -309,21 +356,21 @@ impl EngineBuildService {
 
         let job = running.queued.job;
         let outputs = generation_outputs(&job);
-        let latest = self.latest_revision.clone();
+        let cache_root = job.cache_root.clone();
+        let overlay_lock = running._overlay_lock;
         let (sender, receiver) = mpsc::channel();
         let spawn = std::thread::Builder::new()
             .name(format!("engine_plugins.publish.{revision}"))
             .spawn(move || {
-                let result = stage_generation(&job.cache_root, job.stamp, &outputs)
-                    .map_err(|error| error.to_string())
-                    .and_then(|generation| {
-                        if latest.load(Ordering::Acquire) != revision {
-                            return Ok((generation, false));
-                        }
-                        select_candidate_generation(&job.cache_root, &generation)
-                            .map(|selected| (generation, selected))
-                            .map_err(|error| error.to_string())
-                    });
+                // Retain ownership while copying the compiler outputs.
+                let _overlay_lock = overlay_lock;
+                let result = stage_generation_with_support(
+                    &job.cache_root,
+                    job.stamp,
+                    &outputs,
+                    &job.support,
+                )
+                .map_err(|error| error.to_string());
                 let _ = sender.send(result);
             });
         match spawn {
@@ -334,6 +381,7 @@ impl EngineBuildService {
                 });
                 self.publishing = Some(PublishingJob {
                     revision,
+                    cache_root,
                     result: receiver,
                     worker: Some(worker),
                 });
@@ -346,10 +394,17 @@ impl EngineBuildService {
     }
 
     fn start_queued(&mut self, events: &mut Vec<EngineBuildEvent>) {
-        let Some(queued) = self.queued.take() else {
+        let Some(mut queued) = self.queued.take() else {
             return;
         };
-        let lock_path = queued.job.workspace.join(".renzora-build.lock");
+        if let Err(error) = std::fs::create_dir_all(&queued.job.cache_root) {
+            events.push(EngineBuildEvent::Failed {
+                revision: queued.revision,
+                message: format!("could not create engine build cache: {error}"),
+            });
+            return;
+        }
+        let lock_path = queued.job.cache_root.join("engine-build.lock");
         let lock = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -361,7 +416,7 @@ impl EngineBuildService {
             Err(error) => {
                 events.push(EngineBuildEvent::Failed {
                     revision: queued.revision,
-                    message: format!("could not open overlay build lock: {error}"),
+                    message: format!("could not open cache build lock: {error}"),
                 });
                 return;
             }
@@ -375,7 +430,17 @@ impl EngineBuildService {
             Err(std::fs::TryLockError::Error(error)) => {
                 events.push(EngineBuildEvent::Failed {
                     revision: queued.revision,
-                    message: format!("could not lock overlay build: {error}"),
+                    message: format!("could not lock cache build outputs: {error}"),
+                });
+                return;
+            }
+        }
+        match crate::working_copy::prepare(&queued.job) {
+            Ok(workspace) => queued.job.workspace = workspace,
+            Err(error) => {
+                events.push(EngineBuildEvent::Failed {
+                    revision: queued.revision,
+                    message: format!("could not prepare stable compiler workspace: {error}"),
                 });
                 return;
             }
@@ -484,9 +549,9 @@ fn validate_job(job: &EngineBuildJob) -> Result<(), EngineBuildServiceError> {
             ));
         }
     }
-    if job.profile == "dev" || job.profile.is_empty() {
+    if !crate::build_kit::approved_profile(&job.profile) {
         return Err(EngineBuildServiceError::InvalidJob(
-            "a non-development profile is required".to_string(),
+            "an approved dist, release, or dist-lean profile is required".to_string(),
         ));
     }
     for (field, actual, stamped) in [
@@ -510,6 +575,23 @@ fn validate_job(job: &EngineBuildJob) -> Result<(), EngineBuildServiceError> {
             "features disagree with the generation stamp".to_string(),
         ));
     }
+    if !job.rustc.is_absolute() {
+        return Err(EngineBuildServiceError::InvalidJob(
+            "the compiler must be selected by absolute path".into(),
+        ));
+    }
+    let output = Command::new(&job.rustc)
+        .current_dir(&job.workspace)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .arg("-vV")
+        .output()?;
+    if !output.status.success()
+        || blake3::hash(&output.stdout).to_hex().as_str() != job.stamp.toolchain_hash
+    {
+        return Err(EngineBuildServiceError::InvalidJob(
+            "selected compiler does not match the build-kit toolchain".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -523,6 +605,31 @@ fn valid_cargo_name(value: &str) -> bool {
 fn command_for(job: &EngineBuildJob, step: Step) -> Command {
     let mut command = Command::new(&job.cargo);
     command.current_dir(&job.workspace);
+    // An inherited wrapper/profile/flag override must not produce different
+    // machine code under an otherwise identical generation identity.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(conflicting_compiler_environment) {
+            command.env_remove(key);
+        }
+    }
+    for key in [
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "RUSTUP_TOOLCHAIN",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+    ] {
+        command.env_remove(key);
+    }
+    command.env("RUSTC", &job.rustc);
+    // Offline alone still reads the user's registry cache and Cargo config.
+    // Kits must provide their dependencies; writable compiler state stays in
+    // the private cache, including the wiring tool's host-target outputs.
+    command.env("CARGO_HOME", job.cache_root.join("cargo-home"));
+    command.env("CARGO_TARGET_DIR", target_dir(job));
     match step {
         Step::Sync => {
             command.args([
@@ -538,6 +645,13 @@ fn command_for(job: &EngineBuildJob, step: Step) -> Command {
             ]);
         }
         Step::Compile => {
+            // Cargo tracks option_env! inputs in the two binary entry points.
+            // This is set only after resolving and stamping the final lockfile.
+            command.env(
+                renzora::ENGINE_PLUGIN_STAMP_ENV,
+                toml::to_string(&job.stamp)
+                    .expect("generation stamp contains only TOML-compatible fields"),
+            );
             command.args([
                 "build",
                 "--offline",
@@ -557,8 +671,28 @@ fn command_for(job: &EngineBuildJob, step: Step) -> Command {
                 command.arg(job.features.iter().cloned().collect::<Vec<_>>().join(","));
             }
         }
+        Step::Resolve => {
+            // Only the private overlay lockfile may grow. The following gate
+            // verifies kit pins before the final --locked compilation.
+            // `tree --depth 0` resolves the lockfile without retaining the
+            // multi-megabyte JSON graph produced by `metadata` in diagnostics.
+            command.args(["tree", "--offline", "--depth", "0", "--prefix", "none"]);
+        }
     }
     command
+}
+
+fn conflicting_compiler_environment(key: &str) -> bool {
+    key.starts_with("CARGO_")
+        || matches!(
+            key,
+            "RUSTC"
+                | "RUSTC_WRAPPER"
+                | "RUSTC_WORKSPACE_WRAPPER"
+                | "RUSTFLAGS"
+                | "RUSTDOCFLAGS"
+                | "RUSTUP_TOOLCHAIN"
+        )
 }
 
 fn target_dir(job: &EngineBuildJob) -> PathBuf {
@@ -638,13 +772,37 @@ mod tests {
     }
 
     fn job(temp: &TempDir) -> EngineBuildJob {
+        static COMPILER: std::sync::LazyLock<(PathBuf, String)> = std::sync::LazyLock::new(|| {
+            let selected = Command::new("rustup")
+                .args(["which", "rustc"])
+                .output()
+                .expect("select compiler");
+            assert!(selected.status.success());
+            let rustc = PathBuf::from(
+                String::from_utf8(selected.stdout)
+                    .expect("compiler path")
+                    .trim(),
+            );
+            let output = Command::new(&rustc)
+                .arg("-vV")
+                .output()
+                .expect("compiler identity");
+            assert!(output.status.success());
+            (rustc, blake3::hash(&output.stdout).to_hex().to_string())
+        });
+        let mut build_stamp = stamp();
+        build_stamp.toolchain_hash = COMPILER.1.clone();
         let workspace = temp.path().join("overlay");
         fs::create_dir_all(&workspace).expect("workspace");
         fs::write(workspace.join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        fs::write(workspace.join("Cargo.lock"), "version = 4\n").expect("lockfile");
+        fs::write(workspace.join(".renzora-base-Cargo.lock"), "version = 4\n")
+            .expect("kit lockfile");
         EngineBuildJob {
             workspace,
             cache_root: temp.path().join("cache"),
             cargo: PathBuf::from("cargo"),
+            rustc: COMPILER.0.clone(),
             target: "x86_64-unknown-linux-gnu".into(),
             profile: "dist".into(),
             features: BTreeSet::new(),
@@ -654,19 +812,103 @@ mod tests {
                 output_name: "renzora".into(),
             }),
             editor: None,
-            stamp: stamp(),
+            support: Vec::new(),
+            stamp: build_stamp,
         }
+    }
+
+    #[test]
+    fn shared_cache_lock_prevents_starting_another_overlay_build() {
+        let temp = TempDir::new().expect("temp");
+        let mut job = job(&temp);
+        job.cargo = temp.path().join("missing-cargo");
+        fs::create_dir_all(&job.cache_root).expect("cache");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(job.cache_root.join("engine-build.lock"))
+            .expect("build lock");
+        lock.lock().expect("hold another build's output lock");
+        let mut service = EngineBuildService::new();
+        service.submit(job).expect("submit");
+        assert!(service.poll().is_empty());
+        assert!(service.is_busy());
+        drop(lock);
+        // Another parallel test may have briefly inherited the file descriptor
+        // while spawning its child. Observe eventual progress, not one poll.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if service
+                .poll()
+                .iter()
+                .any(|event| matches!(event, EngineBuildEvent::Failed { .. }))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "build did not resume after lock release"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!service.is_busy());
+    }
+
+    #[test]
+    fn real_resolution_extends_local_packages_before_locked_compilation() {
+        let temp = TempDir::new().expect("temp");
+        let job = job(&temp);
+        fs::create_dir_all(job.workspace.join("src")).expect("host source dir");
+        fs::create_dir_all(job.workspace.join("plugin/src")).expect("plugin source dir");
+        fs::write(job.workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = ['plugin']\nresolver = '2'\n[package]\nname = 'host'\nversion = '0.1.0'\nedition = '2021'\n").expect("host manifest");
+        fs::write(job.workspace.join("src/lib.rs"), "pub fn host() {}\n").expect("host source");
+        fs::write(
+            job.workspace.join("plugin/Cargo.toml"),
+            "[package]\nname = 'external-plugin'\nversion = '0.1.0'\nedition = '2021'\n",
+        )
+        .expect("plugin manifest");
+        fs::write(
+            job.workspace.join("plugin/src/lib.rs"),
+            "pub fn plugin() {}\n",
+        )
+        .expect("plugin source");
+        let output = command_for(&job, Step::Resolve)
+            .output()
+            .expect("resolve dependencies");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resolved = fs::read_to_string(job.workspace.join("Cargo.lock")).expect("resolved lock");
+        assert!(resolved.contains("external-plugin"));
+        crate::lockfile::verify_extension("version = 4\n", &resolved).expect("valid extension");
+        let output = command_for(&job, Step::Resolve)
+            .arg("--locked")
+            .output()
+            .expect("locked resolution");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
     fn rejects_development_profile_and_stamp_disagreement() {
         let temp = TempDir::new().expect("temp");
-        let mut invalid = job(&temp);
-        invalid.profile = "dev".into();
-        assert!(matches!(
-            validate_job(&invalid),
-            Err(EngineBuildServiceError::InvalidJob(_))
-        ));
+        for profile in ["dev", "test", "bench", "unknown"] {
+            let mut invalid = job(&temp);
+            invalid.profile = profile.into();
+            invalid.stamp.profile = profile.into();
+            assert!(matches!(
+                validate_job(&invalid),
+                Err(EngineBuildServiceError::InvalidJob(_))
+            ));
+        }
 
         let mut mismatch = job(&temp);
         mismatch.target = "aarch64-apple-darwin".into();
@@ -685,6 +927,37 @@ mod tests {
             validate_job(&escaping_output),
             Err(EngineBuildServiceError::InvalidJob(_))
         ));
+    }
+
+    #[test]
+    fn compiler_identity_and_environment_are_bound_to_the_job() {
+        let temp = TempDir::new().expect("temp");
+        let mut job = job(&temp);
+        validate_job(&job).expect("matching compiler");
+        job.stamp.toolchain_hash = "wrong compiler".into();
+        assert!(matches!(
+            validate_job(&job),
+            Err(EngineBuildServiceError::InvalidJob(_))
+        ));
+        for key in [
+            "RUSTC_WRAPPER",
+            "RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "CARGO_PROFILE_DIST_OPT_LEVEL",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            "RUSTUP_TOOLCHAIN",
+        ] {
+            assert!(conflicting_compiler_environment(key), "{key}");
+        }
+        assert!(!conflicting_compiler_environment("PATH"));
+        let command = command_for(&job, Step::Compile);
+        let env: BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("RUSTC")],
+            Some(job.rustc.as_os_str())
+        );
+        assert_eq!(env[std::ffi::OsStr::new("RUSTFLAGS")], None);
+        assert_eq!(env[std::ffi::OsStr::new("RUSTC_WRAPPER")], None);
     }
 
     #[test]
@@ -707,6 +980,149 @@ mod tests {
             .any(|pair| pair == ["--features", "alpha,zeta"]));
         assert!(arguments.contains(&"--locked".to_string()));
         assert!(arguments.contains(&"--offline".to_string()));
+        let encoded = command
+            .get_envs()
+            .find(|(key, _)| *key == renzora::ENGINE_PLUGIN_STAMP_ENV)
+            .and_then(|(_, value)| value)
+            .expect("embedded stamp");
+        assert_eq!(
+            toml::from_str::<EnginePluginGenerationStamp>(encoded.to_str().expect("UTF-8 stamp"))
+                .expect("stamp TOML"),
+            job.stamp
+        );
+    }
+
+    #[test]
+    fn every_cargo_step_uses_private_home_and_target_directory() {
+        use std::ffi::OsStr;
+
+        let temp = TempDir::new().expect("temp");
+        let job = job(&temp);
+        for step in [Step::Sync, Step::Resolve, Step::Compile] {
+            let command = command_for(&job, step);
+            let environment = command
+                .get_envs()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(
+                environment.get(OsStr::new("CARGO_HOME")),
+                Some(&Some(job.cache_root.join("cargo-home").as_os_str()))
+            );
+            assert_eq!(
+                environment.get(OsStr::new("CARGO_TARGET_DIR")),
+                Some(&Some(target_dir(&job).as_os_str()))
+            );
+        }
+    }
+
+    #[test]
+    fn real_cargo_builds_and_stages_without_a_populated_cargo_home() {
+        let temp = TempDir::new().expect("temp");
+        let mut job = job(&temp);
+        let rustc = Command::new("rustc")
+            .arg("-vV")
+            .output()
+            .expect("compiler identity");
+        assert!(rustc.status.success());
+        job.target = String::from_utf8(rustc.stdout)
+            .expect("UTF-8 compiler identity")
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .expect("host target")
+            .into();
+        job.stamp.target = job.target.clone();
+        job.runtime.as_mut().expect("runtime").output_name =
+            format!("renzora{}", std::env::consts::EXE_SUFFIX);
+        for directory in ["src", "plugin/src", "xtask/src"] {
+            fs::create_dir_all(job.workspace.join(directory)).expect("fixture directory");
+        }
+        fs::write(job.workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = ['plugin']\nexclude = ['xtask']\nresolver = '2'\n[package]\nname = 'renzora_app'\nversion = '0.1.0'\nedition = '2021'\n[[bin]]\nname = 'renzora'\npath = 'src/main.rs'\n[dependencies]\nexternal-plugin = { path = 'plugin' }\n[profile.dist]\ninherits = 'release'\n").expect("fixture manifest");
+        fs::write(
+            job.workspace.join("src/main.rs"),
+            "fn main() { println!(\"{}\", external_plugin::value()); }\n",
+        )
+        .expect("runtime source");
+        fs::write(
+            job.workspace.join("plugin/Cargo.toml"),
+            "[package]\nname = 'external-plugin'\nversion = '0.1.0'\nedition = '2021'\n",
+        )
+        .expect("plugin manifest");
+        fs::write(
+            job.workspace.join("plugin/src/lib.rs"),
+            "pub fn value() -> u32 { 42 }\n",
+        )
+        .expect("plugin source");
+        fs::write(job.workspace.join("xtask/Cargo.toml"),
+            "[workspace]\n[package]\nname = 'fixture-wiring'\nversion = '0.1.0'\nedition = '2021'\n").expect("wiring manifest");
+        fs::write(
+            job.workspace.join("xtask/Cargo.lock"),
+            "version = 4\n[[package]]\nname = 'fixture-wiring'\nversion = '0.1.0'\n",
+        )
+        .expect("wiring lock");
+        fs::write(
+            job.workspace.join("xtask/src/main.rs"),
+            "fn main() { assert_eq!(std::env::args().nth(1).as_deref(), Some(\"sync\")); }\n",
+        )
+        .expect("wiring source");
+        let companion = temp.path().join("companion");
+        fs::write(&companion, b"fixture data").expect("companion");
+        job.support.push(GenerationSupportFile {
+            source: companion,
+            destination: "data/example".into(),
+            blake3: blake3::hash(b"fixture data").to_hex().to_string(),
+        });
+        let cache = job.cache_root.clone();
+        let workspace = job.workspace.clone();
+        let compile_workspace = crate::working_copy::directory(&job);
+        assert!(!cache.join("cargo-home").exists());
+        let mut service = EngineBuildService::new();
+        service.submit(job).expect("submit real Cargo job");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let generation = loop {
+            let mut published = None;
+            for event in service.poll() {
+                match event {
+                    EngineBuildEvent::Failed { message, .. } => {
+                        panic!("real Cargo failed: {message}")
+                    }
+                    EngineBuildEvent::Published { generation, .. } => published = Some(generation),
+                    _ => {}
+                }
+            }
+            if let Some(generation) = published {
+                break generation;
+            }
+            assert!(Instant::now() < deadline, "real Cargo fixture timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let runtime = generation
+            .manifest
+            .artifacts
+            .iter()
+            .find(|file| file.role == "runtime")
+            .expect("runtime artifact");
+        let result = Command::new(generation.root.join(&runtime.file))
+            .output()
+            .expect("run staged runtime");
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"42\n");
+        assert_eq!(
+            fs::read(generation.root.join("data/example")).expect("staged companion"),
+            b"fixture data"
+        );
+        assert!(!workspace.join("target").exists());
+        assert!(!workspace.join("xtask/target").exists());
+        assert!(!cache.join("cargo-home/registry").exists());
+        assert_eq!(
+            generation.manifest.stamp.lockfile_hash,
+            blake3::hash(&fs::read(compile_workspace.join("Cargo.lock")).expect("resolved lock"))
+                .to_hex()
+                .to_string()
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("Cargo.lock")).expect("snapshot lock"),
+            "version = 4\n"
+        );
     }
 
     #[test]
@@ -840,6 +1256,42 @@ mod tests {
         assert_eq!(
             still_selected.manifest.content_hash,
             existing.manifest.content_hash
+        );
+    }
+
+    #[test]
+    fn invalidation_after_staging_preserves_candidate() {
+        let temp = TempDir::new().expect("temp");
+        let cache_root = temp.path().join("cache");
+        let output = temp.path().join("output");
+        fs::write(&output, b"previous").expect("output");
+        let outputs = GenerationOutputs {
+            editor: None,
+            runtime: Some(output.clone()),
+        };
+        let previous = crate::publish_generation(&cache_root, stamp(), &outputs).expect("publish");
+        fs::write(&output, b"newer").expect("output");
+        let staged = crate::stage_generation(&cache_root, stamp(), &outputs).expect("stage");
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(staged)).expect("completion");
+        let mut service = EngineBuildService::new();
+        service.latest_revision.store(1, Ordering::Release);
+        service.next_revision = 2;
+        service.publishing = Some(PublishingJob {
+            revision: 1,
+            cache_root: cache_root.clone(),
+            result: receiver,
+            worker: None,
+        });
+
+        service.invalidate();
+        assert_eq!(
+            service.poll(),
+            vec![EngineBuildEvent::Superseded { revision: 1 }]
+        );
+        assert_eq!(
+            crate::load_candidate_generation(&cache_root).expect("candidate"),
+            previous
         );
     }
 }

@@ -39,6 +39,9 @@ toml = "0.8"
 toml_edit = "0.22"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+renzora_engine_plugins = { path = "../renzora_engine_plugins" }
+renzora_rust_sdk = { path = "../renzora_rust_sdk", features = ["packaging"] }
+tempfile = "3"
 rfd = "0.15"
 zip = "2"
 # APK signer crypto (ECDSA P-256 + SHA-256), pure-Rust RustCrypto stack — see

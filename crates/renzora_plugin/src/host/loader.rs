@@ -1125,7 +1125,7 @@ pub unsafe fn activate_with_transaction(
         }
     }
     let mut to_append = Vec::new();
-    for (id, _pos) in &companions {
+    for id in companions.keys() {
         if let Some(b) = prior_resource_bytes.get(id) {
             to_append.push(crate::host::JournalEntry::ResourceInserted {
                 id: *id,
@@ -1377,7 +1377,7 @@ pub fn load_one_transactional(
         activate_with_transaction(
             world,
             slot,
-            &*library,
+            &library,
             init,
             proposed_generation,
             identity,

@@ -27,9 +27,9 @@
 # helper, and it must never pull `bevy` (which would perturb the workspace
 # feature unification that keeps every crate on one Bevy compilation).
 #
-# The single exception is `renzora_native_build`, and it is one because it costs
-# nothing: that crate has no dependencies of its own, so xtask's build is
-# unchanged. It holds the `rustc` command line for compiling a native plugin,
+# The build-only dependencies are `renzora_native_build` and the optional
+# source-SDK packager in `renzora_rust_sdk`. Neither depends on Bevy. The former
+# holds the `rustc` command line for compiling a native plugin,
 # which the editor (`renzora_plugin_build`) must produce identically — the two
 # used to keep separate copies, and a change to one drifted silently from the
 # other. A path dependency on a workspace member is safe here despite the note
@@ -47,3 +47,6 @@ publish = false
 
 [dependencies]
 renzora_native_build = { path = "../crates/renzora_native_build" }
+# Source-SDK packaging is shared with replacement builds. Its optional TOML
+# parser adds no Bevy or compiler-service dependency to this build helper.
+renzora_rust_sdk = { path = "../crates/renzora_rust_sdk", features = ["packaging"] }

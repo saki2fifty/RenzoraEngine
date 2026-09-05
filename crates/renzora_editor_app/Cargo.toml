@@ -95,6 +95,9 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [features]
+# Selected only by isolated Tier 2 replacement builds. Their plugins are
+# statically linked; the legacy SDK prebuild/restart path must not run.
+tier2-native = []
 # Gates the `[[bin]]` above, so a native `--workspace` build does not produce a
 # second executable that is both redundant and unlinkable. Empty on purpose: it
 # selects a target rather than turning any code on. The wasm lane passes it

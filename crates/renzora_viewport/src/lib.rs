@@ -253,7 +253,7 @@ impl Plugin for ViewportPlugin {
                 .run_if(in_state(renzora_editor_framework::SplashState::Editor)),
         );
 
-        app.add_systems(Last, external_runtime::kill_on_app_exit);
+        app.add_systems(Last, external_runtime::kill_on_app_exit.after(renzora::EnginePluginRestartGate));
 
         // Throttle / restore the editor's render loop around external runs.
         // Not gated on `SplashState` so the restore always runs.

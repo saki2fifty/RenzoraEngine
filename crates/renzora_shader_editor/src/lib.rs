@@ -59,6 +59,11 @@ impl Plugin for ShaderEditorPlugin {
     fn build(&self, app: &mut App) {
         info!("[editor] ShaderEditorPlugin");
         app.init_resource::<ShaderEditorState>();
+        app.init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(
+                Last,
+                report_unsaved_shader.before(renzora::EnginePluginRestartGate),
+            );
         app.add_plugins(preview::ShaderPreviewPlugin);
         app.add_plugins(native_preview::NativeShaderPreview);
         app.add_plugins(native_compiler_log::NativeShaderCompilerLog);
@@ -67,4 +72,42 @@ impl Plugin for ShaderEditorPlugin {
     }
 }
 
+fn report_unsaved_shader(
+    state: Res<ShaderEditorState>,
+    mut unsaved: ResMut<renzora::EditorUnsavedWork>,
+) {
+    if state.is_changed() {
+        unsaved.report("shader", usize::from(state.is_modified));
+    }
+}
+
 renzora::add!(ShaderEditorPlugin, Editor);
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn dirty_shader_blocks_restart_until_saved() {
+        let mut app = App::new();
+        app.init_resource::<ShaderEditorState>()
+            .init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(Last, report_unsaved_shader);
+        app.world_mut()
+            .resource_mut::<ShaderEditorState>()
+            .is_modified = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<renzora::EditorUnsavedWork>().0["shader"],
+            1
+        );
+        app.world_mut()
+            .resource_mut::<ShaderEditorState>()
+            .is_modified = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+    }
+}

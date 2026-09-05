@@ -580,8 +580,8 @@ pub fn check_compat(
             compared: call_count,
         });
     }
-    for i in 0..host_call_len {
-        if desc.call_prefix_hashes[i] != host_call[i] {
+    for (i, expected) in host_call.iter().enumerate().take(host_call_len) {
+        if desc.call_prefix_hashes[i] != *expected {
             return Err(CompatError::PrefixHashMismatch {
                 which: "ScriptCall",
                 compared: i + 1,
@@ -606,8 +606,8 @@ pub fn check_compat(
             compared: host_count,
         });
     }
-    for i in 0..host_hc_len {
-        if desc.host_prefix_hashes[i] != host_hc[i] {
+    for (i, expected) in host_hc.iter().enumerate().take(host_hc_len) {
+        if desc.host_prefix_hashes[i] != *expected {
             return Err(CompatError::PrefixHashMismatch {
                 which: "ScriptHostCalls",
                 compared: i + 1,
@@ -659,13 +659,16 @@ pub type QueryDescFn = unsafe extern "C" fn(
 pub type DescriptorSizeFn = unsafe extern "C" fn() -> u32;
 
 /// Query the cdylib for its descriptor using the size-safe ABI. The
-/// caller passes the addresses of the two query symbols obtained
-/// from `libloading` and a host-owned output buffer with `capacity`
-/// bytes.
+/// caller passes the two query symbols obtained from `libloading` and
+/// the maximum descriptor capacity it accepts. This function allocates
+/// the output buffer after checking the reported size.
 ///
-/// Returns the parsed descriptor on success. The buffer is supplied
-/// by the caller so a host can reuse a single allocation across
-/// multiple loads.
+/// # Safety
+///
+/// Both symbols must belong to a live library and implement their declared
+/// ABI. The query must respect the supplied buffer capacity and initialize a
+/// valid descriptor, including valid function pointers. The caller must keep
+/// the library loaded while any returned function pointer remains usable.
 pub unsafe fn query_descriptor(
     size_fn: DescriptorSizeFn,
     query_fn: QueryDescFn,
@@ -1252,7 +1255,7 @@ mod tests {
         let looked = r.lookup("project://hello.rs").expect("registered");
         assert!(std::ptr::eq(
             looked.entry as *const ScriptEntry as *const (),
-            noop_script_entry as *const () as *const ()
+            noop_script_entry as *const ()
         ));
     }
 

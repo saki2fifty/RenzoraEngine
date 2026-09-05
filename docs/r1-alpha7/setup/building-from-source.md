@@ -1,203 +1,82 @@
 # Building from a Checkout
 
-Clone the Renzora engine workspace and build the editor, the game runtime, or every export target.
-
-**Build for your own machine with `cargo renzora`.** It's an ordinary Cargo build — no Docker, no images, no container. **Use Docker when you need to cross-compile**: producing export templates for platforms you don't own is the job those toolchain images exist to do.
-
-> **Why the split.** Renzora's *dynamic-plugin* system needs the host binary, the editor bundle, and every distribution plugin to share **one** compiled copy of Bevy and the `renzora` SDK. Building everything from source in a single environment gives you that by construction, which is exactly what `cargo renzora` does — and `rust-toolchain.toml` pins the same rustc the images use. Docker guarantees the same thing across *different* machines, which is what makes it the right tool for release artefacts and for the marketplace, and the wrong one for a local build.
->
-> [Standalone plugins](/docs/r1-alpha7/extending/standalone-plugins) sidestep the question completely: they never link Bevy, so their compatibility does not depend on your build environment at all.
-
-## What you're building
-
-Renzora is a single Bevy 0.19 Cargo workspace with exactly **one binary**: `renzora_app`, which produces `renzora` (`renzora.exe` on Windows) from `src/main.rs`. That one binary is the engine — editor, game runtime, and dedicated server in one. The editor is **not** a compile-time feature: it ships as a removable cdylib, `renzora_editor` (`renzora_editor.dll` / `librenzora_editor.so` / `.dylib`), that the binary dlopens from beside itself at startup.
-
-- Bundle present beside the exe → the binary launches as the **editor**.
-- Delete that one file (or pass `--no-editor`) → the same binary is the **shipped game**.
-
-> Two things share the name `renzora`. The crate in *this* workspace (`crates/renzora`) is the SDK **library** (`crate-type = ["dylib", "rlib"]`) — installing it produces nothing runnable. The **`renzora` CLI** (`cargo install renzora`, a separate published crate) scaffolds projects and drives the Docker image below; most people start with it (`renzora new` → `renzora run`). This page covers building a checkout you already have with that same CLI.
+Use the checkout's build helper for local staging, and the platform toolchain containers for cross-compilation. A successful Cargo compile alone does not place every companion file where the running editor needs it.
 
 ## Prerequisites
 
-- **Git** — to clone the engine.
-- **Rust** — via [rustup](https://rustup.rs). `rust-toolchain.toml` pins the version, so rustup installs and selects the right one on first build.
-- Your platform's usual native build dependencies: a C/C++ toolchain, and on Linux the X11/Wayland/ALSA/udev dev headers. The full list mirrors `docker/base/Dockerfile`.
+Use the Rust version pinned in `rust-toolchain.toml`. Keep it in lockstep with `docker/base/Dockerfile` when changing the pin. Native builds also need the platform's C/C++ toolchain and system libraries; the Linux image lists its X11/Wayland, audio and device-library development inputs.
 
-**Docker** is needed only for [cross-compiling](#cross-compiling-for-other-platforms) and for running the test suite on Windows.
+Build and test with non-debug profiles. For this fork, ordinary validation uses `--profile dist`. The standalone `xtask` helper uses `--profile release`.
 
-> The pinned Rust version lives in two lockstep files: `rust-toolchain.toml` (native) and `docker/base/Dockerfile` (`FROM rust:1.95.0-bookworm`, container). They must move together.
+## Local build and staging
 
-## Clone and run
+From the repository root:
 
-```bash
-git clone https://github.com/renzora/engine.git
-cd engine
-cargo renzora           # build the workspace, stage dist/, and launch the editor
+```sh
+cargo run --profile release --manifest-path xtask/Cargo.toml -- dist
 ```
 
-That's the whole flow. `cargo renzora` is an `xtask` that compiles the workspace, arranges `dist/<platform>/` exactly the way the container's `build-all.sh` does — `bevy_dylib` and `renzora` beside the exe, the editor bundle beside them, plugins in `plugins/` — and then launches it. `cargo renzora dist` stages without launching.
+This invokes the same helper behind `cargo renzora dist`, while explicitly selecting its release profile. It synchronizes plugin wiring, builds the normal checkout configuration and stages the platform directory without launching it. Omit `dist` to use the helper's build-and-run mode.
 
-The first build takes several minutes (Bevy is large); subsequent builds are incremental.
+The repository retains its legacy shared-image defaults during migration. The native engine-plugin build is a separate, isolated configuration described below. Do not assume that deleting a shared library from a normal checkout build converts it into a static replacement build.
 
-### Everyday commands
+Normal staging includes the small `rust-sdk/` source package for live Rust plugins and scripts, as well as files required by the retained legacy path. To refresh only the small package:
 
-| | |
-|---|---|
-| `cargo renzora` | build, stage, run the editor |
-| `cargo renzora dist` | build and stage without launching |
-| `cargo check` | fast compile check while editing — doesn't link |
-| `cargo clippy` | reproduces the CI lint gate exactly |
-| `renzora test` | the test suite (see the caveat below) |
-
-> **`cargo test` does not link natively on Windows.** The test harness pushes the `renzora` dylib past the PE format's 65,535 exported-symbol ceiling and the linker refuses. It's a limit of the executable format, not something to configure around. Run `renzora test`, which builds in the Linux container where no such table exists. `cargo check` and `cargo clippy` are unaffected and run natively everywhere.
-
-| Command | What it does |
-|---|---|
-| `cargo renzora` | Build the workspace, stage `dist/<platform>/`, and **launch** the editor |
-| `cargo renzora dist` | Same build + stage, but **don't** launch — just produce the folder |
-| `cargo renzora -- --no-editor` | Build + stage + launch in shipped-game mode (args after the binary are forwarded) |
-
-**Why not just `cargo run`?** A bare `cargo run` compiles everything but leaves the distribution plugin cdylibs (`renzora_lumen`, `renzora_cloth`, …) flat in `target/dist/`, while the dynamic loader looks for them in `<exe-dir>/plugins/`. So those plugins build but never load. `cargo renzora` adds the one missing step — staging the artifacts into the runnable `dist/` layout (`bevy_dylib`, `renzora`, and the editor bundle beside the exe; every other plugin cdylib in `plugins/`), exactly like the container's `build-all.sh`. The staging lives in the `xtask/` crate and runs on plain `cargo` (the `renzora` cargo alias points at it).
-
-**What native does *not* do:** cross-compile. `cargo renzora` only ever produces artifacts for the machine it runs on. For Windows/macOS/Linux/wasm/mobile builds from one host, use Docker (`renzora build`, below).
-
-### The `renzora` CLI — the build interface
-
-The CLI is the canonical way to build and run a checkout. Each command runs `cargo` inside the container against the custom `dist` profile (`inherits = "release"`, `opt-level = 2`, `strip = "symbols"`) so that plugin ABI hashes stay consistent across every build and machine.
-
-| Command | What it builds / runs |
-|---|---|
-| `renzora run` | Build the workspace and run the **editor** |
-| `renzora run runtime` | Run the **shipped-game** shape (same binary, `--no-editor`) |
-| `renzora run -- --server` | Run a headless **dedicated server** |
-| `renzora build [platforms...]` | Cross-build the binary + editor bundle + shared `bevy_dylib` (no args = all platforms) |
-| `renzora add <name> [--editor\|--dylib]` | Scaffold a plugin crate |
-| `renzora remove <name>` | Delete a plugin crate and unregister it |
-| `renzora test` / `renzora check` | Reproduce the CI test + clippy jobs |
-| `renzora shell` | Open a shell inside the build container |
-
-> Under the hood the CLI maps to `cargo` invocations on the `dist` profile inside the container — e.g. the editor is `run --profile dist --workspace --bin renzora`, the lean runtime is `build --profile dist --bin renzora` (deliberately **not** `--workspace`, so editor-only crates and distribution plugins never enter the build graph). You never run these natively; the CLI runs them in the image for you.
-
-### Runtime modes
-
-The same binary picks its mode at launch by flag — there are no separate "editor" / "server" builds:
-
-| Flag | Mode |
-|---|---|
-| *(none)* | Editor if the bundle dll is present, otherwise the shipped game |
-| `--no-editor` (or `RENZORA_NO_EDITOR`) | Force the shipped-game runtime |
-| `--server` | Headless **dedicated server** (no window, no GPU) |
-| `--host` | Windowed **listen server** (client + server in one process; **wins over `--server`**) |
-
-A `--server`/`--host` launch is never an editor session even if the bundle dll is present. Server flags `--port`, `--addr`/`--address`, `--tick-rate`, and `--max-clients` overlay the project's `[network]` settings; `--project <path>` and `--rpak <path>` are also recognized. The dedicated server is the same `renzora` binary, not a separate executable.
-
-## How the shared-library build works
-
-Renzora's dynamic-plugin system requires that the host binary, the dlopened editor bundle, and any distribution plugins all share **one compiled copy** of Bevy and of the `renzora` SDK so their `TypeId`s match across the dlopen boundary. `.cargo/config.toml` arranges this with `-C prefer-dynamic` plus `bevy/dynamic_linking`:
-
-- `bevy` ships as a single `bevy_dylib-<hash>` shared library.
-- `renzora` ships as a single `renzora.dll` / `librenzora.so` / `librenzora.dylib` (it folds in the post-process framework and the editor contract).
-- Workspace plugins are plain **rlibs** statically linked into the binary; **distribution plugins** are cdylibs loaded at runtime from `plugins/`.
-
-Because the binary links these by name, the `.dll`/`.so`/`.dylib` files must travel **beside** the binary (Linux/macOS use an rpath of `$ORIGIN` / `@loader_path`; on Windows they sit in the same folder).
-
-> Windows uses `rust-lld` as the linker (MSVC `link.exe` hits the 65535-object limit on `bevy_dylib`). `crt-static` is intentionally **disabled** because it changes crate disambiguators and would break `TypeId` equality across the dylib boundary. This is one more reason the build is container-only — the linker setup is fixed inside the image.
-
-### build.rs
-
-The root `build.rs` emits two environment values used by the dynamic-plugin ABI guard:
-
-- `RENZORA_ENGINE_VERSION` — the package version.
-- `RENZORA_BUILD_HASH` — an FNV-1a hash of `"<version>-<rustc version>-bevy0.19"`. The loader rejects any plugin whose hash differs, so a plugin built against a different compiler or engine version is refused rather than crashing. (Building everyone in the same image is what keeps this hash equal across machines.)
-
-It also embeds the Windows icon/version resource (via `winres` on a Windows host, or a hand-written `.rc` + `llvm-rc` when cross-compiling Linux→Windows-MSVC) and re-emits the static `zstd` link directive.
-
-## Cross-compiling for other platforms
-
-**This is what Docker is for.** Shipping a game means producing builds for machines you don't have — a macOS bundle from a Windows box, an Android APK from Linux. Each target needs its own compiler, linker and SDK, and installing six of those by hand is exactly the problem a container solves. Nothing on this page before this point needed Docker; everything after it does.
-
-```bash
-cargo install renzora     # the CLI that drives the images
-renzora init              # pull the toolchain images
+```sh
+cargo run --profile release --manifest-path xtask/Cargo.toml -- source-sdk --out <installation-directory>
 ```
 
-Every cross-platform target builds inside the engine's Docker toolchain, split into a shared base plus one image per platform (all under **`ghcr.io/renzora/*`**). The base (`docker/base/Dockerfile`, `FROM rust:1.95.0-bookworm`) is the single source of truth for the Rust version and carries the linux-gnu targets + `mold`/`clang`/`lld` linkers + LLVM-19; each platform image builds `FROM` it and adds its cross toolchain — `windows` (xwin/MSVC), `macos` & `ios` (osxcross + SDKs), `android` (NDK r27c), `wasm` (`wasm-bindgen` + `binaryen`), `linux` (dual-arch cross-gcc + `appimagetool` + UPX). The host only needs Docker, and the CLI pulls just the images a command needs — the GPU editor/game still runs natively from `dist/`.
+Linux and macOS bundles keep this source package beside the executable. Compiler output goes into per-user cache storage, so the installation can remain read-only.
 
-```bash
-# Build specific platforms into ./dist
-renzora build windows linux
+## Validation
 
-# Build everything the container can produce
-renzora build
+```sh
+cargo check --profile dist -p <crate>
+cargo test --profile dist -p <crate>
+cargo clippy --profile dist -p <crate> --lib --no-deps -- -D warnings -A clippy::too_many_arguments -A clippy::type_complexity
 ```
 
-`renzora build [platform ...]` (no args = all) accepts these platform tokens:
+Select affected crates together when practical to avoid rebuilding shared dependencies with different feature combinations. The narrow library lint command is not a claim that all integration tests passed.
 
-| Token | Output directory |
-|---|---|
-| `linux` (= `linux-x64` + `linux-arm64`) | `dist/linux-x64/`, `dist/linux-arm64/` |
-| `linux-x64` / `linux-arm64` | the individual Linux dir |
-| `windows` | `dist/windows-x64/` |
-| `macos` (= `macos-x64` + `macos-arm64`) | `dist/macos-x64/`, `dist/macos-arm64/` |
-| `macos-x64` / `macos-arm64` | the individual macOS dir |
-| `wasm` | `dist/web-wasm32/` |
-| `android` (= `android-arm64` + `android-x86`) | `dist/android-arm64/`, `dist/android-x86/` |
-| `ios` | `dist/ios-arm64/` |
+This fork's workspace-wide tests have known unrelated vendored XR example failures. Per-crate results should identify their scope and any ignored tests; do not report a workspace pass from a smaller suite.
 
-Desktop targets place the binary and its shared libraries directly in the platform dir; wasm and mobile targets nest their output under a `runtime/` subdirectory.
+## Building an installed engine-plugin kit
 
-> Notes: macOS lanes build only when osxcross is present; the Android and iOS lanes are **best-effort** (a failure there does not fail the whole build), as is the non-host Linux arch. The web build is **game-runtime only** — there is no WebAssembly editor (the binary has no `editor` compile feature, and the editor bundle is a desktop dlopen target). On Linux the editor build is additionally wrapped into an AppDir and `.AppImage` when `appimagetool` is available.
+The Phase 5 release helpers separate source preparation, vendoring, packaging and actual editor/runtime building:
 
-> **`windows-arm64` is missing from that list on purpose** — the container cannot produce it. Building for Windows on ARM needs the real MSVC toolchain, which is not redistributable, so that slice is built natively (on the machine, or by the `windows-arm64` job in `.github/workflows/build-engine.yml`). See [Cross-compilation](../packaging/cross-compilation.md#supported-targets).
+1. `prepare_kit_sources` copies the engine into a new workspace, enables the native editor/runtime configuration there, preserves the eleven legacy native plugins through static wiring, and resolves the additional pinned dependencies offline.
+2. Vendor the prepared workspace's complete locked dependency graph using the release environment. Missing packages must be acquired before declaring the kit ready; the installed editor does not borrow the developer's Cargo cache.
+3. `package_rust_sdk` supplies the small guest source package. Collect platform-reviewed runtime companions, including standalone plugin libraries.
+4. `package_kit` produces a new kit with an inventory, content hashes, sizes, engine identity, target, profile and exact compiler identity.
+5. `build_installed_kit` builds a staged editor/runtime generation from that kit and the selected plugin root, with a private Cargo home and output cache. For a baseline distribution, provide an empty plugin directory.
 
-### Plugin scaffolding
+These helpers are examples in `renzora_engine_plugins`; run them with `cargo run --profile dist -p renzora_engine_plugins --example <name> -- <arguments>`. Their usage strings name the required paths. Output directories for source preparation and packaging must be new, not the engine checkout or an existing installation.
 
-The CLI creates and removes plugin crates with the right `Cargo.toml` wiring:
+The resulting native generation contains `renzora-editor`, `renzora`, the small source SDK and verified companions. Distribute the matching kit as `engine-build-kit/` beside the editor, or launch with `--engine-build-kit <directory>`. The embedded kit identity must match. Never edit kit contents after packaging.
 
-```bash
-renzora add cool_fx              # statically-linked engine plugin (Runtime scope)
-renzora add cool_fx --editor     # editor-only plugin (Editor scope, optional dep)
-renzora add cool_fx --dylib      # distribution plugin (standalone cdylib, dlopen)
-renzora remove cool_fx           # delete the crate and unregister it
+The installed build needs the exact Rust toolchain and native system build tools. The kit supplies engine and dependency sources, not the compiler or a large precompiled Bevy cache. First builds are expensive; later builds reuse stable cached engine inputs.
+
+## Cross-platform builds
+
+The `docker/` toolchains support cross-compiling runtime/export artifacts. A cross-check such as the following validates Windows compilation without producing an editor EXE:
+
+```sh
+cargo check --profile dist -p renzora_engine_plugins --target x86_64-pc-windows-msvc
 ```
 
-`--editor` and `--dylib` are mutually exclusive. A default (no-flag) plugin builds as an rlib baked into the host binary and self-registers via its inventory constructor; `--dylib` adds the `dlopen` feature so the plugin emits the FFI exports the dynamic loader needs.
+Run it inside the configured Windows toolchain environment. The target, linker and native libraries must already be available.
 
-### Compressing binaries with UPX
+A cross-built executable is not by itself a validated installed Tier 2 release. A kit must match the platform and exact toolchain that will rebuild extensions on the user's machine. The legacy metadata SDK has additional host-proc-macro constraints; it must not be substituted for the new source kit.
 
-```bash
-renzora upx                      # compress every platform under dist/
-renzora upx dist/windows-x64     # just one platform
-```
+The current Phase 5 evidence includes full Linux builds and GUI probes plus Windows MSVC checks. Windows EXE production remains deferred, and no macOS GUI run is claimed. See [Cross-compilation](../packaging/cross-compilation.md) and [Export Templates](../packaging/export-templates.md) for the platform-specific packaging paths.
 
-This runs `upx --brute` (slowest, smallest) over the host binary, the SDK dylibs (`renzora`, `renzora_editor`), `bevy_dylib`, and everything in `plugins/`. The `wasm` and `ios` outputs (`.wasm` / `.a`) are not UPX-compressible and are skipped.
+## Runtime and project extensions
 
-This command packs the **engine's own** `dist/` artefacts. To pack a *game* the same way, tick **Compress binary with UPX** in the export dialog's Compression tab — it runs the same packer over the exported executable and its libraries, at `--best --lzma` rather than `--brute` so an export doesn't take an hour. See [Exporting → overview](../exporting/overview.md#compressing-the-binary-with-upx).
+The native replacement editor launches the sibling `renzora` runtime for external play. The dedicated server remains the runtime launched with `--server`; it is not a third executable.
 
-## What is NOT in this repo
+Loose Rust plugins and in-editor Rust scripts use the shared cached compiler service and small guest SDK. They do not trigger a full Bevy rebuild. Project directories explicitly declaring `type = "engine"` use the restart-required engine build path.
 
-A few things that live outside this workspace, or that older docs got wrong:
-
-| Often referenced | Reality |
-|---|---|
-| The `renzora` CLI source | The CLI (`cargo install renzora`) is real, but its **source is a separate published crate**, not this workspace. Its commands drive the `docker/` toolchain: `build`/`add`/`remove`/`upx` wrap the `docker/*.sh` scripts here; `new`/`init`/`run`/`test`/`check`/`shell`/`clean`/`destroy` are CLI-level (container lifecycle + cargo wrappers that run *inside* the image). |
-| A native `cargo run` / `cargo build` build | A bare `cargo run` works but silently skips the dlopen distribution plugins (they're built but not staged into `plugins/`). For a complete native build use **`cargo renzora`** (see [Building natively](#building-natively-without-docker)); for cross-platform use `renzora build`. |
-| `rust-toolchain.toml` | **Exists** — it pins the Rust version for native builds. The container's version lives in `docker/base/Dockerfile`; the two are kept in lockstep. |
-| `Makefile.toml` / `cargo-make` (`makers ...`) | No `Makefile.toml` / `cargo-make` — the old `makers` staging was replaced by the `xtask` crate behind `cargo renzora` (no extra install). Cross-platform/release still go through the `renzora` CLI + `docker/` scripts. |
-| A separate dedicated-server binary | Gone — the server is the same `renzora` binary launched with `--server`. |
-| An `editor` compile-time feature / separate editor binary | Removed — the editor is the removable `renzora_editor` cdylib bundle. |
-| tvOS / Apple TV target | Aspirational only — no tvOS toolchain in the image and no `build-all.sh` lane. |
-
-## What's next?
-
-- [Project Structure](/docs/r1-alpha7/setup/project-structure) — how the workspace and its ~187 crates are laid out
-- [Architecture](/docs/r1-alpha7/setup/architecture) — the one-binary, editor-as-removable-cdylib model in depth
-- [Building Plugins](/docs/r1-alpha7/extending/plugins) — extend the engine with `renzora::add!`
-- [Building Export Templates](/docs/r1-alpha7/packaging/export-templates) — produce shippable game builds
-
-## Building loose single-file plugins
-
-Loose `plugins/<name>.rs` files are compiled automatically by the editor
-through the shared compiler cache. They use the small `renzora_plugin`
-interface and do not require a full Bevy-linked plugin build. Editor Rust
-scripts continue to use their separate Rust-script compiler.
+- [Architecture](architecture.md)
+- [Building Plugins](../extending/plugins.md)
+- [Native Plugins](../extending/native-plugins.md)
+- [Rust Scripts](../scripting/rust-scripts.md)

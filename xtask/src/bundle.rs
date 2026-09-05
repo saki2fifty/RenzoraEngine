@@ -93,6 +93,12 @@ fn move_binaries(out: &Path, into: &Path) -> std::io::Result<()> {
             move_file(&src, &into.join(name))?;
         }
     }
+    // Unlike the legacy unpacked metadata SDK, these sources are read-only.
+    // Keep them beside the executable inside both AppImage and macOS bundles.
+    let sdk = out.join("rust-sdk");
+    if sdk.is_dir() {
+        std::fs::rename(sdk, into.join("rust-sdk"))?;
+    }
     Ok(())
 }
 

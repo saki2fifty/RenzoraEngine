@@ -1251,6 +1251,19 @@ fn url_click(q: Query<(&Interaction, &SplashUrl), Changed<Interaction>>) {
 // ── Project actions ──────────────────────────────────────────────────────────
 
 fn enter_project(world: &mut World, project: crate::project::CurrentProject) {
+    if world
+        .get_resource::<renzora::EnginePluginRunningGeneration>()
+        .and_then(|running| running.0.as_ref())
+        .is_some_and(|stamp| !stamp.plugins.is_empty())
+    {
+        // Recent-project and folder-picker actions must obey the same native
+        // world lifetime rule as File > Open Project.
+        world.insert_resource(renzora::EnginePluginPendingProject(project.path));
+        if let Some(mut next) = world.get_resource_mut::<NextState<SplashState>>() {
+            next.set(SplashState::Editor);
+        }
+        return;
+    }
     if let Some(mut cfg) = world.get_resource_mut::<AppConfig>() {
         cfg.add_recent_project(project.path.clone());
         let _ = cfg.save();
@@ -1373,5 +1386,44 @@ fn open_url(url: &str) {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = url;
+    }
+}
+
+#[cfg(test)]
+mod engine_project_switch_tests {
+    use super::*;
+
+    #[test]
+    fn recent_project_keeps_the_running_native_world_until_restart() {
+        let mut world = World::new();
+        world.insert_resource(crate::project::CurrentProject {
+            path: "old-project".into(),
+            config: Default::default(),
+        });
+        world.insert_resource(renzora::EnginePluginRunningGeneration(Some(
+            renzora::EnginePluginGenerationStamp {
+                plugins: std::collections::BTreeMap::from([(
+                    "example.plugin".into(),
+                    "hash".into(),
+                )]),
+                ..Default::default()
+            },
+        )));
+        enter_project(
+            &mut world,
+            crate::project::CurrentProject {
+                path: "new-project".into(),
+                config: Default::default(),
+            },
+        );
+        assert_eq!(
+            world.resource::<crate::project::CurrentProject>().path,
+            std::path::Path::new("old-project")
+        );
+        assert_eq!(
+            world.resource::<renzora::EnginePluginPendingProject>().0,
+            std::path::Path::new("new-project")
+        );
+        assert!(!world.contains_resource::<crate::Aperture>());
     }
 }

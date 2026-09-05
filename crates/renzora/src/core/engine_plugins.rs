@@ -15,6 +15,83 @@ pub const ENGINE_PLUGIN_MANIFEST_SCHEMA: u32 = 1;
 /// Current immutable editor/runtime generation schema.
 pub const ENGINE_PLUGIN_GENERATION_SCHEMA: u32 = 1;
 
+/// Build-time environment variable carrying the replacement binary's identity.
+pub const ENGINE_PLUGIN_STAMP_ENV: &str = "RENZORA_ENGINE_GENERATION_STAMP";
+
+/// Decode an identity embedded by a binary entry point.
+///
+/// Ordinary source/distribution builds have no replacement generation stamp.
+/// Call with `option_env!("RENZORA_ENGINE_GENERATION_STAMP")` in the binary,
+/// not in a shared library: changing a plugin must not rebuild every engine
+/// dependency merely because this stamp changed.
+pub fn decode_engine_generation_stamp(
+    encoded: Option<&str>,
+) -> Result<Option<EnginePluginGenerationStamp>, toml::de::Error> {
+    encoded.map(toml::from_str).transpose()
+}
+
+/// Identity of the running binary, supplied before plugin assembly.
+#[derive(Clone, Debug, Default, Resource)]
+pub struct EnginePluginRunningGeneration(pub Option<EnginePluginGenerationStamp>);
+
+/// Native process owners require resource teardown before the editor exits.
+#[derive(Resource, Default)]
+pub struct EnginePluginShutdownGuard;
+
+/// Session consent to compile native code from one explicitly chosen project.
+#[derive(Clone, Debug, Default, Resource)]
+pub struct EnginePluginTrust {
+    /// Exact project root approved by the user, never read from project metadata.
+    pub project: Option<std::path::PathBuf>,
+}
+
+/// A requested project switch that must not reuse the current native plugin set.
+#[derive(Clone, Debug, Resource)]
+pub struct EnginePluginPendingProject(pub std::path::PathBuf);
+
+/// Select the build/restart project without replacing the live editor's project.
+pub fn engine_plugin_project<'a>(
+    current: Option<&'a super::project_config::CurrentProject>,
+    pending: Option<&'a EnginePluginPendingProject>,
+) -> Option<&'a std::path::Path> {
+    pending
+        .map(|pending| pending.0.as_path())
+        .or_else(|| current.map(|current| current.path.as_path()))
+}
+
+/// User decision from the editor's native-code warning.
+#[derive(Clone, Debug, Message)]
+pub struct EnginePluginTrustRequest {
+    /// Project shown in the warning; stale decisions cannot approve another project.
+    pub project: std::path::PathBuf,
+    /// Grant or revoke native compilation for the currently open project.
+    pub trusted: bool,
+}
+
+/// Unsaved-work counts reported by the subsystems that own the edited data.
+#[derive(Clone, Debug, Default, Resource)]
+pub struct EditorUnsavedWork(pub BTreeMap<&'static str, usize>);
+
+/// Last-schedule restart gate, after subsystem unsaved-work reports.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, bevy::prelude::SystemSet)]
+pub struct EnginePluginRestartGate;
+
+impl EditorUnsavedWork {
+    /// Update one owner's count without changing unrelated owners.
+    pub fn report(&mut self, owner: &'static str, count: usize) {
+        if count == 0 {
+            self.0.remove(owner);
+        } else {
+            self.0.insert(owner, count);
+        }
+    }
+
+    /// Whether all reporting subsystems are safe to leave without losing edits.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Explicit classification required in every Tier 2 manifest.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,8 +153,12 @@ pub struct EnginePluginBuildRequest {
 /// Requests a controlled restart into a fully published candidate generation.
 #[derive(Clone, Debug, Message)]
 pub struct EnginePluginRestartRequest {
+    /// Project displayed when the restart was offered.
+    pub project: std::path::PathBuf,
     /// Candidate generation selected by the user.
     pub generation: u64,
+    /// Exact candidate identity; generation numbers alone are cache-local.
+    pub stamp: EnginePluginGenerationStamp,
 }
 
 /// Stable identity of a generated editor/runtime pair.
@@ -136,6 +217,11 @@ pub enum EnginePluginBuildState {
     /// No build is queued or running.
     #[default]
     Idle,
+    /// No project-native code is compiled before explicit consent.
+    AwaitingTrust {
+        /// Revision waiting for the user's decision.
+        revision: u64,
+    },
     /// Source state changed and is waiting for a worker slot.
     Queued {
         /// Monotonic request revision.
@@ -203,6 +289,38 @@ impl EnginePluginDiagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_one_editor_does_not_clear_other_unsaved_work() {
+        let mut work = EditorUnsavedWork::default();
+        for owner in [
+            "documents",
+            "code",
+            "shader",
+            "material",
+            "blueprint",
+            "particles",
+            "theme",
+        ] {
+            work.report(owner, 1);
+        }
+        work.report("documents", 0);
+        assert!(!work.is_empty());
+        assert_eq!(work.0.len(), 6);
+        work.report("code", 3);
+        assert_eq!(work.0["code"], 3);
+        for owner in [
+            "code",
+            "shader",
+            "material",
+            "blueprint",
+            "particles",
+            "theme",
+        ] {
+            work.report(owner, 0);
+        }
+        assert!(work.is_empty());
+    }
 
     #[test]
     fn diagnostics_remain_bounded() {

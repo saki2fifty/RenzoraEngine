@@ -1,7 +1,8 @@
 //! Immutable publication for replacement editor/runtime generations.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,11 +22,22 @@ pub struct GenerationOutputs {
     pub runtime: Option<PathBuf>,
 }
 
-/// One executable recorded in an immutable generation.
+/// A verified build-kit file required beside the replacement executables.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenerationSupportFile {
+    /// Source in the verified build kit.
+    pub source: PathBuf,
+    /// Slash-separated generation-relative destination.
+    pub destination: String,
+    /// Expected build-kit BLAKE3 digest.
+    pub blake3: String,
+}
+
+/// One file recorded in an immutable generation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationArtifact {
-    /// Stable role: `editor` or `runtime`.
+    /// Stable role: `editor`, `runtime`, or `support`.
     pub role: String,
     /// Generation-relative filename.
     pub file: String,
@@ -124,6 +136,16 @@ pub fn stage_generation(
     stamp: EnginePluginGenerationStamp,
     outputs: &GenerationOutputs,
 ) -> Result<PublishedEngineGeneration, GenerationError> {
+    stage_generation_with_support(cache_root, stamp, outputs, &[])
+}
+
+/// Stage executable outputs together with their verified runtime dependencies.
+pub fn stage_generation_with_support(
+    cache_root: &Path,
+    stamp: EnginePluginGenerationStamp,
+    outputs: &GenerationOutputs,
+    support: &[GenerationSupportFile],
+) -> Result<PublishedEngineGeneration, GenerationError> {
     if outputs.editor.is_none() && outputs.runtime.is_none() {
         return Err(GenerationError::EmptyGeneration);
     }
@@ -158,7 +180,7 @@ pub fn stage_generation(
     ));
     fs::create_dir(&temp).map_err(|source| io_error(&temp, source))?;
 
-    let result = stage_locked(&generations, &temp, generation, stamp, outputs);
+    let result = stage_locked(&generations, &temp, generation, stamp, outputs, support);
     let _ = lock.unlock();
     if result.is_err() {
         let _ = fs::remove_dir_all(&temp);
@@ -172,11 +194,20 @@ fn stage_locked(
     generation: u64,
     stamp: EnginePluginGenerationStamp,
     outputs: &GenerationOutputs,
+    support: &[GenerationSupportFile],
 ) -> Result<PublishedEngineGeneration, GenerationError> {
     let mut artifacts = Vec::new();
     for (role, source, filename) in [
-        ("editor", outputs.editor.as_deref(), editor_filename()),
-        ("runtime", outputs.runtime.as_deref(), runtime_filename()),
+        (
+            "editor",
+            outputs.editor.as_deref(),
+            editor_filename(&stamp.target),
+        ),
+        (
+            "runtime",
+            outputs.runtime.as_deref(),
+            runtime_filename(&stamp.target),
+        ),
     ] {
         let Some(source) = source else {
             continue;
@@ -192,6 +223,40 @@ fn stage_locked(
             size: metadata.len(),
             blake3: hash_file(&destination)?,
         });
+    }
+
+    let mut names = artifacts
+        .iter()
+        .map(|a| a.file.clone())
+        .collect::<BTreeSet<_>>();
+    names.insert("generation.toml".to_string());
+    let mut support = support.iter().collect::<Vec<_>>();
+    support.sort_by(|a, b| a.destination.cmp(&b.destination));
+    for file in support {
+        if !safe_relative_file(&file.destination) || !names.insert(file.destination.clone()) {
+            return Err(GenerationError::CandidateMismatch);
+        }
+        validate_artifact("support", &file.source)?;
+        let destination = temp.join(&file.destination);
+        let parent = destination
+            .parent()
+            .expect("generation-relative destination");
+        fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+        fs::copy(&file.source, &destination).map_err(|error| io_error(&destination, error))?;
+        sync_file(&destination)?;
+        let digest = hash_file(&destination)?;
+        if digest != file.blake3 {
+            return Err(GenerationError::CandidateMismatch);
+        }
+        artifacts.push(GenerationArtifact {
+            role: "support".to_string(),
+            file: file.destination.clone(),
+            size: fs::metadata(&destination)
+                .map_err(|error| io_error(&destination, error))?
+                .len(),
+            blake3: digest,
+        });
+        sync_directory(parent)?;
     }
 
     let mut manifest = GenerationManifest {
@@ -282,9 +347,27 @@ pub fn load_candidate_generation(
         return Err(GenerationError::CandidateMismatch);
     }
     let hash = encode_hash(&pointer.fingerprint_hash);
+    load_engine_generation(cache_root, pointer.generation.0, &hash)
+}
+
+/// Load a pinned generation independently of the mutable candidate pointer.
+///
+/// Restart acknowledgement and rollback must verify the generation they began
+/// with even if a subsequent build has selected a different candidate.
+pub fn load_engine_generation(
+    cache_root: &Path,
+    generation: u64,
+    content_hash: &str,
+) -> Result<PublishedEngineGeneration, GenerationError> {
+    // Decode before constructing a path: callers supply an identity, not an
+    // arbitrary cache-relative directory name.
+    let hash = encode_hash(&decode_hash(content_hash)?);
+    if hash != content_hash || generation == 0 {
+        return Err(GenerationError::CandidateMismatch);
+    }
     let root = cache_root
         .join("generations")
-        .join(format!("{:020}-{hash}", pointer.generation.0));
+        .join(format!("{generation:020}-{hash}"));
     let manifest_path = root.join("generation.toml");
     let text =
         fs::read_to_string(&manifest_path).map_err(|error| io_error(&manifest_path, error))?;
@@ -294,15 +377,18 @@ pub fn load_candidate_generation(
             message: error.to_string(),
         })?;
     if manifest.schema != ENGINE_PLUGIN_GENERATION_SCHEMA
-        || manifest.generation != pointer.generation.0
+        || manifest.generation != generation
         || manifest.content_hash != hash
         || generation_hash(&manifest) != manifest.content_hash
     {
         return Err(GenerationError::CandidateMismatch);
     }
+    let mut names = BTreeSet::from(["generation.toml".to_string()]);
     for artifact in &manifest.artifacts {
-        if !matches!(artifact.role.as_str(), "editor" | "runtime")
-            || artifact.file.contains(['/', '\\'])
+        if !matches!(artifact.role.as_str(), "editor" | "runtime" | "support")
+            || !safe_relative_file(&artifact.file)
+            || !names.insert(artifact.file.clone())
+            || (artifact.role != "support" && artifact.file.contains('/'))
         {
             return Err(GenerationError::CandidateMismatch);
         }
@@ -346,7 +432,10 @@ fn validate_artifact(role: &'static str, path: &Path) -> Result<(), GenerationEr
         role,
         path: path.to_path_buf(),
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || (role != "support" && metadata.len() == 0)
+    {
         return Err(GenerationError::InvalidArtifact {
             role,
             path: path.to_path_buf(),
@@ -383,8 +472,25 @@ fn generation_hash(manifest: &GenerationManifest) -> String {
 }
 
 fn hash_file(path: &Path) -> Result<String, GenerationError> {
-    let bytes = fs::read(path).map_err(|error| io_error(path, error))?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    let mut file = File::open(path).map_err(|error| io_error(path, error))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| io_error(path, error))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn safe_relative_file(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(['\\', ':'])
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
 fn decode_hash(hash: &str) -> Result<[u8; 32], GenerationError> {
@@ -445,24 +551,20 @@ fn io_error(path: &Path, source: std::io::Error) -> GenerationError {
     }
 }
 
-#[cfg(windows)]
-fn editor_filename() -> &'static str {
-    "renzora-editor.exe"
+fn editor_filename(target: &str) -> &'static str {
+    if target.split('-').any(|part| part == "windows") {
+        "renzora-editor.exe"
+    } else {
+        "renzora-editor"
+    }
 }
 
-#[cfg(not(windows))]
-fn editor_filename() -> &'static str {
-    "renzora-editor"
-}
-
-#[cfg(windows)]
-fn runtime_filename() -> &'static str {
-    "renzora.exe"
-}
-
-#[cfg(not(windows))]
-fn runtime_filename() -> &'static str {
-    "renzora"
+fn runtime_filename(target: &str) -> &'static str {
+    if target.split('-').any(|part| part == "windows") {
+        "renzora.exe"
+    } else {
+        "renzora"
+    }
 }
 
 #[cfg(test)]
@@ -490,6 +592,94 @@ mod tests {
         let path = root.join(name);
         fs::write(&path, bytes).expect("write artifact");
         path
+    }
+
+    #[test]
+    fn target_names_and_support_files_round_trip_and_detect_tampering() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = write_artifact(temp.path(), "built", b"executable");
+        let source = write_artifact(temp.path(), "companion", b"plugin library");
+        let mut stamp = stamp();
+        stamp.target = "x86_64-pc-windows-msvc".into();
+        let generation = stage_generation_with_support(
+            temp.path(),
+            stamp,
+            &GenerationOutputs {
+                editor: Some(output.clone()),
+                runtime: Some(output),
+            },
+            &[GenerationSupportFile {
+                source,
+                destination: "plugins/example.dll".into(),
+                blake3: blake3::hash(b"plugin library").to_hex().to_string(),
+            }],
+        )
+        .expect("stage full generation");
+        assert!(generation.root.join("renzora-editor.exe").is_file());
+        assert!(generation.root.join("renzora.exe").is_file());
+        assert_eq!(generation.manifest.artifacts.len(), 3);
+        select_candidate_generation(temp.path(), &generation).expect("select");
+        assert_eq!(
+            load_candidate_generation(temp.path()).expect("verify"),
+            generation
+        );
+        // Startup requires the executable pair, not exactly two total files.
+        let pending = crate::startup::PendingStartup::begin(
+            temp.path(),
+            generation.manifest.generation,
+            &generation.manifest.stamp,
+        )
+        .expect("prepare restart");
+        drop(pending);
+        fs::write(generation.root.join("plugins/example.dll"), b"tampered").expect("tamper");
+        assert!(load_candidate_generation(temp.path()).is_err());
+        assert_eq!(editor_filename("aarch64-apple-darwin"), "renzora-editor");
+        assert_eq!(runtime_filename("x86_64-unknown-linux-gnu"), "renzora");
+    }
+
+    #[test]
+    fn support_paths_and_digests_cannot_escape_or_replace_executables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = write_artifact(temp.path(), "built", b"executable");
+        for destination in [
+            "../escape",
+            "/absolute",
+            "x/../../escape",
+            "x\\file",
+            "C:drive",
+            "generation.toml",
+            "renzora-editor",
+        ] {
+            let result = stage_generation_with_support(
+                temp.path(),
+                stamp(),
+                &GenerationOutputs {
+                    editor: Some(source.clone()),
+                    runtime: None,
+                },
+                &[GenerationSupportFile {
+                    source: source.clone(),
+                    destination: destination.into(),
+                    blake3: blake3::hash(b"executable").to_hex().to_string(),
+                }],
+            );
+            assert!(result.is_err(), "accepted {destination}");
+        }
+        let result = stage_generation_with_support(
+            temp.path(),
+            stamp(),
+            &GenerationOutputs {
+                editor: Some(source.clone()),
+                runtime: None,
+            },
+            &[GenerationSupportFile {
+                source,
+                destination: "plugins/changed".into(),
+                blake3: "incorrect".into(),
+            }],
+        );
+        assert!(result.is_err());
+        assert!(!temp.path().join("candidate").exists());
     }
 
     #[test]
@@ -538,6 +728,24 @@ mod tests {
         assert!(first.root.is_dir());
         assert!(second.root.is_dir());
         assert_eq!(load_candidate_generation(temp.path()).unwrap(), second);
+        assert_eq!(
+            load_engine_generation(
+                temp.path(),
+                first.manifest.generation,
+                &first.manifest.content_hash
+            )
+            .expect("load pinned rollback generation"),
+            first
+        );
+    }
+
+    #[test]
+    fn pinned_generation_rejects_path_injection_and_zero_generation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for hash in ["../outside", "", "ABCDEF"] {
+            assert!(load_engine_generation(temp.path(), 1, hash).is_err());
+        }
+        assert!(load_engine_generation(temp.path(), 0, &"0".repeat(64)).is_err());
     }
 
     #[test]
@@ -608,7 +816,13 @@ mod tests {
             },
         )
         .expect("publish");
-        fs::write(published.root.join(editor_filename()), b"tampered").expect("tamper");
+        fs::write(
+            published
+                .root
+                .join(editor_filename(&published.manifest.stamp.target)),
+            b"tampered",
+        )
+        .expect("tamper");
         assert!(matches!(
             load_candidate_generation(temp.path()),
             Err(GenerationError::CandidateMismatch)

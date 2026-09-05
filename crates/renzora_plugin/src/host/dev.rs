@@ -163,15 +163,25 @@ fn find_source_root() -> Option<PathBuf> {
         }
         warn!("RENZORA_PLUGIN_SRC is set but not a directory — ignoring it");
     }
+    let exe = std::env::current_exe().ok()?;
+    if is_source_sdk_installation(&exe) {
+        // Installed editors compile user-authored loose plugins through their
+        // shared service. Never infer a distribution-plugin developer checkout
+        // from whichever directory happened to launch that editor.
+        return None;
+    }
     if let Ok(cwd) = std::env::current_dir() {
         let candidate = cwd.join("plugins");
         if candidate.is_dir() {
             return Some(candidate);
         }
     }
-    let exe = std::env::current_exe().ok()?;
     let candidate = exe.parent()?.parent()?.parent()?.join("plugins");
     candidate.is_dir().then_some(candidate)
+}
+
+fn is_source_sdk_installation(executable: &Path) -> bool {
+    executable.parent().is_some_and(|directory| directory.join("rust-sdk/Cargo.toml").is_file())
 }
 
 /// Install the source watcher. Editor-only, called by the loader's plugin.
@@ -547,5 +557,20 @@ fn drain_plugin_builds(mut builds: ResMut<PluginBuilds>) {
         // not a history, and an unbounded Vec in a long editor session is a leak.
         builds.results.retain(|r| r.plugin != result.plugin);
         builds.results.push(result);
+    }
+}
+
+#[cfg(test)]
+mod installation_tests {
+    use super::*;
+
+    #[test]
+    fn installed_source_sdk_disables_implicit_checkout_discovery() {
+        let root = tempfile::tempdir().expect("installation");
+        let executable = root.path().join("renzora-editor");
+        assert!(!is_source_sdk_installation(&executable));
+        std::fs::create_dir(root.path().join("rust-sdk")).expect("SDK directory");
+        std::fs::write(root.path().join("rust-sdk/Cargo.toml"), "[workspace]\n").expect("SDK manifest");
+        assert!(is_source_sdk_installation(&executable));
     }
 }

@@ -1,0 +1,6 @@
+schema = 1
+type = "engine"
+id = "com.renzora.acceptance.runtime"
+
+[runtime]
+crate = "runtime"

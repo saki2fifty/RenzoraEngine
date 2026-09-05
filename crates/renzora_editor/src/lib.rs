@@ -31,9 +31,9 @@
 // resolve to the shared images instead of being embedded here, which is what
 // keeps the translation table, the Console buffers and the theme palette one
 // thing per process rather than one per image.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "shared-image", not(target_arch = "wasm32")))]
 extern crate renzora_dylib;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "shared-image", not(target_arch = "wasm32")))]
 extern crate renzora_ember_dylib;
 
 #[cfg(feature = "editor")]
@@ -50,7 +50,7 @@ mod plugins;
 /// executable and this image link one `bevy_dylib`, one `renzora_dylib`, one
 /// `renzora_ember_dylib` and one `renzora_runtime_dylib` — so `App`, `World` and
 /// every component type are the same types on both sides. See the module docs.
-#[cfg(all(feature = "editor", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "editor", feature = "shared-image", not(target_arch = "wasm32")))]
 #[unsafe(no_mangle)]
 pub fn renzora_editor_install(app: &mut renzora::bevy::app::App) {
     install(app);
@@ -58,9 +58,9 @@ pub fn renzora_editor_install(app: &mut renzora::bevy::app::App) {
 
 /// Install the whole editor into `app`.
 ///
-/// Reached by symbol through [`renzora_editor_install`] on native, and called
-/// directly on wasm, which has no dynamic linking and builds the editor into its
-/// own `.wasm` bundle. Call it AFTER `add_engine_plugins`, so the editor layers
+/// Reached by symbol through `renzora_editor_install` for a shared-image build,
+/// and called directly by standalone editor and wasm builds. Call it AFTER
+/// `add_engine_plugins`, so the editor layers
 /// on top of the runtime foundation.
 ///
 /// The three foundation plugins below must go first and in this order: they

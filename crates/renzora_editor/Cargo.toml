@@ -41,7 +41,10 @@ edition = "2021"
 crate-type = ["rlib", "dylib"]
 
 [features]
-default = ["editor"]
+default = ["editor", "shared-image"]
+# Kept on for the existing loadable editor. Isolated Tier 2 replacement
+# workspaces disable it when compiling the editor into its own executable.
+shared-image = ["dep:renzora_dylib", "dep:renzora_ember_dylib"]
 # Mirror of `renzora_runtime`'s `editor` feature: pull every editor-only crate
 # as a static rlib dep + cascade the dual-mode crates' own `editor` sub-feature
 # so their inspector/editor code compiles into this bundle.
@@ -244,6 +247,7 @@ renzora_navmesh_editor  = { path = "../renzora_navmesh/editor", optional = true 
 # entry here pointing at a directory that no longer exists stops cargo
 # loading the workspace, including to run the generator that would fix
 # it. If you hit that, delete the offending line below.
+renzora_engine_plugins = { path = "../renzora_engine_plugins" }
 renzora_parkour_editor = { path = "../renzora_parkour/editor" }
 renzora_update = { path = "../renzora_update" }
 renzora_wind_editor = { path = "../renzora_wind/editor" }
@@ -269,14 +273,12 @@ renzora_wind_editor = { path = "../renzora_wind/editor" }
 # theme palette, stylesheet and viewport-toolbar lists fail the same way one
 # layer up.
 #
-# Target-scoped rather than feature-gated: this is not a choice. On native the
-# editor is always a loadable image and always needs them; on wasm there is no
-# dynamic linking at all, the editor is compiled into its own bundle, and a
-# `dylib` dependency could not be satisfied. A feature would have to be turned on
-# by someone, and the only crate that depends on this one is now wasm-only.
+# Target-scoped and enabled by the default `shared-image` feature for the
+# existing native launcher. Standalone Tier 2 overlays disable that feature;
+# wasm cannot satisfy these dylib dependencies and never receives them.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-renzora_dylib = { path = "../renzora_dylib" }
-renzora_ember_dylib = { path = "../renzora_ember_dylib", default-features = false }
+renzora_dylib = { path = "../renzora_dylib", optional = true }
+renzora_ember_dylib = { path = "../renzora_ember_dylib", default-features = false, optional = true }
 
 [lints]
 workspace = true

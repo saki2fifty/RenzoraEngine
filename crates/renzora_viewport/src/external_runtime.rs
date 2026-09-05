@@ -338,12 +338,15 @@ pub fn advance_runtime_phase(time: Res<Time>, mut runtime: ResMut<ExternalRuntim
 pub fn kill_on_app_exit(
     mut exits: MessageReader<bevy::app::AppExit>,
     mut runtime: ResMut<ExternalRuntime>,
+    native_owners: Option<Res<renzora::EnginePluginShutdownGuard>>,
 ) {
     let Some(exit) = exits.read().last().cloned() else {
         return;
     };
     kill_runtime(&mut runtime);
-    if std::env::var_os("RENZORA_FULL_TEARDOWN").is_some() {
+    // Native build/restart workers own children and rollback guards. Abrupt
+    // process exit bypasses their cleanup and can orphan an unaccepted editor.
+    if native_owners.is_some() || std::env::var_os("RENZORA_FULL_TEARDOWN").is_some() {
         return;
     }
     let code = match exit {

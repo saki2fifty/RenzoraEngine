@@ -1,5 +1,10 @@
 # Standalone Plugins (C ABI)
 
+Installed source-SDK editors do not infer a distribution-plugin developer checkout
+from their working directory. Developers can explicitly set `RENZORA_PLUGIN_SRC`
+to opt into that workflow. Ordinary loose Rust plugin files continue to use the
+shared compiler service; this does not disable their live updates.
+
 Write a plugin as a self-contained `cdylib` that never links Bevy, build it with any Rust toolchain on any machine, and drop the resulting library into `<exe>/plugins/`.
 
 > This is a **second, independent** plugin mechanism, not a replacement for the one in [Building Plugins](./plugins.md). Both exist because they solve different problems — see [Which one to use](#which-one-to-use).
@@ -283,7 +288,20 @@ inherits = "release"
 opt-level = 2
 strip = "symbols"
 panic = "abort"        # mandatory — no_std on stable cannot unwind
+lto = "thin"           # remove unused unwind code from precompiled alloc/core
 ```
+
+Linux standalone builds must resolve all symbols without borrowing Rust runtime
+symbols from the editor. The repository's `plugins/.cargo/config.toml` enables
+ThinLTO, explicitly links the allocator's system C library, and rejects unresolved
+imports at link time. If building outside this directory, carry these settings in
+your own Cargo configuration (`-C prefer-dynamic=no -C link-arg=-Wl,-z,defs -l c`
+for `x86_64-unknown-linux-gnu`). A successful compilation without this check does
+not prove that a no-std library can load independently.
+ThinLTO is not sufficient for every use of `alloc`: if the strict linker still
+reports Rust unwind imports, enable the SDK's `std` feature for that target.
+Do not export replacement Rust runtime symbols from the host or disable the
+linker check to make the build pass.
 
 And at the top of `src/lib.rs`:
 

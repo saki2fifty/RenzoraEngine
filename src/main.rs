@@ -30,7 +30,15 @@ use bevy::prelude::*;
 // `--server`, which swaps in a windowless plugin set inline in `main`.
 
 pub fn init_app() -> App {
-    renzora_runtime::init_app()
+    let mut app = renzora_runtime::init_app();
+    let stamp = renzora_runtime::renzora::decode_engine_generation_stamp(
+        option_env!("RENZORA_ENGINE_GENERATION_STAMP"),
+    ).unwrap_or_else(|error| {
+        eprintln!("Invalid embedded engine generation: {error}");
+        None
+    });
+    app.insert_resource(renzora_runtime::renzora::EnginePluginRunningGeneration(stamp));
+    app
 }
 
 pub fn add_engine_plugins(app: &mut App, is_editor: bool) {
@@ -245,13 +253,16 @@ fn main() {
     } else {
         renzora_runtime::host_assembly::SessionKind::Runtime
     };
+    let compiler_config = renzora_runtime::host_assembly::installed_compiler_config(
+        std::env::current_exe().ok().as_deref()
+            .and_then(std::path::Path::parent)
+            .unwrap_or_else(|| std::path::Path::new(".")),
+        is_editor,
+    );
     let compiler_service = if renzora_runtime::host_assembly::compiler_modding_policy(session_kind) {
         renzora_runtime::host_assembly::build_compiler_service(
             &renzora_runtime::host_assembly::SharedServiceFactory,
-            renzora_compiler_cache::shared::SharedBuildServiceConfig {
-                cache_root: renzora_runtime::host_assembly::default_cache_root(None, is_editor),
-                ..Default::default()
-            },
+            compiler_config.clone(),
             if is_editor { "renzora" } else { "renzora-runtime" },
         )
     } else {
@@ -288,7 +299,7 @@ fn main() {
     let extension_config = renzora_runtime::host_assembly::ExtensionHostConfig {
         session: session_kind,
         session_tag: if is_editor { "renzora" } else { "renzora-runtime" }.to_string(),
-        compiler_config: renzora_compiler_cache::shared::SharedBuildServiceConfig::default(),
+        compiler_config,
         plugins_dir,
         disabled_plugin_ids: disabled_loose.clone(),
         trusted_plugin_ids: trusted_loose,

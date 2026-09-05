@@ -1,15 +1,15 @@
 //! Pure preparation of validated Tier 2 inputs into one build job.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
 use renzora::{EnginePluginGenerationStamp, ENGINE_PLUGIN_GENERATION_SCHEMA};
 
 use crate::{
-    discover_engine_plugins, engine_plugin_source_hash, load_and_validate_build_kit,
-    materialize_overlay, BuildKitError, BuildKitRequirement, EngineBinaryTarget, EngineBuildJob,
-    ManifestError, OverlayError,
+    discover_engine_plugins, load_and_validate_build_kit, materialize_overlay, BuildKitError,
+    BuildKitRequirement, EngineBinaryTarget, EngineBuildJob, GenerationSupportFile, ManifestError,
+    OverlayError,
 };
 
 /// Deployment-specific inputs needed to prepare an installed-editor build.
@@ -19,10 +19,14 @@ pub struct EngineBuildPreparation {
     pub plugins_root: PathBuf,
     /// Installed, version-matched build kit.
     pub build_kit_root: PathBuf,
+    /// Content identity approved by the running editor, not merely by the kit itself.
+    pub expected_build_kit_hash: String,
     /// Per-user Tier 2 cache root.
     pub cache_root: PathBuf,
     /// Cargo executable selected for the approved toolchain.
     pub cargo: PathBuf,
+    /// Absolute compiler executable selected from the approved toolchain.
+    pub rustc: PathBuf,
     /// Exact kit identity required by the running editor.
     pub requirement: BuildKitRequirement,
     /// Canonical engine feature set.
@@ -62,20 +66,21 @@ pub fn prepare_engine_build(
 ) -> Result<EngineBuildJob, EngineBuildPreparationError> {
     let declarations = discover_engine_plugins(&preparation.plugins_root)?;
     let kit = load_and_validate_build_kit(&preparation.build_kit_root, &preparation.requirement)?;
+    if kit.manifest.content_hash != preparation.expected_build_kit_hash {
+        return Err(BuildKitError::Requirement {
+            field: "approved content hash",
+            found: kit.manifest.content_hash,
+            expected: preparation.expected_build_kit_hash.clone(),
+        }
+        .into());
+    }
     let overlay = materialize_overlay(&kit, &declarations, &preparation.cache_root)?;
-    let lockfile = overlay.root.join("Cargo.lock");
+    let lockfile = overlay.root.join(".renzora-base-Cargo.lock");
     let lockfile_bytes =
         fs::read(&lockfile).map_err(|source| EngineBuildPreparationError::Input {
             path: lockfile,
             source,
         })?;
-    let plugins = declarations
-        .iter()
-        .map(|declaration| {
-            engine_plugin_source_hash(declaration)
-                .map(|hash| (declaration.manifest.id.clone(), hash))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let features = preparation.features.iter().cloned().collect::<Vec<_>>();
     let stamp = EnginePluginGenerationStamp {
         schema: ENGINE_PLUGIN_GENERATION_SCHEMA,
@@ -89,12 +94,27 @@ pub fn prepare_engine_build(
         lockfile_hash: blake3::hash(&lockfile_bytes).to_hex().to_string(),
         integration_hash: overlay.integration_hash,
         features,
-        plugins,
+        plugins: overlay.plugin_hashes,
     };
     Ok(EngineBuildJob {
+        support: kit
+            .manifest
+            .files
+            .iter()
+            .filter_map(|file| {
+                file.path
+                    .strip_prefix("runtime/")
+                    .map(|destination| GenerationSupportFile {
+                        source: kit.root.join(&file.path),
+                        destination: destination.to_string(),
+                        blake3: file.blake3.clone(),
+                    })
+            })
+            .collect(),
         workspace: overlay.root,
         cache_root: preparation.cache_root.clone(),
         cargo: preparation.cargo.clone(),
+        rustc: preparation.rustc.clone(),
         target: kit.manifest.target,
         profile: kit.manifest.profile,
         features: preparation.features.clone(),

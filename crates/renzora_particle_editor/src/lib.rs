@@ -24,6 +24,11 @@ impl Plugin for ParticleEditorPlugin {
         app.add_plugins(native_graph::NativeParticleGraph);
 
         app.init_resource::<PartUndoShadow>();
+        app.init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(
+                Last,
+                report_unsaved_particles.before(renzora::EnginePluginRestartGate),
+            );
         app.add_systems(
             Update,
             particle_undo_observer.run_if(|s: Option<Res<ParticleEditorState>>| {
@@ -51,6 +56,58 @@ struct PartUndoShadow {
     doc_id: String,
     serialized: Option<String>,
     effect: Option<HanabiEffectDefinition>,
+}
+
+fn report_unsaved_particles(
+    state: Option<Res<ParticleEditorState>>,
+    mut unsaved: ResMut<renzora::EditorUnsavedWork>,
+) {
+    if let Some(state) = state {
+        if state.is_changed() {
+            unsaved.report("particles", usize::from(state.is_modified));
+        }
+    } else if unsaved.0.contains_key("particles") {
+        unsaved.report("particles", 0);
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn dirty_particles_clear_when_saved_or_editor_state_is_removed() {
+        let mut app = App::new();
+        app.init_resource::<ParticleEditorState>()
+            .init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(Last, report_unsaved_particles);
+        app.world_mut()
+            .resource_mut::<ParticleEditorState>()
+            .is_modified = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<renzora::EditorUnsavedWork>().0["particles"],
+            1
+        );
+        app.world_mut()
+            .resource_mut::<ParticleEditorState>()
+            .is_modified = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+        app.world_mut()
+            .resource_mut::<ParticleEditorState>()
+            .is_modified = true;
+        app.update();
+        app.world_mut().remove_resource::<ParticleEditorState>();
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+    }
 }
 
 /// Restore a snapshotted effect — the `restore` fn for the particle `SnapshotCmd`.

@@ -101,6 +101,11 @@ impl Plugin for MaterialEditorPlugin {
     fn build(&self, app: &mut App) {
         info!("[editor] MaterialEditorPlugin");
         app.init_resource::<MaterialEditorState>();
+        app.init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(
+                Last,
+                report_unsaved_material.before(renzora::EnginePluginRestartGate),
+            );
         app.register_type::<Mesh3d>();
         app.add_plugins(preview::MaterialPreviewPlugin);
         app.add_plugins(file_thumbnails::MaterialFileThumbnailPlugin);
@@ -295,4 +300,42 @@ pub fn edit_material_graph(
     true
 }
 
+fn report_unsaved_material(
+    state: Res<MaterialEditorState>,
+    mut unsaved: ResMut<renzora::EditorUnsavedWork>,
+) {
+    if state.is_changed() {
+        unsaved.report("material", usize::from(state.is_dirty));
+    }
+}
+
 renzora::add!(MaterialEditorPlugin, Editor);
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn dirty_material_blocks_restart_until_saved() {
+        let mut app = App::new();
+        app.init_resource::<MaterialEditorState>()
+            .init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(Last, report_unsaved_material);
+        app.world_mut()
+            .resource_mut::<MaterialEditorState>()
+            .is_dirty = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<renzora::EditorUnsavedWork>().0["material"],
+            1
+        );
+        app.world_mut()
+            .resource_mut::<MaterialEditorState>()
+            .is_dirty = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+    }
+}

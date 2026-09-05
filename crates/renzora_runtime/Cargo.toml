@@ -206,6 +206,8 @@ environment_map = ["dep:renzora_environment_map"]
 skybox = ["dep:renzora_skybox"]
 
 [dependencies]
+dirs = "6"
+blake3 = "1"
 # Former dlopen'd distribution plugins, now statically linked.
 #
 # They shipped as cdylibs loaded from `plugins/` and sharing the host's

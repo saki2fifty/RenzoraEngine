@@ -241,6 +241,7 @@ struct ResetBindingsBtn;
 pub(crate) fn build(app: &mut App) {
     app.init_resource::<NativeSettingsState>();
     app.init_resource::<NativeInputUi>();
+    app.add_systems(Update, open_engine_project_switch.before(manage_native_settings));
     // Seed the auto-save setting from disk so the Editor tab shows the persisted
     // value even if the `renzora_autosave` plugin (its real owner) isn't present.
     // `insert_resource` from that plugin wins over this when it is.
@@ -261,6 +262,7 @@ pub(crate) fn build(app: &mut App) {
             plugin_toggle_click,
             plugin_trust_click,
             plugin_reload_click,
+            engine_plugin_click,
             theme_save_click,
             ember_theme_save_click,
             apply_font_settings,
@@ -2295,6 +2297,9 @@ fn plugins_section(commands: &mut Commands, fonts: &EmberFonts, col: Entity, foc
     commands.entity(col).add_child(sec);
     focus_hide(commands, sec, focus, "plugins");
     note_row(commands, fonts, body, &tr("settings.hint.plugins_restart"));
+    let engine_status = commands.spawn(Node::default()).id();
+    renzora_ember::reactive::tracked::keyed_list(commands, engine_status, engine_plugin_status);
+    commands.entity(body).add_child(engine_status);
 
     // The grid itself. `keyed_list` spawns each card straight into this
     // container, so the wrapping lives here rather than in the card builder.
@@ -2314,6 +2319,114 @@ fn plugins_section(commands: &mut Commands, fonts: &EmberFonts, col: Entity, foc
         .id();
     renzora_ember::reactive::tracked::keyed_list(commands, grid, plugin_cards);
     commands.entity(body).add_child(grid);
+}
+
+#[derive(Clone, Component)]
+enum EnginePluginAction {
+    Trust(renzora::EnginePluginTrustRequest),
+    Restart(Box<renzora::EnginePluginRestartRequest>),
+    Retry(std::path::PathBuf),
+    CancelSwitch(std::path::PathBuf),
+}
+
+fn open_engine_project_switch(
+    pending: Option<Res<renzora::EnginePluginPendingProject>>,
+    mut settings: ResMut<EditorSettings>,
+    mut state: ResMut<NativeSettingsState>,
+) {
+    if pending.is_some_and(|pending| pending.is_changed()) {
+        settings.show_settings = true;
+        settings.settings_tab = SettingsTab::Editor;
+        state.active_sub = Some("plugins".into());
+        state.dirty = true;
+    }
+}
+
+fn engine_plugin_status(rx: &Rx) -> renzora_ember::reactive::KeyedSnapshot {
+    use renzora::EnginePluginBuildState as State;
+    use renzora_ember::reactive::KeyedSnapshot;
+    let project = rx.get_resource::<renzora::CurrentProject>();
+    let pending = rx.get_resource::<renzora::EnginePluginPendingProject>();
+    let project = renzora::engine_plugin_project(project, pending);
+    let switching = pending.is_some();
+    let state = rx.get_resource::<State>();
+    let diagnostic = rx.get_resource::<renzora::EnginePluginDiagnostics>()
+        .and_then(|diagnostics| diagnostics.entries.last()).map(|entry| entry.message.clone());
+    let row = project.zip(state).and_then(|(project, state)| {
+        let (message, action) = match state {
+            State::Idle => return None,
+            State::AwaitingTrust { .. } => (
+                "Engine plugins can run unrestricted code on your computer. Only approve a project you trust. Changes require an editor restart.".to_string(),
+                Some(("Trust and build", EnginePluginAction::Trust(renzora::EnginePluginTrustRequest {
+                    project: project.to_path_buf(), trusted: true,
+                }))),
+            ),
+            State::Queued { .. } => ("Engine plugin build queued".into(), None),
+            State::Building { step, .. } => (format!("Building engine plugins: {step}"), None),
+            State::Failed { message, .. } => (format!("Engine plugins: {message}"),
+                Some(("Retry", EnginePluginAction::Retry(project.to_path_buf())))),
+            State::RestartReady { generation, stamp } => (
+                "Engine plugins are ready. Save all edited documents, then restart when convenient.".into(),
+                Some(("Restart editor", EnginePluginAction::Restart(Box::new(renzora::EnginePluginRestartRequest {
+                    project: project.to_path_buf(), generation: *generation, stamp: stamp.clone(),
+                })))),
+            ),
+        };
+        Some((project.to_path_buf(), format!("{}: {message}", project.display()), action))
+    });
+    let items = row.as_ref().map(|row| vec![(0, hash_str(&format!("{:?}{:?}{:?}", row.0, state, diagnostic)))])
+        .unwrap_or_default();
+    KeyedSnapshot { items, build: Box::new(move |commands, fonts, _| {
+        let root = commands.spawn(Node { flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(6.0), padding: UiRect::all(Val::Px(8.0)), ..default() }).id();
+        if let Some((project, message, action)) = &row {
+            note_row(commands, fonts, root, message);
+            if let Some(message) = &diagnostic { note_row(commands, fonts, root, message); }
+            if let Some((label, action)) = action {
+                let button = plugin_button(commands, fonts, label);
+                commands.entity(button).insert((action.clone(), FocusPolicy::Block));
+                commands.entity(root).add_child(button);
+            }
+            if switching {
+                let button = plugin_button(commands, fonts, "Cancel project switch");
+                commands.entity(button).insert((EnginePluginAction::CancelSwitch(project.clone()), FocusPolicy::Block));
+                commands.entity(root).add_child(button);
+            }
+        }
+        root
+    }) }
+}
+
+fn engine_plugin_click(
+    mut commands: Commands,
+    project: Option<Res<renzora::CurrentProject>>,
+    pending: Option<Res<renzora::EnginePluginPendingProject>>,
+    mut armed: Local<Option<Entity>>,
+    changed: Query<(Entity, &Interaction, &EnginePluginAction), Changed<Interaction>>,
+) {
+    for (entity, interaction, action) in &changed {
+        match interaction {
+            Interaction::Pressed => *armed = Some(entity),
+            Interaction::Hovered if *armed == Some(entity) => {
+                *armed = None;
+                match action {
+                    EnginePluginAction::Trust(request) => { commands.write_message(request.clone()); }
+                    EnginePluginAction::Restart(request) => { commands.write_message((**request).clone()); }
+                    EnginePluginAction::Retry(expected) if renzora::engine_plugin_project(project.as_deref(), pending.as_deref()) == Some(expected.as_path()) => {
+                        commands.write_message(renzora::EnginePluginBuildRequest {
+                            plugin_id: None, reason: renzora::EnginePluginBuildReason::UserRequested,
+                        });
+                    }
+                    EnginePluginAction::CancelSwitch(expected) if pending.as_ref().is_some_and(|pending| &pending.0 == expected) => {
+                        commands.remove_resource::<renzora::EnginePluginPendingProject>();
+                    }
+                    _ => {}
+                }
+            }
+            _ if *armed == Some(entity) => *armed = None,
+            _ => {}
+        }
+    }
 }
 
 /// One card's worth of data, lifted out of the world so the build closure owns
@@ -4552,6 +4665,42 @@ mod tests {
         let (w, theme, camera, appearance, editor) = sidebar("zzzz-no-such-setting");
         assert!(!shown(&w, theme) && !shown(&w, camera));
         assert!(!shown(&w, appearance) && !shown(&w, editor));
+    }
+
+    #[test]
+    fn engine_trust_click_keeps_the_project_shown_when_pressed() {
+        let mut app = App::new();
+        app.add_message::<renzora::EnginePluginTrustRequest>()
+            .add_systems(Update, engine_plugin_click)
+            .insert_resource(CurrentProject { path: "project-a".into(), config: Default::default() });
+        let button = app.world_mut().spawn((Interaction::Pressed,
+            EnginePluginAction::Trust(renzora::EnginePluginTrustRequest { project: "project-a".into(), trusted: true }))).id();
+        app.update();
+        assert!(app.world().resource::<bevy::ecs::message::Messages<renzora::EnginePluginTrustRequest>>().is_empty());
+        app.world_mut().resource_mut::<CurrentProject>().path = "project-b".into();
+        app.world_mut().entity_mut(button).insert(Interaction::Hovered);
+        app.update();
+        let requests: Vec<_> = app.world_mut().resource_mut::<bevy::ecs::message::Messages<renzora::EnginePluginTrustRequest>>().drain().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].project, std::path::PathBuf::from("project-a"));
+    }
+
+    #[test]
+    fn engine_restart_click_carries_the_exact_generation_stamp() {
+        let mut app = App::new();
+        app.add_message::<renzora::EnginePluginRestartRequest>().add_systems(Update, engine_plugin_click);
+        let stamp = renzora::EnginePluginGenerationStamp { integration_hash: "exact snapshot".into(), ..Default::default() };
+        let button = app.world_mut().spawn((Interaction::Pressed,
+            EnginePluginAction::Restart(Box::new(renzora::EnginePluginRestartRequest {
+                project: "project-a".into(), generation: 9, stamp: stamp.clone(),
+            })))).id();
+        app.update();
+        app.world_mut().entity_mut(button).insert(Interaction::Hovered);
+        app.update();
+        let requests: Vec<_> = app.world_mut().resource_mut::<bevy::ecs::message::Messages<renzora::EnginePluginRestartRequest>>().drain().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].generation, 9);
+        assert_eq!(requests[0].stamp, stamp);
     }
 
     // ── plugin_toggle_click: real Settings interaction ─────────────────────

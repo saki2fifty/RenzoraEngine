@@ -39,7 +39,7 @@ fn main() {
     //
     // Ordinary launches answer `needed() == false` after a couple of directory
     // stats and fall straight through. See `renzora_native_plugin::prebuild`.
-    if renzora_native_plugin::prebuild::needed() {
+    if !cfg!(feature = "tier2-native") && renzora_native_plugin::prebuild::needed() {
         setup_ui::run();
         renzora_native_plugin::prebuild::restart();
     }
@@ -54,19 +54,24 @@ fn main() {
     // editor path) and by the acceptance harness; both consumers
     // of the resulting `Arc` receive THE SAME pointer
     // (`Arc::ptr_eq` is the U4-9 proof).
+    let compiler_config = renzora_runtime::host_assembly::installed_compiler_config(
+        executable_directory().as_deref().unwrap_or_else(|| std::path::Path::new(".")),
+        true,
+    );
     let compiler_service = renzora_runtime::host_assembly::build_compiler_service(
         &renzora_runtime::host_assembly::SharedServiceFactory,
-        renzora_compiler_cache::shared::SharedBuildServiceConfig {
-            cache_root: renzora_runtime::host_assembly::default_cache_root(
-                executable_directory().as_deref(),
-                true,
-            ),
-            ..Default::default()
-        },
+        compiler_config.clone(),
         "renzora-editor",
     );
 
     let mut app = renzora_runtime::init_app();
+    let stamp = renzora_runtime::renzora::decode_engine_generation_stamp(
+        option_env!("RENZORA_ENGINE_GENERATION_STAMP"),
+    ).unwrap_or_else(|error| {
+        eprintln!("Invalid embedded engine generation: {error}");
+        None
+    });
+    app.insert_resource(renzora_runtime::renzora::EnginePluginRunningGeneration(stamp));
     renzora_runtime::add_default_rendering(&mut app, true);
 
     // U4-1 + U4-3: install the compiler-service resource BEFORE
@@ -86,7 +91,7 @@ fn main() {
     let extension_config = renzora_runtime::host_assembly::ExtensionHostConfig::new_editor(
         executable_directory().as_deref(),
         "renzora-editor",
-        renzora_compiler_cache::shared::SharedBuildServiceConfig::default(),
+        compiler_config,
         plugins_dir,
         disabled.clone(),
         trusted,

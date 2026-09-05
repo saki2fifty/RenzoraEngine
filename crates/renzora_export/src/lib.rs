@@ -11,6 +11,8 @@ pub mod build;
 #[cfg(not(target_arch = "wasm32"))]
 mod capabilities;
 #[cfg(not(target_arch = "wasm32"))]
+mod engine_plugins;
+#[cfg(not(target_arch = "wasm32"))]
 mod docker;
 #[cfg(not(target_arch = "wasm32"))]
 mod download;

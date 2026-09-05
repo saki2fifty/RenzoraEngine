@@ -12,6 +12,11 @@ crate-type = ["cdylib"]
 [dependencies]
 renzora_plugin = { path = "../../crates/renzora_plugin", default-features = false, features = ["libm"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# alloc retains unwind helpers for this plugin even with LTO and panic=abort.
+# Carry the real runtime instead of importing Rust symbols from the editor.
+renzora_plugin = { path = "../../crates/renzora_plugin", default-features = false, features = ["std"] }
+
 [profile.dist]
 inherits = "release"
 opt-level = 2

@@ -1,5 +1,6 @@
 //! Deterministic, immutable overlay workspaces for Tier 2 builds.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -20,6 +21,8 @@ pub struct OverlayWorkspace {
     pub integration_hash: String,
     /// True when an already-complete identical workspace was reused.
     pub cache_hit: bool,
+    /// Verified hashes of the copied plugin inputs, not later live-source reads.
+    pub plugin_hashes: BTreeMap<String, String>,
 }
 
 /// Hash one validated plugin independently for generation inventories.
@@ -34,7 +37,23 @@ pub fn engine_plugin_source_hash(
         }
     })?;
     hash_field(&mut hasher, manifest.as_bytes());
-    hash_tree(&mut hasher, &declaration.root, &declaration.root)?;
+    for (scope, source) in [
+        ("runtime", declaration.runtime.as_deref()),
+        ("editor", declaration.editor.as_deref()),
+    ] {
+        hash_field(&mut hasher, scope.as_bytes());
+        hash_field(
+            &mut hasher,
+            if source.is_some() {
+                b"present"
+            } else {
+                b"absent"
+            },
+        );
+        if let Some(source) = source {
+            hash_tree(&mut hasher, source, source)?;
+        }
+    }
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -69,6 +88,9 @@ pub enum OverlayError {
     /// Two plugin halves would be copied to the same generated location.
     #[error("engine-plugin integration path collision at {0}")]
     Collision(PathBuf),
+    /// Authored inputs changed while their immutable copy was being assembled.
+    #[error("engine-plugin source changed during snapshotting: {0}; retry the build")]
+    SourceChanged(String),
 }
 
 /// Materialize a content-addressed build workspace without touching kit or user sources.
@@ -81,15 +103,24 @@ pub fn materialize_overlay(
     if !kit_workspace.is_dir() {
         return Err(OverlayError::MissingWorkspace(kit_workspace));
     }
-    let integration_hash = integration_hash(kit, declarations)?;
+    let plugin_hashes = declarations
+        .iter()
+        .map(|declaration| {
+            engine_plugin_source_hash(declaration)
+                .map(|hash| (declaration.manifest.id.clone(), hash))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let integration_hash = integration_hash(kit, &plugin_hashes);
     let overlays = cache_root.join("overlays").join(&kit.manifest.content_hash);
     let destination = overlays.join(&integration_hash);
     let completion = destination.join(".renzora-overlay-complete");
     if fs::read_to_string(&completion).ok().as_deref() == Some(integration_hash.as_str()) {
+        verify_copied_plugins(&destination, declarations, &plugin_hashes)?;
         return Ok(OverlayWorkspace {
             root: destination,
             integration_hash,
             cache_hit: true,
+            plugin_hashes,
         });
     }
 
@@ -104,6 +135,11 @@ pub fn materialize_overlay(
         fs::remove_dir_all(&temp).map_err(|source| io_error(&temp, source))?;
     }
     copy_tree(&kit_workspace, &temp)?;
+    let kit_lock = kit_workspace.join("Cargo.lock");
+    if kit_lock.is_file() {
+        let baseline = temp.join(".renzora-base-Cargo.lock");
+        fs::copy(&kit_lock, &baseline).map_err(|source| io_error(&baseline, source))?;
+    }
 
     let mut members = Vec::new();
     let mut registry = String::from("schema = 1\n");
@@ -131,8 +167,14 @@ pub fn materialize_overlay(
             push_toml_string(&mut registry, scope, &relative);
         }
     }
+    verify_copied_plugins(&temp, declarations, &plugin_hashes).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&temp);
+    })?;
     members.sort();
     patch_workspace_members(&temp.join("Cargo.toml"), &members)?;
+    crate::native_overlay::configure_native_overlay(&temp).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&temp);
+    })?;
     fs::create_dir_all(&tier2_root).map_err(|source| io_error(&tier2_root, source))?;
     write_new_file(&temp.join("tier2/plugins.toml"), registry.as_bytes())?;
     write_new_file(
@@ -159,30 +201,50 @@ pub fn materialize_overlay(
         root: destination,
         integration_hash,
         cache_hit: false,
+        plugin_hashes,
     })
 }
 
-fn integration_hash(
-    kit: &BuildKit,
-    declarations: &[EnginePluginDeclaration],
-) -> Result<String, OverlayError> {
-    let mut ordered: Vec<&EnginePluginDeclaration> = declarations.iter().collect();
-    ordered.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));
+fn integration_hash(kit: &BuildKit, plugin_hashes: &BTreeMap<String, String>) -> String {
     let mut hasher = blake3::Hasher::new();
+    hash_field(
+        &mut hasher,
+        crate::native_overlay::NATIVE_OVERLAY_SCHEMA.as_bytes(),
+    );
     hash_field(&mut hasher, kit.manifest.content_hash.as_bytes());
-    for declaration in ordered {
-        hash_field(&mut hasher, declaration.manifest.id.as_bytes());
-        for (scope, source) in [
-            ("runtime", declaration.runtime.as_deref()),
-            ("editor", declaration.editor.as_deref()),
-        ] {
-            if let Some(source) = source {
-                hash_field(&mut hasher, scope.as_bytes());
-                hash_tree(&mut hasher, source, source)?;
-            }
+    for (id, hash) in plugin_hashes {
+        hash_field(&mut hasher, id.as_bytes());
+        hash_field(&mut hasher, hash.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn verify_copied_plugins(
+    root: &Path,
+    declarations: &[EnginePluginDeclaration],
+    expected: &BTreeMap<String, String>,
+) -> Result<(), OverlayError> {
+    for declaration in declarations {
+        let plugin_root = root
+            .join("tier2")
+            .join(portable_id_directory(&declaration.manifest.id));
+        let copied = EnginePluginDeclaration {
+            manifest: declaration.manifest.clone(),
+            runtime: declaration
+                .runtime
+                .as_ref()
+                .map(|_| plugin_root.join("runtime")),
+            editor: declaration
+                .editor
+                .as_ref()
+                .map(|_| plugin_root.join("editor")),
+            root: plugin_root,
+        };
+        if expected.get(&declaration.manifest.id) != Some(&engine_plugin_source_hash(&copied)?) {
+            return Err(OverlayError::SourceChanged(declaration.manifest.id.clone()));
         }
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(())
 }
 
 fn hash_tree(
@@ -214,7 +276,7 @@ fn hash_tree(
     Ok(())
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), OverlayError> {
+pub(crate) fn copy_tree(source: &Path, destination: &Path) -> Result<(), OverlayError> {
     fs::create_dir_all(destination).map_err(|source_error| io_error(destination, source_error))?;
     for path in read_dir_sorted(source)? {
         let metadata =
@@ -259,7 +321,7 @@ fn patch_workspace_members(path: &Path, new_members: &[String]) -> Result<(), Ov
 }
 
 #[cfg(unix)]
-fn make_owner_writable(path: &Path) -> Result<(), OverlayError> {
+pub(crate) fn make_owner_writable(path: &Path) -> Result<(), OverlayError> {
     use std::os::unix::fs::PermissionsExt;
 
     let metadata = fs::metadata(path).map_err(|error| io_error(path, error))?;
@@ -269,7 +331,7 @@ fn make_owner_writable(path: &Path) -> Result<(), OverlayError> {
 }
 
 #[cfg(windows)]
-fn make_owner_writable(path: &Path) -> Result<(), OverlayError> {
+pub(crate) fn make_owner_writable(path: &Path) -> Result<(), OverlayError> {
     let metadata = fs::metadata(path).map_err(|error| io_error(path, error))?;
     let mut permissions = metadata.permissions();
     permissions.set_readonly(false);
@@ -479,6 +541,59 @@ mod tests {
         assert!(second.cache_hit);
         assert_eq!(first.root, second.root);
         assert_eq!(first.integration_hash, second.integration_hash);
+    }
+
+    #[test]
+    fn copied_source_mismatch_is_rejected_even_with_a_completion_marker() {
+        let kit_dir = tempfile::tempdir().expect("kit");
+        let plugin_dir = tempfile::tempdir().expect("plugin");
+        let cache = tempfile::tempdir().expect("cache");
+        let kit = kit(kit_dir.path());
+        let declaration = plugin(plugin_dir.path(), "com.example.runtime", true, false);
+        let first = materialize_overlay(&kit, std::slice::from_ref(&declaration), cache.path())
+            .expect("snapshot");
+        fs::write(
+            first
+                .root
+                .join("tier2/com_example_runtime/runtime/src/lib.rs"),
+            "pub fn changed() {}",
+        )
+        .expect("change copied source");
+        assert!(matches!(
+            materialize_overlay(&kit, &[declaration], cache.path()),
+            Err(OverlayError::SourceChanged(_))
+        ));
+    }
+
+    #[test]
+    fn inventory_remains_bound_to_snapshot_after_authored_source_changes() {
+        let kit_dir = tempfile::tempdir().expect("kit");
+        let plugin_dir = tempfile::tempdir().expect("plugin");
+        let cache = tempfile::tempdir().expect("cache");
+        let kit = kit(kit_dir.path());
+        let declaration = plugin(plugin_dir.path(), "com.example.runtime", true, false);
+        let original = engine_plugin_source_hash(&declaration).expect("original hash");
+        let snapshot = materialize_overlay(&kit, std::slice::from_ref(&declaration), cache.path())
+            .expect("snapshot");
+        fs::write(
+            declaration
+                .runtime
+                .as_ref()
+                .expect("runtime")
+                .join("src/lib.rs"),
+            "pub fn later_save() {}",
+        )
+        .expect("later save");
+        assert_eq!(
+            snapshot.plugin_hashes.get(&declaration.manifest.id),
+            Some(&original)
+        );
+        assert_ne!(
+            engine_plugin_source_hash(&declaration).expect("new hash"),
+            original
+        );
+        verify_copied_plugins(&snapshot.root, &[declaration], &snapshot.plugin_hashes)
+            .expect("snapshot still valid");
     }
 
     #[test]

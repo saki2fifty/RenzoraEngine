@@ -164,6 +164,12 @@ impl ServiceFactory for SharedServiceFactory {
         session_tag: &str,
     ) -> Result<Arc<BuildService>, String> {
         let tag = session_tag.to_string();
+        if !config.sdk_path.is_absolute() || !config.sdk_path.join("Cargo.toml").is_file() {
+            return Err(format!(
+                "[{tag}] Rust source SDK is missing at {}. Repair the editor installation; the legacy metadata SDK cannot compile live scripts.",
+                config.sdk_path.display()
+            ));
+        }
         build_shared_service(config.clone())
             .map_err(|e| format!("[{tag}] shared BuildService unavailable: {e}"))
     }
@@ -261,20 +267,59 @@ pub fn install_compiler_service_into_loose_host(
     }
 }
 
-/// Editor-side cache-root layout.
-pub fn default_cache_root(exe_dir: Option<&Path>, is_editor: bool) -> PathBuf {
-    if is_editor {
-        exe_dir
-            .map(|d| d.join(".compiler-cache"))
-            .unwrap_or_else(|| PathBuf::from(".compiler-cache"))
-    } else {
-        // Runtime: per-exe cache root so a shipped game with
-        // modding support still gets a stable compiler cache.
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join(".compiler-cache")))
-            .unwrap_or_else(|| PathBuf::from(".compiler-cache"))
+/// Resolve the installed source SDK independently of the process working directory.
+pub fn installed_compiler_config(exe_dir: &Path, is_editor: bool) -> SharedBuildServiceConfig {
+    SharedBuildServiceConfig {
+        cache_root: default_cache_root(Some(exe_dir), is_editor),
+        sdk_path: exe_dir.join("rust-sdk/crates/renzora_plugin"),
+        ..SharedBuildServiceConfig::default()
     }
+}
+
+#[cfg(test)]
+mod installation_tests {
+    use super::*;
+
+    #[test]
+    fn source_sdk_follows_the_executable_not_the_working_directory() {
+        let executable = std::env::current_exe().expect("test executable");
+        let root = executable.parent().expect("executable directory");
+        let config = installed_compiler_config(root, true);
+        assert!(config.sdk_path.is_absolute());
+        assert_eq!(config.sdk_path, root.join("rust-sdk/crates/renzora_plugin"));
+        assert_eq!(config.cache_root, default_cache_root(Some(root), true));
+        assert!(!config.cache_root.starts_with(root));
+        let moved = installed_compiler_config(&root.join("relocated"), true);
+        assert_ne!(config.sdk_path, moved.sdk_path);
+        assert_ne!(config.cache_root, moved.cache_root);
+    }
+
+    #[test]
+    fn missing_source_sdk_reports_unavailable_before_starting_workers() {
+        let config = SharedBuildServiceConfig::default();
+        let result = SharedServiceFactory.build(&config, "missing SDK test");
+        assert!(matches!(result, Err(message) if message.contains("Rust source SDK is missing")));
+    }
+}
+
+/// Per-user compiler storage; never write into an installed executable directory.
+pub fn default_cache_root(exe_dir: Option<&Path>, _is_editor: bool) -> PathBuf {
+    let executable = std::env::current_exe().ok();
+    let installation = exe_dir.or_else(|| executable.as_deref().and_then(Path::parent));
+    let identity = blake3::hash(
+        installation
+            .unwrap_or_else(|| Path::new("unknown-installation"))
+            .as_os_str()
+            .as_encoded_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    // On unusual hosts without a user cache location, the OS temporary
+    // directory is preferable to mutating (or failing in) Program Files.
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("renzora/compiler")
+        .join(identity)
 }
 
 /// Configuration bundle for an editor / runtime initialization.

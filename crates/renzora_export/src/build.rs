@@ -318,12 +318,36 @@ pub(crate) fn assemble_lean_export_workspace(
     if cross {
         patch_cross_cargo_config(&ws, platform, progress)?;
     }
-    strip_bevy_features(&ws, disabled_bevy_features, progress)?;
-    strip_runtime_features(&ws, disabled_runtime_features, progress)?;
-    patch_lean_profile(&ws, profile, progress)?;
-    stage_static_plugins(workspace_dir, &ws, static_plugins, progress)?;
-    let has_scripts = stage_static_scripts(project_dir, &ws, progress)?;
+    let has_scripts = configure_lean_export_workspace(
+        workspace_dir,
+        &ws,
+        project_dir,
+        disabled_bevy_features,
+        disabled_runtime_features,
+        profile,
+        static_plugins,
+        progress,
+    )?;
     Ok((ws, has_scripts))
+}
+
+/// Apply lean settings to an already isolated snapshot, preserving native plugin wiring.
+pub(crate) fn configure_lean_export_workspace(
+    source: &Path,
+    ws: &Path,
+    project_dir: &Path,
+    disabled_bevy_features: &[String],
+    disabled_runtime_features: &[String],
+    profile: LeanProfile,
+    static_plugins: &[StaticPluginSrc],
+    progress: &mut dyn FnMut(String),
+) -> Result<bool, String> {
+    strip_bevy_features(ws, disabled_bevy_features, progress)?;
+    strip_runtime_features(ws, disabled_runtime_features, progress)?;
+    patch_lean_profile(ws, profile, progress)?;
+    stage_static_plugins(source, ws, static_plugins, progress)?;
+    let has_scripts = stage_static_scripts(project_dir, ws, progress)?;
+    Ok(has_scripts)
 }
 
 /// Native cargo can only target the **host** triple; cross-OS builds are a hard
@@ -1189,6 +1213,18 @@ pub fn stage_modding_sdk(
     let plugins = output_dir.join("plugins");
     std::fs::create_dir_all(&plugins).map_err(|e| format!("create {}: {e}", plugins.display()))?;
 
+    let source_sdk = editor_dir.join("rust-sdk");
+    if source_sdk.exists() {
+        let entry = source_sdk.join("crates/renzora_plugin");
+        if renzora_compiler_cache::sdk::content_root(&entry) != source_sdk {
+            return Err("Installed Rust source SDK is incomplete; repair the installation".into());
+        }
+        renzora_rust_sdk::stage(&source_sdk, output_dir)
+            .map_err(|error| format!("stage Rust source SDK: {error}"))?;
+        progress("Shipped the small Rust source SDK for modding".into());
+        return Ok(true);
+    }
+
     // The archive first: smaller, and the game unpacks it on first launch behind
     // the same progress window the editor uses.
     let archive = editor_dir.join("sdk.tar.zst");
@@ -1767,6 +1803,38 @@ fn patch_plugin_manifest(src_dir: &Path, dest_manifest: &Path) -> Result<(), Str
 mod tests {
     use super::*;
 
+    #[test]
+    fn source_modding_sdk_preserves_siblings_without_legacy_metadata() {
+        let installation = tempfile::tempdir().expect("installation");
+        let output = tempfile::tempdir().expect("export");
+        let sdk = installation.path().join("rust-sdk");
+        let engine = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        renzora_rust_sdk::package(&engine, &sdk).expect("package source SDK");
+        assert!(stage_modding_sdk(installation.path(), output.path(), &mut |_| {}).expect("stage"));
+        assert!(output
+            .path()
+            .join("rust-sdk/crates/renzora_identity/src/lib.rs")
+            .is_file());
+        let obsolete = output.path().join("rust-sdk/obsolete.rs");
+        std::fs::write(&obsolete, "old exported source").expect("obsolete file");
+        assert!(
+            stage_modding_sdk(installation.path(), output.path(), &mut |_| {}).expect("refresh")
+        );
+        assert!(!obsolete.exists());
+        assert!(!output.path().join("sdk").exists());
+        assert!(!output.path().join("sdk.tar.zst").exists());
+    }
+
+    #[test]
+    fn incomplete_source_modding_sdk_does_not_fall_back_to_legacy_archive() {
+        let installation = tempfile::tempdir().expect("installation");
+        let output = tempfile::tempdir().expect("export");
+        std::fs::create_dir(installation.path().join("rust-sdk")).expect("broken SDK");
+        std::fs::write(installation.path().join("sdk.tar.zst"), "old metadata").expect("legacy");
+        assert!(stage_modding_sdk(installation.path(), output.path(), &mut |_| {}).is_err());
+        assert!(!output.path().join("sdk.tar.zst").exists());
+    }
+
     /// The minimum that counts as a script: it calls `renzora_plugin::rust_script!`,
     /// which is what `collect_project_scripts` looks for.
     const SCRIPT: &str = "use renzora_plugin::script::*;\nfn update(_c: &Ctx, _r: &mut ScriptReply) -> Result<(), String> { Ok(()) }\nrenzora_plugin::rust_script!(update);\n";
@@ -2115,11 +2183,7 @@ mod lean_assembly_tests {
                 "",
             );
         }
-        if cross {
-            cmd.env("CARGO_TARGET_DIR", workspace.join("target"));
-        } else {
-            cmd.env("CARGO_TARGET_DIR", workspace.join("target"));
-        }
+        cmd.env("CARGO_TARGET_DIR", workspace.join("target"));
         cmd.env_remove("RUSTC_WRAPPER");
 
         let output = cmd.output().expect("cargo check spawn");

@@ -1,0 +1,11 @@
+[package]
+name = "phase5_runtime_probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../../../crates/renzora", default-features = false }
+
+[lints]
+workspace = true

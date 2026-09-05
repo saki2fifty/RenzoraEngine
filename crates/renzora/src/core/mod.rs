@@ -14,11 +14,15 @@ pub mod engine_plugins; // restart-required Tier 2 build and ECS contracts
 pub mod entity_id; // canonical unique snake_case entity ids (Name)
 pub mod plugin_inventory; // what plugins were found on disk, and their state
 pub mod project_config; // project.toml model + editor preferences
+#[cfg(not(target_arch = "wasm32"))]
+pub mod process_restart;
 pub mod sprite_anim; // multi-sheet sprites (SpriteImages) for 2D animation
 pub mod streaming; // world-streaming gate + camera-position helpers
 pub use animation::*;
 pub use blockout_grid::*;
 pub use project_config::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use process_restart::*;
 pub use components::*;
 pub use engine_plugins::*;
 pub use entity_id::*;
@@ -607,8 +611,7 @@ pub const ACTION_MARKETPLACE: &str = "marketplace.open";
 #[cfg(not(target_arch = "wasm32"))]
 pub fn restart_process() -> ! {
     if let Ok(exe) = std::env::current_exe() {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let _ = std::process::Command::new(exe).args(args).spawn();
+        let _ = spawn_replacement_process(&exe, std::env::args_os().skip(1));
     }
     std::process::exit(0)
 }

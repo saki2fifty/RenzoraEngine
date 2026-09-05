@@ -22,7 +22,9 @@ pub struct BuildKitFile {
     pub blake3: String,
 }
 
-/// Signed/content-addressable description shipped as `build-kit.toml`.
+/// Content-addressed inventory shipped as `build-kit.toml`.
+///
+/// Digests detect changed contents; this format does not authenticate a publisher.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildKitManifest {
@@ -226,14 +228,18 @@ fn validate_requirement_fields(requirement: &BuildKitRequirement) -> Result<(), 
             return Err(BuildKitError::EmptyField(name));
         }
     }
-    if matches!(requirement.profile.as_str(), "dev" | "test") {
+    if !approved_profile(&requirement.profile) {
         return Err(BuildKitError::Requirement {
             field: "profile",
             found: requirement.profile.clone(),
-            expected: "dist or release".to_string(),
+            expected: "dist, release, or dist-lean".to_string(),
         });
     }
     Ok(())
+}
+
+pub(crate) fn approved_profile(profile: &str) -> bool {
+    matches!(profile, "dist" | "release" | "dist-lean")
 }
 
 fn check_requirement(

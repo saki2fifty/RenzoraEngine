@@ -40,6 +40,11 @@ impl Plugin for BlueprintEditorPlugin {
     fn build(&self, app: &mut App) {
         info!("[editor] BlueprintEditorPlugin");
         app.init_resource::<BlueprintEditorState>();
+        app.init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(
+                Last,
+                report_unsaved_blueprint.before(renzora::EnginePluginRestartGate),
+            );
         app.register_inspector(blueprint_graph_entry());
         app.add_plugins(native_properties::NativeBlueprintProperties);
         app.add_plugins(native_graph::NativeBlueprintGraph);
@@ -68,4 +73,42 @@ fn blueprint_graph_entry() -> InspectorEntry {
     }
 }
 
+fn report_unsaved_blueprint(
+    state: Res<BlueprintEditorState>,
+    mut unsaved: ResMut<renzora::EditorUnsavedWork>,
+) {
+    if state.is_changed() {
+        unsaved.report("blueprint", usize::from(state.is_dirty));
+    }
+}
+
 renzora::add!(BlueprintEditorPlugin, Editor);
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn dirty_blueprint_blocks_restart_until_saved() {
+        let mut app = App::new();
+        app.init_resource::<BlueprintEditorState>()
+            .init_resource::<renzora::EditorUnsavedWork>()
+            .add_systems(Last, report_unsaved_blueprint);
+        app.world_mut()
+            .resource_mut::<BlueprintEditorState>()
+            .is_dirty = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<renzora::EditorUnsavedWork>().0["blueprint"],
+            1
+        );
+        app.world_mut()
+            .resource_mut::<BlueprintEditorState>()
+            .is_dirty = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<renzora::EditorUnsavedWork>()
+            .is_empty());
+    }
+}

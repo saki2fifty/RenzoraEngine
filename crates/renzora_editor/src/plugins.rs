@@ -34,6 +34,7 @@ pub(crate) fn add_editor_plugins(app: &mut App) {
     app.add_plugins(renzora_ember_editor::HuiEditorBundlePlugin::default());
     app.add_plugins(renzora_ember_editor::game_ui::GameUiEditorPlugin::default());
     app.add_plugins(renzora_engine_editor::EngineEditorPlugin::default());
+    app.add_plugins(renzora_engine_plugins::EnginePluginEcsPlugin::default());
     app.add_plugins(renzora_environment_map_editor::EnvironmentMapEditorPlugin::default());
     app.add_plugins(renzora_export::ExportPlugin::default());
     app.add_plugins(renzora_foliage_editor::FoliageEditorPlugin::default());

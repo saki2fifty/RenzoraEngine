@@ -14,6 +14,7 @@ default = []
 # Identity: `CanonicalId` is the per-script key for the cache. The
 # fingerprint and the desired-revision store both key off it.
 renzora_identity = { path = "../renzora_identity", features = ["std"] }
+renzora_rust_sdk = { path = "../renzora_rust_sdk" }
 # Hashing for `BuildKey` (Blake3) and lockfile content hash (SHA-256).
 blake3 = "1"
 sha2 = "0.10"

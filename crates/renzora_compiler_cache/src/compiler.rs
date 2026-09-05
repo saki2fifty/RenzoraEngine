@@ -1555,7 +1555,7 @@ impl ServiceStamps {
     pub fn capture(sdk_path: &Path, generation: u64) -> Self {
         let toolchain_stamp = capture_toolchain_stamp();
         let sdk_content_hash = if sdk_path.is_dir() {
-            hash_directory(sdk_path)
+            hash_directory(&crate::sdk::content_root(sdk_path))
         } else {
             ContentHash::ZERO
         };

@@ -34,10 +34,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "renzora_identity"
+version = "0.1.0"
+
+[[package]]
 name = "renzora_plugin"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "renzora_identity",
  "renzora_plugin_derive",
 ]
 
