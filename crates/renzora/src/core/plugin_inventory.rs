@@ -172,12 +172,24 @@ pub fn record_plugin(
         .record(id, kind, state);
 }
 
+/// Stable IDs of migrated game features; these are not library file paths.
+pub const BUILTIN_RUNTIME_PLUGIN_IDS: &[&str] = &[
+    "spline",
+    "vignette",
+    "auto_exposure",
+    "night_stars",
+    "procedural_tree",
+    "text3d",
+    "pool_water",
+    "clouds",
+];
+
 /// Legacy native directories replaced by workspace features.
 ///
 /// These identities stay retired even when a feature is disabled or omitted
 /// from a lean host. Loading an old DLL is not a fallback for a built-in crate.
 pub fn retired_native_plugin(id: &str) -> bool {
-    matches!(id, "spline" | "gamepad" | "vignette" | "auto_exposure" | "night_stars" | "procedural_tree" | "text3d" | "pool_water" | "clouds" | "mesh_draw" | "ai_chat")
+    BUILTIN_RUNTIME_PLUGIN_IDS.contains(&id) || matches!(id, "gamepad" | "mesh_draw" | "ai_chat")
 }
 
 /// Preserve a built-in feature's enable preference and report its startup state.
@@ -186,10 +198,22 @@ pub fn retired_native_plugin(id: &str) -> bool {
 /// retained when moving source into a workspace crate so saved preferences do
 /// not silently re-enable the feature. Cache the preference list once per App.
 pub fn builtin_plugin_enabled(app: &mut App, id: &str) -> bool {
-    let enabled = !app
-        .world_mut()
-        .get_resource_or_insert_with(|| DisabledPlugins(crate::load_disabled_plugins()))
-        .contains(id);
+    // A shipped game's choices belong to that game, not the player's editor
+    // preferences. RuntimePlugin loads CurrentProject before generated plugins.
+    let exported = (!app
+        .world()
+        .get_resource::<crate::EditorSession>()
+        .is_some_and(|s| s.0)
+        && BUILTIN_RUNTIME_PLUGIN_IDS.contains(&id))
+    .then(|| app.world().get_resource::<crate::CurrentProject>())
+    .flatten()
+    .and_then(|project| project.config.builtin_runtime_plugins.as_ref())
+    .map(|selected| selected.iter().any(|selected| selected == id));
+    let enabled = exported.unwrap_or_else(|| {
+        !app.world_mut()
+            .get_resource_or_insert_with(|| DisabledPlugins(crate::load_disabled_plugins()))
+            .contains(id)
+    });
     record_plugin(
         app.world_mut(),
         id,
@@ -231,4 +255,75 @@ pub fn plugin_thumbnail_path(id: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     Some(dir.join("plugins").join(id).join("thumbnail.jpg"))
+}
+
+#[cfg(test)]
+mod builtin_selection_tests {
+    use super::*;
+
+    fn host(selection: Option<Vec<String>>, editor: bool) -> App {
+        let mut app = App::new();
+        app.insert_resource(crate::EditorSession(editor));
+        app.insert_resource(DisabledPlugins(vec!["spline".into()]));
+        app.insert_resource(crate::CurrentProject {
+            path: "fixture".into(),
+            config: crate::ProjectConfig {
+                builtin_runtime_plugins: selection,
+                ..Default::default()
+            },
+        });
+        app
+    }
+
+    #[test]
+    fn shipped_selection_overrides_preferences_without_mutating_them() {
+        let mut app = host(Some(vec!["spline".into()]), false);
+        assert!(builtin_plugin_enabled(&mut app, "spline"));
+        assert!(!builtin_plugin_enabled(&mut app, "clouds"));
+        assert!(app.world().resource::<DisabledPlugins>().contains("spline"));
+        let mut empty = host(Some(Vec::new()), false);
+        for id in BUILTIN_RUNTIME_PLUGIN_IDS {
+            assert!(!builtin_plugin_enabled(&mut empty, id));
+        }
+        // No preference resource is created when an exported choice suffices.
+        empty.world_mut().remove_resource::<DisabledPlugins>();
+        assert!(!builtin_plugin_enabled(&mut empty, "clouds"));
+        assert!(!empty.world().contains_resource::<DisabledPlugins>());
+    }
+
+    #[test]
+    fn older_projects_and_editor_sessions_keep_preferences() {
+        for mut app in [host(None, false), host(Some(Vec::new()), true)] {
+            assert!(!builtin_plugin_enabled(&mut app, "spline"));
+            assert!(builtin_plugin_enabled(&mut app, "clouds"));
+        }
+    }
+
+    #[test]
+    fn packed_project_selection_round_trips_including_empty() {
+        for selection in [None, Some(Vec::new()), Some(vec!["spline".into()])] {
+            let config = crate::ProjectConfig {
+                builtin_runtime_plugins: selection.clone(),
+                ..Default::default()
+            };
+            let encoded = toml::to_string(&config).expect("serialize project");
+            let decoded: crate::ProjectConfig = toml::from_str(&encoded).expect("read project");
+            assert_eq!(decoded.builtin_runtime_plugins, selection);
+        }
+    }
+
+    #[test]
+    fn runtime_catalogue_is_unique_and_all_old_copies_remain_retired() {
+        let unique: std::collections::HashSet<_> = BUILTIN_RUNTIME_PLUGIN_IDS.iter().collect();
+        assert_eq!(unique.len(), BUILTIN_RUNTIME_PLUGIN_IDS.len());
+        for id in
+            BUILTIN_RUNTIME_PLUGIN_IDS
+                .iter()
+                .copied()
+                .chain(["gamepad", "mesh_draw", "ai_chat"])
+        {
+            assert!(retired_native_plugin(id));
+        }
+        assert!(!retired_native_plugin("third_party"));
+    }
 }

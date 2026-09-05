@@ -1755,6 +1755,11 @@ pub struct ProjectConfig {
     pub name: String,
     pub version: String,
     pub main_scene: String,
+    /// Explicit built-in runtime selection carried by an exported game.
+    /// Missing preserves legacy preferences; an empty list disables every
+    /// migrated built-in runtime feature. Editor sessions ignore this policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_runtime_plugins: Option<Vec<String>>,
     /// The scene the editor had open when the project was last closed. Editor
     /// reopens this on project load, falling back to `main_scene` if absent.
     /// Runtime / exported builds always use `main_scene` (this field is
@@ -1821,6 +1826,7 @@ impl Default for ProjectConfig {
             name: "New Project".to_string(),
             version: "0.1.0".to_string(),
             main_scene: "scenes/main.bsn".to_string(),
+            builtin_runtime_plugins: None,
             editor_last_scene: None,
             editor_open_tabs: Vec::new(),
             icon: None,

@@ -8,6 +8,8 @@ Normal builds include the migrated built-in game features. The runtime crate als
 
 The lean exporter removes the migrated renderers when 3D rendering is disabled, and removes 3D text when UI is disabled, so those plugins do not silently re-enable excluded subsystems. Individual plugin selection integration remains in progress. Disabling scripting entirely is a separate, currently broken runtime feature combination.
 
+The shared project configuration accepts `builtin_runtime_plugins` as a list of those stable IDs. When present, game startup uses that list instead of the local editor enable preferences for these built-ins; an empty list disables them all. Missing fields retain the old behavior, and editor sessions ignore this game-only selection. This startup support does not yet imply that older export templates support the field or that the export screen writes it.
+
 ## Choose the right tier
 
 | Need | Use |

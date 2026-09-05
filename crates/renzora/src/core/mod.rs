@@ -1825,6 +1825,7 @@ mod tests {
             name: "Demo".into(),
             version: "0.2.1".into(),
             main_scene: "scenes/intro.ron".into(),
+            builtin_runtime_plugins: None,
             editor_last_scene: Some("scenes/wip.ron".into()),
             editor_open_tabs: vec![
                 EditorOpenTab {

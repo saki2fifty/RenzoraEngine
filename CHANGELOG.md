@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 5, 2026 — 15:08 UTC
 
 - Made the eight migrated game features optional at build time, while keeping them enabled in normal builds. Export-screen integration is still in progress.
+- Added a game-specific built-in selection setting so a packaged game's choices can take precedence over local editor preferences without changing them.
 
 ## September 5, 2026 — 14:42 UTC
 
