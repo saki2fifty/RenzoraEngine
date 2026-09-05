@@ -35,6 +35,7 @@
 //! picks up one path dependency that pulls nothing.
 
 pub mod deps;
+pub mod artwork;
 pub mod install;
 pub mod json;
 pub mod rustc;

@@ -2,6 +2,14 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 5, 2026 — 13:05 UTC
+
+### Built-in plugin migration
+
+- Moved spline support into a normal engine crate while preserving scene data, curve calculations, and its existing enable/disable setting.
+- Added shared startup reporting for migrated built-in features and kept replacement build kits from duplicating them.
+- Preserved built-in plugin artwork and prevented old installed copies from being loaded again after an upgrade.
+
 ## September 5, 2026 — 05:59 UTC
 
 ### Restart-required engine plugins

@@ -198,6 +198,7 @@ fn assemble(
     // A previously launched staging directory may contain mutable reload
     // shadows and compiler caches. They are not release dependencies.
     copy_tree(&inputs.runtime_root, &temp.join("runtime"), true)?;
+    renzora_native_build::artwork::stage(&inputs.engine_root, &temp.join("runtime"))?;
     let config_path = workspace.join(".cargo/config.toml");
     fs::create_dir_all(config_path.parent().expect("Cargo config parent"))?;
     let existing = match fs::read_to_string(&config_path) {

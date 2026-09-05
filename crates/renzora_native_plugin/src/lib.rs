@@ -151,6 +151,9 @@ pub fn installed(plugins_dir: &Path, lib_ext: &str) -> Vec<InstalledNativePlugin
         let Some(id) = dir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             continue;
         };
+        if renzora::retired_native_plugin(&id) {
+            continue;
+        }
         let lib = dir.join("build").join(format!("{}.{lib_ext}", id.replace('-', "_")));
         if !lib.is_file() {
             continue;
@@ -673,6 +676,9 @@ fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .flatten()
         .map(|e| e.path())
+        // Shared by startup rebuilding and loading: reject upgrade leftovers
+        // before either path can execute code from a retired native directory.
+        .filter(|p| !renzora::retired_native_plugin(&name_of(p)))
         .collect();
     v.sort();
     v
@@ -709,6 +715,20 @@ fn default_lib_ext() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_builtin_is_excluded_from_startup_and_export_discovery() {
+        let root = plugin("retired_builtin");
+        let retired = root.join("spline");
+        std::fs::create_dir_all(retired.join("build")).expect("create stale directory");
+        std::fs::write(retired.join("build/spline.so"), b"not executable")
+            .expect("write stale artifact");
+        assert!(renzora::retired_native_plugin("spline"));
+        assert!(!renzora::retired_native_plugin("third_party_spline"));
+        assert!(!read_dir_sorted(&root).contains(&retired));
+        assert!(installed(&root, "so").is_empty());
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
 
     /// A plugin directory with a source file, in a unique temp path.
     fn plugin(tag: &str) -> PathBuf {

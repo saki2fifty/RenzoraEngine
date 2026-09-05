@@ -7821,6 +7821,7 @@ dependencies = [
  "renzora",
  "renzora_compiler_cache",
  "renzora_identity",
+ "renzora_native_build",
  "renzora_rust_sdk",
  "serde",
  "tempfile",
@@ -8590,6 +8591,7 @@ dependencies = [
  "renzora_shader",
  "renzora_skybox",
  "renzora_solari",
+ "renzora_spline",
  "renzora_sprite_anim",
  "renzora_ssao",
  "renzora_ssr",
@@ -8799,6 +8801,14 @@ dependencies = [
  "serde_json",
  "toml 0.8.23",
  "web-sys",
+]
+
+[[package]]
+name = "renzora_spline"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "renzora",
 ]
 
 [[package]]

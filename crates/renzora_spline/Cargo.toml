@@ -1,0 +1,12 @@
+[package]
+name = "renzora_spline"
+version = "0.1.0"
+edition = "2021"
+description = "Shared spline component registration for editor and runtime"
+
+[dependencies]
+bevy = { workspace = true }
+renzora = { path = "../renzora", default-features = false }
+
+[lints]
+workspace = true

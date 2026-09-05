@@ -124,6 +124,10 @@ The repository still retains the older `renzora::plugin!` shared-image loader an
 
 Replacement build preparation explicitly preserves the eleven existing native distribution plugins: ai_chat, auto_exposure, clouds, gamepad, mesh_draw, night_stars, pool_water, procedural_tree, spline, text3d and vignette. Their editor/runtime scope is preserved through generated static wiring. Final removal of legacy loaders and export machinery is later migration cleanup.
 
+Phase 6 is moving those built-ins into ordinary workspace crates. Spline support now lives in `renzora_spline`, retains its shared `SplinePath` scene type and existing `spline` disable preference, and appears as Built-in in Settings. Build-kit preparation uses the migrated crate directly instead of adding another copy. The remaining feature migrations are still in progress.
+
+Old native folders for migrated built-ins are ignored during startup and export discovery, even if files remain from an earlier installation. Their artwork still ships for the Settings cards; disabling a built-in does not load its old DLL as a fallback.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.

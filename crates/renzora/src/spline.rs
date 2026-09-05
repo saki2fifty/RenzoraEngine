@@ -1,11 +1,10 @@
 //! `SplinePath` — a control-point path and its curve evaluation.
 //!
-//! The type and its maths are here; the `spline` **native plugin** keeps the
-//! systems. Same boundary reason as [`crate::clouds`] and [`crate::sun`]:
+//! The type and its maths are here; `renzora_spline` registers it with each
+//! enabled runtime world. Same boundary reason as [`crate::clouds`] and [`crate::sun`]:
 //! `renzora_terrain_editor` builds a path with `SplinePath::with_points` and
 //! draws it by sampling the curve, and it is compiled into the editor binary
-//! while the plugin is loaded at runtime — a binary cannot name a type that
-//! lives in a plugin.
+//! without defining another component or changing the scene's type identity.
 //!
 //! The evaluation moved with the struct rather than staying behind, because a
 //! path you cannot sample is not much of a path: the gizmo overlay that draws

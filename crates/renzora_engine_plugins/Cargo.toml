@@ -13,6 +13,7 @@ notify = "8.2"
 renzora = { path = "../renzora", default-features = false }
 renzora_compiler_cache = { path = "../renzora_compiler_cache" }
 renzora_identity = { path = "../renzora_identity" }
+renzora_native_build = { path = "../renzora_native_build" }
 renzora_rust_sdk = { path = "../renzora_rust_sdk", features = ["packaging"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

@@ -826,6 +826,8 @@ fn stage(repo: &Path, plat: &Platform) -> std::io::Result<PathBuf> {
         }
     }
 
+    renzora_native_build::artwork::stage(repo, &out)?;
+
     // Native macOS dylibs record their absolute build path as the install name;
     // rewrite to @rpath so the relocated dist/ folder actually resolves at run.
     #[cfg(target_os = "macos")]

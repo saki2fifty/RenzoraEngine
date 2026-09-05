@@ -32,6 +32,8 @@ use bevy::prelude::*;
 /// Which mechanism loaded (or would have loaded) a plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginKind {
+    /// A first-party feature statically linked into the matching host.
+    Builtin,
     /// A `dylib` directory shipped as source and compiled against the SDK. Full
     /// `&mut World`; editor only.
     Native,
@@ -47,6 +49,7 @@ pub enum PluginKind {
 impl PluginKind {
     pub fn label(self) -> &'static str {
         match self {
+            PluginKind::Builtin => "Built-in",
             PluginKind::Native => "Native",
             PluginKind::Standalone => "Standalone",
             PluginKind::LooseTier1 => "Loose (Tier 1)",
@@ -167,6 +170,37 @@ pub fn record_plugin(
     world
         .get_resource_or_insert_with(PluginInventory::default)
         .record(id, kind, state);
+}
+
+/// Legacy native directories replaced by workspace features.
+///
+/// These identities stay retired even when a feature is disabled or omitted
+/// from a lean host. Loading an old DLL is not a fallback for a built-in crate.
+pub fn retired_native_plugin(id: &str) -> bool {
+    matches!(id, "spline")
+}
+
+/// Preserve a built-in feature's enable preference and report its startup state.
+///
+/// Call before registering any systems or resources. The existing short ID is
+/// retained when moving source into a workspace crate so saved preferences do
+/// not silently re-enable the feature. Cache the preference list once per App.
+pub fn builtin_plugin_enabled(app: &mut App, id: &str) -> bool {
+    let enabled = !app
+        .world_mut()
+        .get_resource_or_insert_with(|| DisabledPlugins(crate::load_disabled_plugins()))
+        .contains(id);
+    record_plugin(
+        app.world_mut(),
+        id,
+        PluginKind::Builtin,
+        if enabled {
+            PluginState::Loaded
+        } else {
+            PluginState::Disabled
+        },
+    );
+    enabled
 }
 
 /// The id a C-ABI plugin file is known by.
