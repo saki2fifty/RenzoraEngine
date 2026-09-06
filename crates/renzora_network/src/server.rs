@@ -6,7 +6,7 @@
 //! join/leave so scripts get `on_player_joined` / `on_player_left`.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Instant;
 
 use bevy::prelude::*;
@@ -37,7 +37,7 @@ impl Plugin for NetworkServerPlugin {
 
         app.insert_resource(NetworkStatus {
             is_server: true,
-            state: ConnectionState::Connected,
+            state: ConnectionState::Connecting,
             ..Default::default()
         });
         app.insert_resource(ServerNetworkConfig(self.config.clone()));
@@ -88,7 +88,12 @@ impl NetworkServer {
 
     /// Bind a server with an explicit admission limit (zero admits no clients).
     pub fn bind_with_capacity(port: u16, max_clients: usize) -> std::io::Result<Self> {
-        let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port))?;
+        Self::bind_at((std::net::Ipv4Addr::UNSPECIFIED, port), max_clients)
+    }
+
+    /// Bind only the selected local address, without falling back to all interfaces.
+    pub fn bind_at(address: impl ToSocketAddrs, max_clients: usize) -> std::io::Result<Self> {
+        let socket = UdpSocket::bind(address)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,
@@ -213,13 +218,27 @@ impl NetworkServer {
 }
 
 /// Bind the server socket at startup.
-fn start_server(mut commands: Commands, config: Res<ServerNetworkConfig>) {
-    match NetworkServer::bind_with_capacity(config.0.port, config.0.max_clients as usize) {
+fn start_server(
+    mut commands: Commands,
+    config: Res<ServerNetworkConfig>,
+    mut status: ResMut<NetworkStatus>,
+) {
+    match NetworkServer::bind_at(
+        (config.0.server_addr.as_str(), config.0.port),
+        config.0.max_clients as usize,
+    ) {
         Ok(server) => {
-            info!("[network] Server listening on 0.0.0.0:{}", config.0.port);
+            info!(
+                "[network] Server listening on {}:{}",
+                config.0.server_addr, config.0.port
+            );
+            status.state = ConnectionState::Connected;
             commands.insert_resource(server);
         }
-        Err(e) => error!("[network] Failed to bind server socket: {e}"),
+        Err(e) => {
+            status.state = ConnectionState::Disconnected;
+            error!("[network] Failed to bind server socket: {e}");
+        }
     }
 }
 
@@ -272,6 +291,38 @@ fn assign_network_ids(
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+
+    #[test]
+    fn startup_honors_local_address_and_reports_bind_failure() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<NetworkStatus>();
+        world.insert_resource(ServerNetworkConfig(NetworkConfig {
+            server_addr: "127.0.0.1".into(),
+            port: 0,
+            max_clients: 2,
+            ..default()
+        }));
+        world.run_system_once(start_server).unwrap();
+        let server = world.resource::<NetworkServer>();
+        let bound = server.socket.local_addr().unwrap();
+        assert_eq!(
+            bound.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(server.max_clients, 2);
+        assert!(world.resource::<NetworkStatus>().is_connected());
+        let mut refused = World::new();
+        refused.init_resource::<NetworkStatus>();
+        refused.insert_resource(ServerNetworkConfig(NetworkConfig {
+            server_addr: bound.ip().to_string(),
+            port: bound.port(),
+            ..default()
+        }));
+        refused.run_system_once(start_server).unwrap();
+        assert!(!refused.contains_resource::<NetworkServer>());
+        assert!(!refused.resource::<NetworkStatus>().is_connected());
+    }
 
     #[test]
     fn client_limit_preserves_existing_peer_and_reopens_after_disconnect() {

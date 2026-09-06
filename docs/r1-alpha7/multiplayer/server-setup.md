@@ -22,7 +22,7 @@ tick_rate = 64
 max_clients = 32
 ```
 
-`--port`, `--tick-rate` and `--max-clients` select the listening port, headless simulation frequency and admission cap. The transport binds `0.0.0.0:port`; stored `server_addr` and parsed `--addr`/`--address` do **not** currently restrict that bind address. Use host firewall rules to restrict access.
+`--port`, `--tick-rate` and `--max-clients` select the listening port, headless simulation frequency and admission cap. `server_addr` selects the local listening address; `--addr`/`--address` overrides it. The default `127.0.0.1` accepts only local connections. Set `0.0.0.0` explicitly to listen on all IPv4 interfaces, and use firewall rules to restrict access. A bind failure leaves the server disconnected instead of silently switching to another interface. This address restriction does not add connection authentication or encryption.
 
 The client cap is enforced. Existing clients can retry their handshake while full; new clients wait for a slot. Zero capacity admits none. Silent peers expire after ten seconds. Native UDP is the only built-in transport; browser builds cannot host or join.
 

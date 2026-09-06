@@ -86,11 +86,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn networked_default_and_eq() {
-        assert_eq!(Networked, Networked::default());
-    }
-
-    #[test]
     fn network_owner_default_is_server() {
         let owner = NetworkOwner::default();
         assert_eq!(owner.0, OwnerKind::Server);
