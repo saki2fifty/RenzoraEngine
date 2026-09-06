@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 07:05 UTC
 
 - Released navigation target records when agents or their required components are removed, including during scene teardown.
+- Reused connected gamepads' script-input storage while clearing disconnected slots and preserving button edges.
 
 ## September 6, 2026 — 06:58 UTC
 

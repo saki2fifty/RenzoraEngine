@@ -598,3 +598,12 @@ checking for an available navigation mesh. Scene teardown therefore releases
 obsolete entries even after the mesh is gone, without adding a full-world scan.
 A headless test removes 1,000 agents while retaining a live agent's target, and
 checks individual component removal. Repath and movement polling remain unchanged.
+
+## Gamepad input snapshots
+
+Script input retains the three inner axis/button tables for each connected pad,
+clearing and refilling them instead of allocating replacements. Disconnected
+slots are removed; reconnecting into a free slot starts with fresh values. The
+1,000-frame regression checks retained value storage, held/edge buttons, axis
+values, disconnect and reuse. Input still updates every frame, including while
+scripts are inactive; timer and preview behavior are unchanged.

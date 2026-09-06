@@ -85,9 +85,6 @@ pub fn update_script_input(
         }
     }
 
-    script_input.gamepad_axes.clear();
-    script_input.gamepad_buttons.clear();
-    script_input.gamepad_buttons_just_pressed.clear();
     script_input.connected_gamepads.clear();
 
     // Stable slot assignment: a pad keeps its slot for as long as it stays
@@ -112,7 +109,8 @@ pub fn update_script_input(
         let id = gamepad_slots[&entity];
         script_input.connected_gamepads.push(id);
 
-        let mut axes = HashMap::new();
+        let axes = script_input.gamepad_axes.entry(id).or_default();
+        axes.clear();
         let ls = gamepad.left_stick();
         let rs = gamepad.right_stick();
         axes.insert(GamepadAxis::LeftStickX, ls.x);
@@ -136,18 +134,95 @@ pub fn update_script_input(
                 .unwrap_or(0.0)
                 .max(gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0)),
         );
-        script_input.gamepad_axes.insert(id, axes);
-
-        let mut buttons = HashMap::new();
-        let mut just_pressed = HashMap::new();
+        let input = &mut *script_input;
+        let buttons = input.gamepad_buttons.entry(id).or_default();
+        let just_pressed = input.gamepad_buttons_just_pressed.entry(id).or_default();
+        buttons.clear();
+        just_pressed.clear();
         for btn in SCRIPT_GAMEPAD_BUTTONS {
             buttons.insert(btn, gamepad.pressed(btn));
             just_pressed.insert(btn, gamepad.just_pressed(btn));
         }
-        script_input.gamepad_buttons.insert(id, buttons);
-        script_input
-            .gamepad_buttons_just_pressed
-            .insert(id, just_pressed);
     }
     script_input.connected_gamepads.sort_unstable();
+    // Keep the inner tables while their pad is connected; discard only slots
+    // that disappeared. A reused slot is cleared/refilled above before access.
+    let input = &mut *script_input;
+    input
+        .gamepad_axes
+        .retain(|id, _| input.connected_gamepads.binary_search(id).is_ok());
+    input
+        .gamepad_buttons
+        .retain(|id, _| input.connected_gamepads.binary_search(id).is_ok());
+    input
+        .gamepad_buttons_just_pressed
+        .retain(|id, _| input.connected_gamepads.binary_search(id).is_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gamepad_tables_are_reused_and_disconnects_clear_the_slot() {
+        let mut app = App::new();
+        app.init_resource::<ScriptInput>()
+            .add_systems(Update, update_script_input);
+        let mut pad = Gamepad::default();
+        pad.digital_mut().press(GamepadButton::South);
+        pad.analog_mut().set(GamepadAxis::LeftStickX, 0.5);
+        let first = app.world_mut().spawn(pad).id();
+        // Connect separately: simultaneous assignment follows Entity ordering,
+        // which is not a promise of spawn order.
+        app.update();
+        let second = app.world_mut().spawn(Gamepad::default()).id();
+        app.update();
+        let input = app.world().resource::<ScriptInput>();
+        assert_eq!(input.connected_gamepads, [0, 1]);
+        assert!(input.gamepad_buttons_just_pressed[&0][&GamepadButton::South]);
+        let storage = (
+            &input.gamepad_axes[&0][&GamepadAxis::LeftStickX] as *const f32,
+            &input.gamepad_buttons[&0][&GamepadButton::South] as *const bool,
+            &input.gamepad_buttons_just_pressed[&0][&GamepadButton::South] as *const bool,
+        );
+        app.world_mut()
+            .get_mut::<Gamepad>(first)
+            .unwrap()
+            .digital_mut()
+            .clear();
+        for _ in 0..1_000 {
+            app.update();
+            let input = app.world().resource::<ScriptInput>();
+            assert_eq!(
+                storage,
+                (
+                    &input.gamepad_axes[&0][&GamepadAxis::LeftStickX] as *const f32,
+                    &input.gamepad_buttons[&0][&GamepadButton::South] as *const bool,
+                    &input.gamepad_buttons_just_pressed[&0][&GamepadButton::South] as *const bool,
+                )
+            );
+            assert_eq!(input.gamepad_axes[&0][&GamepadAxis::LeftStickX], 0.5);
+            assert!(input.gamepad_buttons[&0][&GamepadButton::South]);
+            assert!(!input.gamepad_buttons_just_pressed[&0][&GamepadButton::South]);
+        }
+        app.world_mut().despawn(first);
+        app.update();
+        let input = app.world().resource::<ScriptInput>();
+        assert_eq!(input.connected_gamepads, [1]);
+        assert!(!input.gamepad_axes.contains_key(&0));
+        assert!(!input.gamepad_buttons.contains_key(&0));
+        assert!(!input.gamepad_buttons_just_pressed.contains_key(&0));
+        app.world_mut().spawn(Gamepad::default());
+        app.update();
+        let input = app.world().resource::<ScriptInput>();
+        assert_eq!(input.connected_gamepads, [0, 1]);
+        assert!(!input.gamepad_buttons[&0][&GamepadButton::South]);
+        assert_eq!(input.gamepad_axes[&0][&GamepadAxis::LeftStickX], 0.0);
+        app.world_mut().despawn(second);
+        app.update();
+        assert_eq!(
+            app.world().resource::<ScriptInput>().connected_gamepads,
+            [0]
+        );
+    }
 }
