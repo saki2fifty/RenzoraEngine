@@ -603,10 +603,14 @@ enabled inputs again on settled frames.
 
 Tile collider rebuilds also use Bevy's maintained child lists to find each
 owner's tiles and generated shapes. They no longer scan the full tile/shape
-queries once per owner. The existing global dirty gate and per-owner content
-hash remain; this is not a dirty-owner event index. Regression coverage checks
-two 64-tile layers through edits, tile removal and clearing solidity, retaining
-the unaffected layer's collider entities.
+queries once per owner. A reusable affected-owner set now gathers changed tile
+values, parent/child relationships, palette changes, sheet/tile removals and
+standard disable/reactivation signals. Palette edits include their paint layers;
+the per-owner content hash still avoids unnecessary collider replacement.
+Regression coverage checks two 64-tile layers, 1,000 settled frames with no owner
+work, a one-owner tile edit, moves, removals and inherited palette changes.
+Changing generated collider children can cause one extra hash check while the
+relationships settle; this does not repeatedly rebuild unchanged colliders.
 
 ## Hierarchy invalidation scope
 

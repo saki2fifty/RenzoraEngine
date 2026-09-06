@@ -440,6 +440,7 @@ impl Plugin for TilemapPlugin {
                 .chain(),
         );
         // Merged static colliders for solid-marked tiles (editor + shipped game).
+        app.init_resource::<TileColliderWork>();
         app.add_systems(Update, rebuild_tile_colliders);
         // Paint-layer draw order (Z) + opacity → tiles (editor + shipped game).
         app.add_systems(Update, apply_paint_layer_visuals);
@@ -460,6 +461,10 @@ struct TilemapColliderShape;
 #[derive(Component)]
 struct TileColliderKey(u64);
 
+/// Reused owner work set; relationships identify both sides of a tile move.
+#[derive(Resource, Default)]
+struct TileColliderWork(std::collections::HashSet<Entity>);
+
 
 /// Grow merged static 2D colliders under every layer with solid-marked tiles.
 ///
@@ -471,30 +476,99 @@ struct TileColliderKey(u64);
 /// entity having no sprite). Runs in the editor and the shipped game — the
 /// children are never saved, so every load regenerates them from the tiles.
 ///
-/// The change gate is two-stage: cheap `Changed`/`Removed` queries decide
-/// whether to look at all, then a content hash of the layer's solid-cell set
+/// The change gate is two-stage: `Changed`/`Removed` queries collect affected
+/// owners, then a content hash of each owner's solid-cell set
 /// decides whether the colliders actually need rebuilding (a repaint that
 /// swaps grass for other grass hashes identically and is skipped).
 fn rebuild_tile_colliders(
     mut commands: Commands,
-    dirty_layers: Query<(), Changed<TilemapLayer>>,
-    dirty_tiles: Query<(), (With<TilemapTile>, Or<(Changed<TilemapTile>, Changed<renzora::core::SpriteSheet>)>)>,
+    dirty_layers: Query<(Entity, Option<&Children>), Changed<TilemapLayer>>,
+    dirty_tiles: Query<
+        &ChildOf,
+        (
+            With<TilemapTile>,
+            Or<(
+                Changed<TilemapTile>,
+                Changed<renzora::core::SpriteSheet>,
+                Changed<ChildOf>,
+            )>,
+        ),
+    >,
     mut removed_tiles: RemovedComponents<TilemapTile>,
+    mut removed_sheets: RemovedComponents<renzora::core::SpriteSheet>,
+    mut removed_children: RemovedComponents<Children>,
+    disabled_tiles: Query<
+        &ChildOf,
+        (
+            With<TilemapTile>,
+            Allow<bevy::ecs::entity_disabling::Disabled>,
+            Added<bevy::ecs::entity_disabling::Disabled>,
+        ),
+    >,
+    mut enabled_tiles: RemovedComponents<bevy::ecs::entity_disabling::Disabled>,
+    changed_owners: Query<
+        Entity,
+        (
+            Or<(With<TilemapLayer>, With<TilemapPaintLayer>)>,
+            Or<(
+                Changed<Children>,
+                Changed<ChildOf>,
+                Added<TilemapPaintLayer>,
+            )>,
+        ),
+    >,
+    parents: Query<&ChildOf>,
+    mut work: ResMut<TileColliderWork>,
     // Every entity that can OWN tiles: a tilemap root, or one of its paint
     // layers. Colliders hang under whichever entity owns the tiles.
     owners: Query<
-        (Entity, Option<&TileColliderKey>, Option<&ChildOf>, Option<&Children>),
+        (
+            Entity,
+            Option<&TileColliderKey>,
+            Option<&ChildOf>,
+            Option<&Children>,
+        ),
         Or<(With<TilemapLayer>, With<TilemapPaintLayer>)>,
     >,
     configs: Query<&TilemapLayer>,
     tiles: Query<(&TilemapTile, &renzora::core::SpriteSheet, &ChildOf)>,
     shapes: Query<(Entity, &ChildOf), With<TilemapColliderShape>>,
 ) {
-    let any_removed = removed_tiles.read().next().is_some();
-    if dirty_layers.is_empty() && dirty_tiles.is_empty() && !any_removed {
-        return;
+    work.0.clear();
+    work.0.extend(changed_owners.iter());
+    work.0.extend(dirty_tiles.iter().map(ChildOf::parent));
+    work.0.extend(disabled_tiles.iter().map(ChildOf::parent));
+    for entity in removed_tiles
+        .read()
+        .chain(removed_sheets.read())
+        .chain(enabled_tiles.read())
+    {
+        if let Ok(parent) = parents.get(entity) {
+            work.0.insert(parent.parent());
+        }
     }
-    for (owner, key, owner_parent, children) in &owners {
+    // Removing the final child removes Children itself. Despawned tiles need
+    // no old-parent map: Bevy updates the surviving owner's relationship.
+    work.0.extend(
+        removed_children
+            .read()
+            .filter(|&entity| owners.contains(entity)),
+    );
+    for (root, children) in &dirty_layers {
+        work.0.insert(root);
+        // Paint layers inherit the root's palette, so a palette edit dirties
+        // those owners too, but never another tilemap's layers.
+        work.0.extend(
+            children
+                .into_iter()
+                .flat_map(|children| children.iter())
+                .filter(|&child| owners.contains(child)),
+        );
+    }
+    for &owner in &work.0 {
+        let Ok((owner, key, owner_parent, children)) = owners.get(owner) else {
+            continue;
+        };
         // The palette config (tile size + solid set) lives on the tilemap
         // ROOT; a paint layer reads its parent's.
         let Some(layer) = configs
@@ -1202,6 +1276,81 @@ mod tests {
 mod collider_owner_tests {
     use super::*;
 
+    #[test]
+    fn tile_moves_sheet_removal_and_reactivation_update_only_related_owners() {
+        let mut app = App::new();
+        app.init_resource::<TileColliderWork>()
+            .add_systems(Update, rebuild_tile_colliders);
+        let root = app
+            .world_mut()
+            .spawn(TilemapLayer {
+                solid_tiles: vec![0],
+                ..default()
+            })
+            .id();
+        let a = app
+            .world_mut()
+            .spawn((TilemapPaintLayer::default(), ChildOf(root)))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn((TilemapPaintLayer::default(), ChildOf(root)))
+            .id();
+        let tile = app
+            .world_mut()
+            .spawn((
+                TilemapTile { x: 0, y: 0 },
+                renzora::SpriteSheet::default(),
+                ChildOf(a),
+            ))
+            .id();
+        app.update();
+        app.update();
+        app.update();
+        assert_eq!(shapes(app.world_mut(), a).len(), 1);
+        app.world_mut().entity_mut(tile).insert(ChildOf(b));
+        app.update();
+        assert!(shapes(app.world_mut(), a).is_empty());
+        assert_eq!(shapes(app.world_mut(), b).len(), 1);
+        app.world_mut()
+            .entity_mut(tile)
+            .remove::<renzora::SpriteSheet>();
+        app.update();
+        assert!(shapes(app.world_mut(), b).is_empty());
+        app.world_mut()
+            .entity_mut(tile)
+            .insert(renzora::SpriteSheet::default());
+        app.update();
+        assert_eq!(shapes(app.world_mut(), b).len(), 1);
+        app.world_mut()
+            .entity_mut(tile)
+            .insert(bevy::ecs::entity_disabling::Disabled);
+        app.update();
+        assert!(shapes(app.world_mut(), b).is_empty());
+        app.world_mut()
+            .entity_mut(tile)
+            .remove::<bevy::ecs::entity_disabling::Disabled>();
+        app.update();
+        assert_eq!(shapes(app.world_mut(), b).len(), 1);
+        app.world_mut()
+            .get_mut::<TilemapLayer>(root)
+            .unwrap()
+            .solid_tiles
+            .clear();
+        app.update();
+        assert!(shapes(app.world_mut(), b).is_empty());
+        app.world_mut()
+            .get_mut::<TilemapLayer>(root)
+            .unwrap()
+            .solid_tiles
+            .push(0);
+        app.update();
+        assert_eq!(shapes(app.world_mut(), b).len(), 1);
+        app.world_mut().entity_mut(tile).remove::<TilemapTile>();
+        app.update();
+        assert!(shapes(app.world_mut(), b).is_empty());
+    }
+
     fn shapes(world: &mut World, owner: Entity) -> Vec<Entity> {
         let mut query = world.query_filtered::<(Entity, &ChildOf), With<TilemapColliderShape>>();
         query
@@ -1213,6 +1362,7 @@ mod collider_owner_tests {
     #[test]
     fn owner_children_keep_layers_isolated_through_edits_and_removal() {
         let mut app = App::new();
+        app.init_resource::<TileColliderWork>();
         app.add_systems(Update, rebuild_tile_colliders);
         let first = app
             .world_mut()
@@ -1248,8 +1398,16 @@ mod collider_owner_tests {
         assert_eq!(shapes(app.world_mut(), first).len(), 1);
         let untouched = shapes(app.world_mut(), second);
         assert_eq!(untouched.len(), 1);
+        // Settle the collider children spawned by the first update.
+        app.update();
+        for _ in 0..1000 {
+            app.update();
+            assert!(app.world().resource::<TileColliderWork>().0.is_empty());
+        }
         app.world_mut().get_mut::<TilemapTile>(edited).unwrap().x = 100;
         app.update();
+        assert_eq!(app.world().resource::<TileColliderWork>().0.len(), 1);
+        assert!(app.world().resource::<TileColliderWork>().0.contains(&first));
         assert_eq!(shapes(app.world_mut(), first).len(), 2);
         assert_eq!(shapes(app.world_mut(), second), untouched);
         app.world_mut().despawn(edited);

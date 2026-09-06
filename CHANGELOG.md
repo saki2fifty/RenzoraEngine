@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 09:01 UTC
+
+- Limited tile-collider maintenance to affected layers, including tile moves, sheet removal and disable/reenable changes.
+
 ## September 6, 2026 — 08:52 UTC
 
 - Kept unrelated editor rows and tooltips from repeatedly rebuilding the scene hierarchy, while preserving scene-parent and visibility-in-the-tree changes.
