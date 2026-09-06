@@ -226,11 +226,14 @@ api-ms-win-core-synch-l1-2-0.dll     3 symbols
 
 With `-C prefer-dynamic`, it instead names `std-0cebe7c42cd80226.dll` — and that hash identifies one exact toolchain build. A plugin compiled with a different rustc names a different file, which isn't beside the executable, and the OS refuses to load it. That is the same trap as `bevy_dylib-<metadata>`, arriving by a different route, and it defeats the entire point of building without Bevy.
 
-It's an easy one to miss because it fails late. Inside an engine checkout with the pinned toolchain, the matching `std` library is already staged beside the exe, so the plugin loads and everything looks fine — right up until someone with a different rustc tries the same binary.
+The current engine statically links Bevy and does not stage a shared Rust `std`
+library for plugins. A plugin must resolve its own runtime dependencies, not
+borrow them from the editor.
 
-If your plugin **does** live inside an engine checkout, you need to override it. Cargo discovers config by walking up from the working directory and does not stop at a workspace root, so your plugin inherits the engine's `.cargo/config.toml` even though it declares `[workspace]`. The engine sets `prefer-dynamic` so the executable, the editor bundle and distribution plugins can share one `bevy_dylib` — correct for them, wrong for you.
-
-`plugins/.cargo/config.toml` in the engine repo already does this for the bundled examples:
+Cargo discovers configuration from the **working directory** and its parents,
+not from the directory named by `--manifest-path`. The bundled examples inherit
+`plugins/.cargo/config.toml` when built from their own directories. Its explicit
+override also protects against an inherited dynamic-linking preference:
 
 ```toml
 [target.x86_64-pc-windows-msvc]
@@ -302,6 +305,14 @@ ThinLTO is not sufficient for every use of `alloc`: if the strict linker still
 reports Rust unwind imports, enable the SDK's `std` feature for that target.
 Do not export replacement Rust runtime symbols from the host or disable the
 linker check to make the build pass.
+
+For bundled plugins, use `cargo renzora plugin <name>` from the checkout root,
+or run `cargo build --profile dist` **inside `plugins/<name>/`**. The helper
+already selects that working directory. Running from the checkout root with
+only `--manifest-path plugins/<name>/Cargo.toml` skips the plugin configuration:
+it can produce a library that compiles but fails to load with
+`undefined symbol: rust_eh_personality`. Do not enable `std` just to compensate
+for accidentally bypassing the existing build settings.
 
 And at the top of `src/lib.rs`:
 
