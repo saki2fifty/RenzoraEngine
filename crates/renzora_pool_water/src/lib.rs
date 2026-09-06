@@ -27,6 +27,7 @@ pub struct PoolWaterSurface(pub Entity);
 // ── Mesh generation ───────────────────────────────────────────────────────────
 
 fn generate_pool_water_mesh(half_x: f32, half_z: f32, subdivisions: u32) -> Mesh {
+    let subdivisions = subdivisions.max(1);
     let verts_per_edge = subdivisions + 1;
     let total_verts = (verts_per_edge * verts_per_edge) as usize;
     let total_indices = (subdivisions * subdivisions * 6) as usize;
@@ -91,8 +92,8 @@ fn setup_pool_water(
         let mesh = meshes.add(generate_pool_water_mesh(0.5, 0.5, pool.mesh_subdivisions));
 
         let sim = WaterSim::new(
-            pool.sim_resolution as usize,
-            pool.sim_resolution as usize,
+            pool.sim_resolution.max(1) as usize,
+            pool.sim_resolution.max(1) as usize,
             pool.damping,
             pool.wave_speed,
             &mut images,
@@ -114,11 +115,72 @@ fn setup_pool_water(
                 Transform::from_translation(Vec3::new(0.0, 0.5 - pool.water_level, 0.0)),
                 sim,
                 PoolWaterSurface(entity),
+                // The height is local to the pool, including scaled/rotated
+                // parents; preserving an unpropagated world transform loses it.
+                ChildOf(entity),
             ))
-            .set_parent_in_place(entity)
             .id();
 
         commands.entity(entity).insert(PoolWaterLink(surface_id));
+    }
+}
+
+/// Apply authored structural edits without rebuilding unchanged surfaces.
+fn sync_pool_water_settings(
+    pools: Query<&PoolWater>,
+    mut surfaces: Query<(
+        &PoolWaterSurface,
+        &mut WaterSim,
+        &mut Transform,
+        &mut Mesh3d,
+        &MeshMaterial3d<PoolWaterMaterial>,
+    )>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<PoolWaterMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    for (surface, mut sim, mut transform, mut mesh, material) in &mut surfaces {
+        let Ok(pool) = pools.get(surface.0) else {
+            continue;
+        };
+        let height = 0.5 - pool.water_level;
+        if transform.translation.y != height {
+            transform.translation.y = height;
+        }
+        let resolution = pool.sim_resolution.max(1) as usize;
+        if sim.width != resolution || sim.height != resolution {
+            // A different grid restarts the ripple state. Keep the surface and
+            // material identities; the old texture is released through handles.
+            *sim = WaterSim::new(
+                resolution,
+                resolution,
+                pool.damping,
+                pool.wave_speed,
+                &mut images,
+            );
+            if let Some(mut material) = materials.get_mut(&material.0) {
+                material.heightfield = Some(sim.texture_handle.clone());
+            }
+        }
+        if sim.damping != pool.damping {
+            sim.damping = pool.damping;
+        }
+        if sim.speed != pool.wave_speed {
+            sim.speed = pool.wave_speed;
+        }
+        let subdivisions = pool.mesh_subdivisions.max(1);
+        let expected_vertices = (u64::from(subdivisions) + 1).pow(2);
+        if meshes
+            .get(&mesh.0)
+            .is_none_or(|mesh| mesh.count_vertices() as u64 != expected_vertices)
+        {
+            let replacement = generate_pool_water_mesh(0.5, 0.5, subdivisions);
+            if meshes.contains(mesh.0.id()) {
+                *meshes.get_mut(&mesh.0).expect("mesh checked above") = replacement;
+            } else {
+                mesh.0 = meshes.add(replacement);
+            }
+        }
     }
 }
 
@@ -127,8 +189,12 @@ fn cleanup_pool_water(
     mut commands: Commands,
     mut removed: RemovedComponents<PoolWater>,
     links: Query<&PoolWaterLink>,
+    pools: Query<(), With<PoolWater>>,
 ) {
     for entity in removed.read() {
+        if pools.contains(entity) {
+            continue;
+        }
         if let Ok(link) = links.get(entity) {
             if let Ok(mut ec) = commands.get_entity(link.0) {
                 ec.despawn();
@@ -259,9 +325,10 @@ impl Plugin for PoolWaterPlugin {
                 Update,
                 (
                     ensure_depth_prepass,
-                    setup_pool_water,
-                    update_pool_water,
                     cleanup_pool_water,
+                    setup_pool_water.after(cleanup_pool_water),
+                    sync_pool_water_settings.after(setup_pool_water),
+                    update_pool_water.after(sync_pool_water_settings),
                 ),
             );
     }
@@ -334,8 +401,10 @@ mod tests {
         assert!(app.world().get::<DepthPrepass>(camera).is_some());
         let surface = app.world().get::<PoolWaterLink>(pool).unwrap().0;
         assert_eq!(app.world().get::<ChildOf>(surface).unwrap().parent(), pool);
-        // Initial height is a separately tracked pre-existing parenting bug;
-        // this migration preserves the original setup rather than changing it.
+        assert_eq!(
+            app.world().get::<Transform>(surface).unwrap().translation.y,
+            0.45
+        );
         let mesh = app.world().get::<Mesh3d>(surface).unwrap().0.clone();
         assert_eq!(
             app.world()
@@ -385,6 +454,143 @@ mod tests {
         app.world_mut().run_system_once(cleanup_pool_water).unwrap();
         assert!(app.world().get_entity(surface).is_err());
         assert!(app.world().get::<PoolWaterLink>(pool).is_none());
+    }
+
+    #[test]
+    fn height_is_local_to_translated_rotated_scaled_parent() {
+        let mut app = app();
+        app.add_plugins(bevy::transform::TransformPlugin);
+        let parent = Transform::from_xyz(5.0, 7.0, -3.0)
+            .with_rotation(Quat::from_rotation_z(0.4))
+            .with_scale(Vec3::new(2.0, 3.0, 4.0));
+        let pool = app
+            .world_mut()
+            .spawn((
+                PoolWater {
+                    mesh_subdivisions: 2,
+                    sim_resolution: 4,
+                    ..default()
+                },
+                parent,
+            ))
+            .id();
+        app.update();
+        let surface = app.world().get::<PoolWaterLink>(pool).unwrap().0;
+        let expected = parent.transform_point(Vec3::new(0.0, 0.45, 0.0));
+        assert!(app
+            .world()
+            .get::<GlobalTransform>(surface)
+            .unwrap()
+            .translation()
+            .abs_diff_eq(expected, 1e-5));
+    }
+
+    #[test]
+    fn live_settings_reuse_surface_material_and_unchanged_storage() {
+        let mut app = app();
+        let pool = app
+            .world_mut()
+            .spawn((
+                PoolWater {
+                    mesh_subdivisions: 2,
+                    sim_resolution: 4,
+                    ..default()
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        let surface = app.world().get::<PoolWaterLink>(pool).unwrap().0;
+        let mesh = app.world().get::<Mesh3d>(surface).unwrap().0.clone();
+        let material = app
+            .world()
+            .get::<MeshMaterial3d<PoolWaterMaterial>>(surface)
+            .unwrap()
+            .0
+            .clone();
+        let texture = app
+            .world()
+            .get::<WaterSim>(surface)
+            .unwrap()
+            .texture_handle
+            .clone();
+        {
+            let mut settings = app.world_mut().get_mut::<PoolWater>(pool).unwrap();
+            settings.water_level = 0.2;
+            settings.damping = 0.98;
+            settings.wave_speed = 1.5;
+            settings.mesh_subdivisions = 3;
+        }
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(surface).unwrap().translation.y,
+            0.3
+        );
+        assert_eq!(app.world().get::<WaterSim>(surface).unwrap().damping, 0.98);
+        assert_eq!(app.world().get::<WaterSim>(surface).unwrap().speed, 1.5);
+        assert_eq!(
+            app.world().get::<WaterSim>(surface).unwrap().texture_handle,
+            texture
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .get(&mesh)
+                .unwrap()
+                .count_vertices(),
+            16
+        );
+        app.world_mut()
+            .get_mut::<PoolWater>(pool)
+            .unwrap()
+            .sim_resolution = 8;
+        app.update();
+        let sim = app.world().get::<WaterSim>(surface).unwrap();
+        assert_eq!(sim.heights.len(), 64);
+        assert_eq!((sim.width, sim.height), (8, 8));
+        let new_texture = sim.texture_handle.clone();
+        let height_storage = sim.heights.as_ptr();
+        assert_ne!(new_texture, texture);
+        assert_eq!(
+            app.world()
+                .resource::<Assets<PoolWaterMaterial>>()
+                .get(&material)
+                .unwrap()
+                .heightfield
+                .as_ref(),
+            Some(&new_texture)
+        );
+        for _ in 0..100 {
+            app.update();
+        }
+        assert_eq!(app.world().get::<PoolWaterLink>(pool).unwrap().0, surface);
+        assert_eq!(app.world().get::<Mesh3d>(surface).unwrap().0, mesh);
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<PoolWaterMaterial>>(surface)
+                .unwrap()
+                .0,
+            material
+        );
+        assert_eq!(
+            app.world()
+                .get::<WaterSim>(surface)
+                .unwrap()
+                .heights
+                .as_ptr(),
+            height_storage
+        );
+        assert_eq!(
+            app.world().get::<WaterSim>(surface).unwrap().texture_handle,
+            new_texture
+        );
+        let settings = app.world().get::<PoolWater>(pool).unwrap().clone();
+        app.world_mut()
+            .entity_mut(pool)
+            .remove::<PoolWater>()
+            .insert(settings);
+        app.update();
+        assert_eq!(app.world().get::<PoolWaterLink>(pool).unwrap().0, surface);
     }
 
     #[test]

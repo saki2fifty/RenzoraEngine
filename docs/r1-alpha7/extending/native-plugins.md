@@ -157,6 +157,10 @@ Procedural trees use `renzora_procedural_tree` for mesh generation and wind inte
 
 Pool water uses `renzora_pool_water` for rendering and ripple simulation and `renzora_pool_water_editor` for its 14 inspector fields. Settings have one definition in `renzora::pool_water`, preserving the scene name `pool_water::PoolWater` and the existing `pool_water` enable preference. Shader contents are unchanged; their embedded lookup uses the runtime crate's namespace.
 
+Pool-water height is local to its container, including translated, rotated and scaled containers. Live edits to water level, damping, wave speed and mesh subdivisions now update the existing surface. Changing simulation resolution restarts the ripples on the new grid while retaining the surface and material; zero resolution or subdivisions uses a minimum of one. Unchanged settings reuse their mesh and simulation storage.
+
+Removing vignette or auto-exposure settings only reevaluates routes using that source. A remaining source in the route supplies the fallback; unrelated cameras keep their effects.
+
 Clouds use `renzora_clouds` for rendering and GPU noise baking, with the 28-field inspector in `renzora_clouds_editor`. Both keep the existing shared `CloudsData` and `clouds` preference. The two embedded shaders use the runtime crate namespace; lighting, quality gating and noise-generation behavior are unchanged.
 
 Mesh drawing is editor-only in `renzora_mesh_draw_editor`. Its three toolbar/shortcut IDs (`mesh_draw.box`, `mesh_draw.polyline`, `mesh_draw.join`), preference and saved recipe type names are unchanged. Generated runtime wiring does not depend on this authoring crate.

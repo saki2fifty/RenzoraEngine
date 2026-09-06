@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 23:08 UTC
+
+- Fixed pool-water height and live setting updates, while reusing unchanged surfaces.
+- Kept unrelated cameras' effects intact when removing vignette or auto-exposure settings.
+
 ## September 6, 2026 — 22:55 UTC
 
 - Fixed a ray-traced lighting startup warning and made shadow suppression respect light settings when switching on or off.

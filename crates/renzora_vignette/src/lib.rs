@@ -19,9 +19,14 @@ fn sync_vignette(
     mut commands: Commands,
     sources: Query<(Entity, Ref<VignetteSettings>)>,
     routing: Res<renzora::EffectRouting>,
+    mut removed: RemovedComponents<VignetteSettings>,
 ) {
-    let routing_changed = routing.is_changed();
+    let removed: bevy::platform::collections::HashSet<_> = removed.read().collect();
     for (target, source_list) in routing.iter() {
+        // Only routes containing a removed source need to choose a fallback;
+        // unrelated cameras retain their existing effect and change ticks.
+        let routing_changed =
+            routing.is_changed() || source_list.iter().any(|source| removed.contains(source));
         let mut found = false;
         for &src in source_list {
             if let Ok((_, settings)) = sources.get(src) {
@@ -46,20 +51,6 @@ fn sync_vignette(
     }
 }
 
-fn cleanup_vignette(
-    mut commands: Commands,
-    mut removed: RemovedComponents<VignetteSettings>,
-    routing: Res<renzora::EffectRouting>,
-) {
-    if removed.read().next().is_some() {
-        for (target, _) in routing.iter() {
-            if let Ok(mut ec) = commands.get_entity(*target) {
-                ec.remove::<Vignette>();
-            }
-        }
-    }
-}
-
 /// Install vignette rendering without editor dependencies.
 #[derive(Default)]
 pub struct VignettePlugin;
@@ -70,7 +61,7 @@ impl Plugin for VignettePlugin {
             return;
         }
         app.register_type::<VignetteSettings>();
-        app.add_systems(Update, (sync_vignette, cleanup_vignette));
+        app.add_systems(Update, sync_vignette);
     }
 }
 
@@ -107,6 +98,51 @@ mod tests {
             .enabled = false;
         app.update();
         assert!(app.world().get::<Vignette>(camera).is_none());
+    }
+
+    #[test]
+    fn removing_one_source_preserves_other_routes_and_selects_fallback() {
+        let mut app = App::new();
+        let first = app
+            .world_mut()
+            .spawn(VignetteSettings {
+                intensity: 1.0,
+                ..default()
+            })
+            .id();
+        let fallback = app
+            .world_mut()
+            .spawn(VignetteSettings {
+                intensity: 2.0,
+                ..default()
+            })
+            .id();
+        let other = app
+            .world_mut()
+            .spawn(VignetteSettings {
+                intensity: 3.0,
+                ..default()
+            })
+            .id();
+        let a = app.world_mut().spawn_empty().id();
+        let b = app.world_mut().spawn_empty().id();
+        app.insert_resource(renzora::EffectRouting {
+            routes: vec![(a, vec![first, fallback]), (b, vec![other])],
+        });
+        app.add_plugins(VignettePlugin);
+        app.update();
+        app.world_mut()
+            .entity_mut(first)
+            .remove::<VignetteSettings>();
+        app.update();
+        assert_eq!(app.world().get::<Vignette>(a).unwrap().intensity, 2.0);
+        assert_eq!(app.world().get::<Vignette>(b).unwrap().intensity, 3.0);
+        app.world_mut()
+            .entity_mut(fallback)
+            .remove::<VignetteSettings>();
+        app.update();
+        assert!(app.world().get::<Vignette>(a).is_none());
+        assert_eq!(app.world().get::<Vignette>(b).unwrap().intensity, 3.0);
     }
 
     #[test]

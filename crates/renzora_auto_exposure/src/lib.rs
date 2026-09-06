@@ -114,12 +114,15 @@ fn sync_auto_exposure(
     sources: Query<(Entity, Ref<AutoExposureSettings>)>,
     routing: Res<renzora::EffectRouting>,
     comp: Res<AeCompensation>,
+    mut removed: RemovedComponents<AutoExposureSettings>,
 ) {
-    let routing_changed = routing.is_changed();
+    let removed: bevy::platform::collections::HashSet<_> = removed.read().collect();
     // Re-apply when the compensation curve was rebuilt too, otherwise a tuning
     // change wouldn't reach the camera until the settings themselves changed.
     let comp_changed = comp.is_changed();
     for (target, source_list) in routing.iter() {
+        let routing_changed =
+            routing.is_changed() || source_list.iter().any(|source| removed.contains(source));
         let mut found = false;
         for &src in source_list {
             if let Ok((_, settings)) = sources.get(src) {
@@ -185,20 +188,6 @@ fn sync_exposure(
     }
 }
 
-fn cleanup_auto_exposure(
-    mut commands: Commands,
-    mut removed: RemovedComponents<AutoExposureSettings>,
-    routing: Res<renzora::EffectRouting>,
-) {
-    if removed.read().next().is_some() {
-        for (target, _) in routing.iter() {
-            if let Ok(mut ec) = commands.get_entity(*target) {
-                ec.remove::<AutoExposure>();
-            }
-        }
-    }
-}
-
 /// Mirror the camera's `Exposure.ev100` into `CameraExposureState` so
 /// scripting (`camera_ev` Lua/Rhai global) and HUDs can display it.
 ///
@@ -247,10 +236,7 @@ impl Plugin for AutoExposurePlugin {
             Update,
             (build_compensation_curve, sync_auto_exposure).chain(),
         );
-        app.add_systems(
-            Update,
-            (cleanup_auto_exposure, sync_exposure, mirror_camera_ev),
-        );
+        app.add_systems(Update, (sync_exposure, mirror_camera_ev));
     }
 }
 
@@ -325,6 +311,56 @@ mod tests {
             .enabled = false;
         app.update();
         assert!(app.world().get::<AutoExposure>(target).is_none());
+    }
+
+    #[test]
+    fn removing_one_source_preserves_other_routes_and_selects_fallback() {
+        let mut app = App::new();
+        app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+        app.init_resource::<AeCompensation>();
+        let first = app.world_mut().spawn(AutoExposureSettings::default()).id();
+        let fallback = app
+            .world_mut()
+            .spawn(AutoExposureSettings {
+                speed_brighten: 2.0,
+                ..default()
+            })
+            .id();
+        let other = app
+            .world_mut()
+            .spawn(AutoExposureSettings {
+                speed_brighten: 3.0,
+                ..default()
+            })
+            .id();
+        let a = app.world_mut().spawn_empty().id();
+        let b = app.world_mut().spawn_empty().id();
+        app.insert_resource(renzora::EffectRouting {
+            routes: vec![(a, vec![first, fallback]), (b, vec![other])],
+        });
+        app.add_systems(Update, sync_auto_exposure);
+        app.update();
+        app.world_mut()
+            .entity_mut(first)
+            .remove::<AutoExposureSettings>();
+        app.update();
+        assert_eq!(
+            app.world().get::<AutoExposure>(a).unwrap().speed_brighten,
+            2.0
+        );
+        assert_eq!(
+            app.world().get::<AutoExposure>(b).unwrap().speed_brighten,
+            3.0
+        );
+        app.world_mut()
+            .entity_mut(fallback)
+            .remove::<AutoExposureSettings>();
+        app.update();
+        assert!(app.world().get::<AutoExposure>(a).is_none());
+        assert_eq!(
+            app.world().get::<AutoExposure>(b).unwrap().speed_brighten,
+            3.0
+        );
     }
 
     #[test]
