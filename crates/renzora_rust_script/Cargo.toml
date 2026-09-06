@@ -70,8 +70,6 @@ renzora_identity = { path = "../renzora_identity", features = ["discovery", "rus
 # `notify_debouncer_full`, matching the C-ABI plugin hot-reload path's
 # mechanism. `0.7` matches the version used by `renzora_plugin::host::dev`.
 notify-debouncer-full = "0.7"
-# Used by the SDK install path resolver.
-renzora_plugin_build = { path = "../renzora_plugin_build" }
 # Stable hash for build directory keys (exporter still uses these
 # when reading legacy .renzora/scripts/ directories staged by earlier
 # builds). The active Phase 4 path uses BuildService.

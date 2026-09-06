@@ -70,11 +70,6 @@ pub use renzora_loose_plugins;
 // a plugin crate no longer needs a link edge for its own sake.
 pub use renzora_engine;
 pub use renzora_network;
-// The same, for the first-run setup the binary runs before Bevy starts. It
-// moved out of the editor executable when the editor became a loadable image
-// and there was only one binary left to run it.
-#[cfg(not(target_arch = "wasm32"))]
-pub use renzora_native_plugin;
 
 // Always compiled now. Whether it's added is decided at RUNTIME by the
 // `is_editor` arg to `add_engine_plugins` (the editor renders to its own

@@ -62,7 +62,6 @@ use renzora::core::console_log::console_error;
 use renzora_identity::{BareAliasIndex, CanonicalId};
 use renzora_plugin::script::compiled::ScriptGeneration;
 use renzora_plugin::script::CompiledScriptDesc;
-use renzora_plugin_build::install;
 
 pub use build_service::{RustScriptBuildService, RustScriptSharedService};
 pub use compiled_runtime::CompiledScriptSlot;
@@ -706,12 +705,6 @@ fn find_query_symbol(lib: &Library) -> Option<renzora_plugin::script::compiled::
 /// query ABI either.
 fn find_legacy_desc_symbol(lib: &Library) -> Option<*const CompiledScriptDesc> {
     find_descriptor_symbol(lib)
-}
-
-/// The directory holding `sdk/`, which is where scripts are compiled
-/// against.
-pub fn sdk_root() -> Option<PathBuf> {
-    install::root()
 }
 
 /// Phase 4 declaration recognition, backed by `rustc_lexer` 0.1.0.

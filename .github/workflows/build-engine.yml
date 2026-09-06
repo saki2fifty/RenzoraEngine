@@ -435,29 +435,6 @@ jobs:
         shell: bash
         run: cargo renzora dist --bundle
 
-      # Packed here because this is now the only kind of lane that has an SDK to
-      # pack: the container lanes stage no editor and therefore no SDK, since an
-      # SDK's proc macros are artifacts of the machine that compiled them and a
-      # Linux container can only produce Linux ones. The staged tree is ~1.9 GB
-      # of loose crate metadata, and uploading it extracted makes this artifact
-      # several times larger for no benefit. xtask needs the tree in place while
-      # it builds the native plugins, so packing happens after rather than
-      # instead.
-      #
-      # Skipped without zstd rather than failed — the artifact is then merely
-      # fat, and `package-release.sh` compresses it later.
-      - name: Pack the plugin SDK
-        shell: bash
-        run: |
-          out=dist/${{ matrix.dist_dir }}
-          [ -d "$out/sdk" ] || exit 0
-          if ! command -v zstd >/dev/null 2>&1; then
-            echo "zstd unavailable — shipping sdk/ extracted (packaging will compress it)"
-            exit 0
-          fi
-          ( cd "$out" && tar -cf - sdk | zstd -19 --long=27 -T0 -q -o sdk.tar.zst -f )
-          rm -rf "$out/sdk"
-          ls -lh "$out/sdk.tar.zst"
 
       # Disk exhaustion is the likeliest failure on these runners, and cargo's
       # error for it is unhelpful; report free space either way so a failed run
@@ -585,9 +562,9 @@ jobs:
             echo "### Engine"
             echo "\`<platform>.zip\` — the editor and the game runtime together. Unzip and run \`renzora-editor\` (Linux: the \`.AppImage\`; macOS: \`Renzora Engine.app\`)."
             echo
-            echo "It also carries \`sdk.tar.zst\` — the Rust SDK. The first time you launch after installing or updating, the editor shows a short setup window while it unpacks that (a few seconds) and compiles any native plugins, then restarts straight into the editor. After that the archive is deleted and startup is normal."
+            echo "The small Rust source SDK is included for live Rust plugins and scripts. Compiler output is cached outside the installation; there is no compiled-Bevy SDK extraction step."
             echo
-            echo "The SDK is what lets Rust scripts and native plugins be compiled on your machine rather than shipped prebuilt, so they keep working when the engine updates instead of going stale. Compiling also needs the Rust toolchain, which the editor offers to install at that point."
+            echo "Compiling Rust requires a compatible Rust toolchain. Full engine extensions use the separate engine-plugin build kit and a restart-required build, not the live-plugin SDK."
             echo
             echo "### Export templates"
             echo "\`renzora-runtime-<platform>.zip\` — the game runtime for one platform, with no editor. You do not download these by hand: the editor fetches the ones it needs from **Export → Packaging → Runtime template**, which is how you export for a platform you are not running on."

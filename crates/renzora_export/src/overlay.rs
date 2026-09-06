@@ -1317,29 +1317,12 @@ fn export_worker(
                 )));
                 return;
             }
-            // Same trade for native plugins: a `Runtime`-scope one belongs in
-            // the game, and the library the editor built is the thing that
-            // ships. Read from the editor's own `plugins/`, not the project's —
-            // a native plugin extends the engine, not one game.
+            // Copy the selected C-ABI extensions. Engine plugins are compiled
+            // into the selected runtime; no Rust-ABI libraries are copied.
             if let Some(editor_dir) = crate::build::editor_dir() {
-                // The picker lists native plugins alongside C-ABI ones now, so
-                // the same tick-list decides both. Ids are unique across the two
-                // kinds — they all come from one `plugins/` namespace — so a set
-                // of every selected id filters the native staging correctly
-                // without having to know which kind each id was.
+                // The same picker selection filters loose C-ABI extensions.
                 let native_selection: std::collections::HashSet<String> =
                     selected_plugins.iter().map(|p| p.id.clone()).collect();
-                if !has_native_runtime {
-                    if let Err(e) = crate::build::stage_runtime_native_plugins(
-                        &editor_dir,
-                        &output_dir,
-                        lib_ext,
-                        Some(&native_selection),
-                        &mut sp,
-                    ) {
-                        let _ = tx.send(ExportMsg::Progress(format!("WARN: {e}")));
-                    }
-                }
                 // Phase 3 Tier-1 loose plugins. Same selection set, same
                 // library, same destination shape — the loose form is
                 // just a different way to author the same C-ABI cdylib.

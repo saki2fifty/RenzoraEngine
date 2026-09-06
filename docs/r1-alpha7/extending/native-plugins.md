@@ -22,6 +22,11 @@ Copy-based exports disable unselected built-ins at startup; their compiled code 
 
 Renzora does not guess the tier from source code. A directory becomes a Tier 2 engine plugin only through `plugin.toml` with `type = "engine"`.
 
+The retired Rust-ABI directory loader and its first-run compiled-SDK setup are
+removed. Export no longer offers or copies libraries built for that loader.
+Use the engine-plugin manifest and restart workflow for full engine access;
+ordinary C-ABI plugins and scripts keep their existing live-update path.
+
 Engine plugins are trusted native code. They can access the process and crash it. Project approval is consent to compile and execute that code, not a sandbox.
 
 ## Project layout

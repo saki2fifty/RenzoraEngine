@@ -16,7 +16,6 @@ renzora_plugin = { path = "../renzora_plugin", features = ["host"] }
 renzora_rust_script = { path = "../renzora_rust_script" }
 # For `read_scope` — asking a built plugin library whether it belongs in a game,
 # rather than parsing the source for an answer that describes a different build.
-renzora_native_plugin = { path = "../renzora_native_plugin" }
 # Phase 4 cached compilation: the copy-based export reads compiled
 # script artifacts from the BuildService's cache (where the editor
 # writes every successful build) instead of project-local

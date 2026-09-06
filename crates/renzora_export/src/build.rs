@@ -1275,102 +1275,12 @@ fn copy_dir(from: &Path, to: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
-/// Ship the `Runtime`-scope native plugins the editor already built, beside a
-/// copy-based export.
-///
-/// A native plugin links the real Bevy, so it can only load into a host that
-/// shares the same image — which a copy-based export does, since it carries the
-/// very `bevy_dylib` and `renzora_dylib` the plugin was compiled against. (A
-/// lean export links Bevy statically and shares nothing, so it takes no native
-/// plugins at all.)
-///
-/// **Scope is read from the built library, not the source.** A
-/// `plugin!(.., Runtime)` in `src/lib.rs` describes what the source would build
-/// to; what ships is the library, and the two disagree whenever one was edited
-/// without rebuilding. Asking the artefact removes the discrepancy.
-///
-/// Only the library is staged — no `src/`, no stamp. The loader treats a
-/// directory holding a built library and nothing else as a plugin it can load
-/// but not rebuild, which is exactly a shipped game's situation. Shipping the
-/// source would put a plugin author's code inside every game that uses it to
-/// satisfy a marker nothing reads.
-///
-/// Host platform only, for the same reason as the scripts: these libraries are
-/// host-shaped.
-pub fn stage_runtime_native_plugins(
-    editor_dir: &Path,
-    output_dir: &Path,
-    lib_ext: &str,
-    // What the exporter's plugin picker has ticked. `None` means the picker
-    // never ran, in which case every eligible plugin ships — the behaviour
-    // before it listed native plugins at all.
-    selected: Option<&std::collections::HashSet<String>>,
-    progress: &mut dyn FnMut(String),
-) -> Result<usize, String> {
-    let src_root = editor_dir.join("plugins");
-
-    // A plugin switched off in Settings → Editor → Plugins must not ship. It is
-    // off because the user turned it off, and an export is the last moment that
-    // choice can still be honoured — after this it is in a player's hands with
-    // no switch at all.
-    let disabled = renzora::load_disabled_plugins();
-
-    let mut shipped: Vec<String> = Vec::new();
-    let mut skipped_editor: Vec<String> = Vec::new();
-    for plugin in renzora_native_plugin::installed(&src_root, lib_ext) {
-        let name = plugin.id;
-        if disabled.iter().any(|d| d == &name) {
-            continue;
-        }
-        // Unticked in the picker. Distinct from `disabled` above: that is "not
-        // in my editor", this is "not in this build".
-        if selected.is_some_and(|s| !s.contains(&name)) {
-            continue;
-        }
-        if plugin.scope != renzora::NativePluginScope::Runtime {
-            // Editor-only: belongs in no game, and worth saying so.
-            skipped_editor.push(name);
-            continue;
-        }
-
-        let dest = output_dir.join("plugins").join(&name).join("build");
-        std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-        let dest_lib = dest.join(format!("{}.{lib_ext}", name.replace('-', "_")));
-        std::fs::copy(&plugin.lib, &dest_lib).map_err(|e| {
-            format!(
-                "copy {} → {}: {e}",
-                plugin.lib.display(),
-                dest_lib.display()
-            )
-        })?;
-        shipped.push(name);
-    }
-
-    if !shipped.is_empty() {
-        progress(format!(
-            "Shipped {} runtime native plugin(s): {}",
-            shipped.len(),
-            shipped.join(", ")
-        ));
-    }
-    // Said out loud, because "my plugin is missing from the build" is otherwise
-    // indistinguishable from a bug — and the fix is one word in the source.
-    if !skipped_editor.is_empty() {
-        progress(format!(
-            "{} native plugin(s) are editor-only and were not shipped ({}). Declare \
-             `renzora::plugin!(.., Runtime)` to include one in a game.",
-            skipped_editor.len(),
-            skipped_editor.join(", ")
-        ));
-    }
-    Ok(shipped.len())
-}
 
 /// Ship the loose Tier-1 plugin cdylibs the editor already built, beside
 /// a copy-based export.
 ///
-/// Mirrors [`stage_runtime_native_plugins`]: each selected Runtime loose
-/// plugin's staged cdylib is copied to `<output>/plugins/<safe-name>/build/`.
+/// Each selected Runtime loose plugin's staged cdylib is copied to
+/// `<output>/plugins/<safe-name>/build/`.
 /// Editor-scoped loose plugins are excluded (the runtime has no editor
 /// surface); disabled loose plugins are excluded (the user disabled them).
 ///

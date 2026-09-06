@@ -35,6 +35,11 @@ exits with a migration message and creates no output. Use `source-sdk` for live
 Rust plugins/scripts; restart-required engine extensions use the separate
 engine-plugin build kit, not the retired metadata archive.
 
+Release packaging keeps the small source SDK and excludes an old `sdk/` or
+`sdk.tar.*` left in the staging directory. Those old input files are not deleted
+by packaging. AppImage releases carry the source SDK inside the image, rather
+than adding a compiled SDK archive beside it.
+
 ## Validation
 
 ```sh

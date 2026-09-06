@@ -67,7 +67,6 @@ dynamic_linking = [
     # `--no-default-features --features runtime,dynamic_linking` compiles rather
     # than failing to resolve.
     "dep:renzora_ember_dylib",
-    "renzora_native_plugin/dynamic_linking",
     "renzora_rust_script/dynamic_linking",
 ]
 # The static counterpart: Rust scripts compiled into the binary rather than
@@ -358,7 +357,6 @@ renzora_vignette = { path = "../renzora_vignette", optional = true }
 # entry here pointing at a directory that no longer exists stops cargo
 # loading the workspace, including to run the generator that would fix
 # it. If you hit that, delete the offending line below.
-renzora_native_plugin = { path = "../renzora_native_plugin" }
 renzora_net = { path = "../renzora_net" }
 renzora_rust_script = { path = "../renzora_rust_script" }
 renzora_wind = { path = "../renzora_wind" }

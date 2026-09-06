@@ -179,7 +179,6 @@ package_desktop() {
     restore_exec_bits "$dir"
 
     package_runtime_template "$platform" "$dir"
-    compress_sdk "$dir"
 
     # The engine zip. On Linux the AppImage IS the distribution — it already
     # contains everything in the AppDir — so shipping both would double the
@@ -190,70 +189,16 @@ package_desktop() {
     local appimage=""
     for f in "$dir"/*.AppImage; do [ -f "$f" ] && appimage="$f"; done
     if [ -n "$appimage" ]; then
-        # The SDK cannot go inside the AppImage — that is built upstream by
-        # build-all.sh — so it rides beside it in the zip, which is also where
-        # the editor looks for it.
-        ( cd "$dir" && zip -qry "$asset" "$(basename "$appimage")" \
-            $( [ -f "$dir/sdk.tar.zst" ] && echo "sdk.tar.zst" ) )
+        # The source SDK is already inside the AppImage beside the binaries.
+        ( cd "$dir" && zip -qry "$asset" "$(basename "$appimage")" )
     else
-        ( cd "$dir" && zip -qry "$asset" . )
+        # Preserve any legacy files on disk, but do not ship the retired SDK.
+        ( cd "$dir" && zip -qry "$asset" . -x 'sdk/*' 'sdk.tar.*' \
+            '*.app/Contents/MacOS/sdk/*' '*.app/Contents/MacOS/sdk.tar.*' )
     fi
     record "$asset" "$platform" engine
 }
 
-# ── Compress the plugin SDK in place ─────────────────────────────────────────
-# `cargo renzora` and `build-all.sh` stage the SDK EXTRACTED, because in a dev
-# tree it is hardlinked to `target/` and costs neither disk nor time. Shipping it
-# that way would put ~1.9 GB of loose crate metadata into the engine zip.
-#
-# So it is compressed to a single `sdk.tar.zst` (~444 MB) and the extracted tree
-# removed. The editor unpacks it on demand — Rust scripts and native plugins
-# both need it, so that is part of setting the engine up rather than an optional
-# extra.
-#
-# ── zstd, not xz ─────────────────────────────────────────────────────────────
-# xz is smaller (341 MB), and while the SDK was plugin-only that was the right
-# trade. It stopped being right once scripting needed it too: the unpack cost is
-# now paid by every user, and the download's is paid once. Measured on the real
-# tree, zstd -19 costs +103 MB and turns a 29.8 s unpack into ~2 s — and because
-# its decoder streams, it also removes the ~1.9 GB temporary tarball the xz path
-# had to write and read back. `crates/renzora_plugin_build/src/unpack.rs` records
-# the full numbers, including why switching to C liblzma is NOT a speed-up.
-#
-# -19 rather than a lower level: measured 444 MB against 520 MB at -10, for 0.5 s
-# more decode. --long=27 widens the match window past zstd's default 8 MB, which
-# matters on a tree this repetitive.
-#
-# Bundling rather than downloading on demand is deliberate. It removes an entire
-# subsystem — hosting, a URL, progress, resume, checksums, offline handling — and
-# makes a version mismatch structurally impossible: the SDK in the folder is by
-# construction the one that built the editor beside it.
-#
-# Runs AFTER `package_runtime_template`, which reads the same directory and must
-# not see the tree disappear underneath it.
-compress_sdk() {
-    local dir="$1"
-    # Already packed by the build lane (`pack_sdk` in docker/build-all.sh), which
-    # is where it should happen — the tree is ~1.9 GB and compressing it here
-    # means every artifact was uploaded and downloaded extracted first. This stays
-    # as the fallback for a lane that had no zstd, and for `windows-arm64`, which
-    # builds through xtask outside any container.
-    if [ -f "$dir/sdk.tar.zst" ]; then
-        rm -rf "$dir/sdk"
-        echo "   sdk.tar.zst $(du -h "$dir/sdk.tar.zst" | cut -f1) (packed by the build lane)"
-        return 0
-    fi
-    [ -d "$dir/sdk" ] || return 0
-    echo "   compressing sdk/ …"
-    # -T0 uses every core. Compression is the slowest part of packaging, and it
-    # only ever runs here — the decoder is single-threaded and does not care.
-    ( cd "$dir" && tar -cf - sdk | zstd -19 --long=27 -T0 -q -o sdk.tar.zst -f ) || {
-        echo "ERROR: failed to compress $dir/sdk" >&2
-        return 1
-    }
-    rm -rf "$dir/sdk"
-    echo "   sdk.tar.zst $(du -h "$dir/sdk.tar.zst" | cut -f1)"
-}
 
 # ── Package the web bundle ───────────────────────────────────────────────────
 # Two bundles live side by side in `web-wasm32/` (`renzora-runtime.*` and

@@ -1000,45 +1000,6 @@ fn launch_executable(arguments: &[String]) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod launch_tests {
-    use super::*;
-
-    #[test]
-    fn ordinary_and_xr_editor_launches_use_editor() {
-        assert_eq!(launch_executable(&[]), "renzora-editor");
-        assert_eq!(launch_executable(&["--xr".into()]), "renzora-editor");
-    }
-
-    #[test]
-    fn explicit_game_modes_use_runtime() {
-        for flag in ["--server", "--host", "--vr"] {
-            assert_eq!(launch_executable(&[flag.into()]), "renzora");
-        }
-    }
-
-    #[test]
-    fn staging_requires_pair_and_ignores_engine_target_libraries() {
-        let root = tempfile::tempdir().expect("fixture");
-        let plat = platform();
-        let source = root.path().join("target").join(profile());
-        std::fs::create_dir_all(&source).expect("target");
-        std::fs::create_dir_all(root.path().join("crates")).expect("crates");
-        let runtime = format!("renzora{}", plat.exe_suffix);
-        let editor = format!("renzora-editor{}", plat.exe_suffix);
-        std::fs::write(source.join(&runtime), b"runtime").expect("runtime");
-        assert!(stage(root.path(), &plat).is_err());
-        std::fs::write(source.join(&editor), b"editor").expect("editor");
-        let obsolete = format!("{}obsolete.{}", plat.lib_prefix, plat.ext);
-        std::fs::write(source.join(&obsolete), b"old library").expect("obsolete");
-        let output = stage(root.path(), &plat).expect("complete pair");
-        assert_eq!(std::fs::read(output.join(runtime)).expect("staged runtime"), b"runtime");
-        assert_eq!(std::fs::read(output.join(editor)).expect("staged editor"), b"editor");
-        assert!(!output.join("plugins").join(obsolete).exists());
-    }
-}
-
-// ── small helpers ────────────────────────────────────────────────────────────
 
 /// Honor cargo's chosen toolchain when xtask is itself invoked via cargo.
 fn cargo() -> String {
@@ -1237,3 +1198,43 @@ fn fixup_macos(out: &Path) {
         let _ = Command::new("codesign").args(["-s", "-", "-f"]).arg(f).status();
     }
 }
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_and_xr_editor_launches_use_editor() {
+        assert_eq!(launch_executable(&[]), "renzora-editor");
+        assert_eq!(launch_executable(&["--xr".into()]), "renzora-editor");
+    }
+
+    #[test]
+    fn explicit_game_modes_use_runtime() {
+        for flag in ["--server", "--host", "--vr"] {
+            assert_eq!(launch_executable(&[flag.into()]), "renzora");
+        }
+    }
+
+    #[test]
+    fn staging_requires_pair_and_ignores_engine_target_libraries() {
+        let root = tempfile::tempdir().expect("fixture");
+        let plat = platform();
+        let source = root.path().join("target").join(profile());
+        std::fs::create_dir_all(&source).expect("target");
+        std::fs::create_dir_all(root.path().join("crates")).expect("crates");
+        let runtime = format!("renzora{}", plat.exe_suffix);
+        let editor = format!("renzora-editor{}", plat.exe_suffix);
+        std::fs::write(source.join(&runtime), b"runtime").expect("runtime");
+        assert!(stage(root.path(), &plat).is_err());
+        std::fs::write(source.join(&editor), b"editor").expect("editor");
+        let obsolete = format!("{}obsolete.{}", plat.lib_prefix, plat.ext);
+        std::fs::write(source.join(&obsolete), b"old library").expect("obsolete");
+        let output = stage(root.path(), &plat).expect("complete pair");
+        assert_eq!(std::fs::read(output.join(runtime)).expect("staged runtime"), b"runtime");
+        assert_eq!(std::fs::read(output.join(editor)).expect("staged editor"), b"editor");
+        assert!(!output.join("plugins").join(obsolete).exists());
+    }
+}
+
+// ── small helpers ────────────────────────────────────────────────────────────
