@@ -1,16 +1,15 @@
-//! Renzora Solari — hardware-raytraced global illumination, as a drop-in plugin.
+//! Renzora Solari — statically linked hardware-raytraced global illumination.
 //!
 //! Wraps Bevy's experimental `bevy_solari` (`SolariPlugins`: realtime raytraced
 //! direct + indirect lighting, fully dynamic, no baking) behind Renzora's plugin
-//! contract. Ships as a `cdylib` in `plugins/` like `renzora_lumen` — drop it in
-//! to enable Solari, delete it to disable. Nothing in the host references this
-//! crate.
+//! contract. The runtime's Solari feature links this crate into the executable;
+//! it is not a standalone C-ABI plugin.
 //!
 //! ## Why this needs a host capability flag
 //!
 //! Solari requires ray-tracing wgpu features (`EXPERIMENTAL_RAY_QUERY` +
 //! acceleration structures) enabled on the `RenderDevice` *at creation time*.
-//! That is frozen before any dlopen plugin's `build()` runs, so this plugin
+//! That is frozen before this lighting plugin's `build()` runs, so this plugin
 //! cannot turn them on itself. The host (`renzora_runtime`) probes the GPU at
 //! startup, requests the features when supported, and records the result in
 //! [`renzora::GpuRaytracing`]. We read that here and install `SolariPlugins`

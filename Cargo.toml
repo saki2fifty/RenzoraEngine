@@ -235,10 +235,8 @@ bevy = { version = "0.19", default-features = false, features = [
     # specular BRDF table and changes PBR output if removed.
     "bluenoise_texture", "dfg_lut", "area_light_luts",
     # Experimental hardware-raytraced lighting — backs the `renzora_solari`
-    # distribution plugin (Bevy's `SolariPlugins`). Enabling it recompiles
-    # `bevy_dylib` and MOVES the plugin ABI hash (CLAUDE.md §3): every existing
-    # distribution plugin must be rebuilt, and the pinned hash must be re-pinned
-    # after the next container build.
+    # statically linked engine feature (Bevy's `SolariPlugins`). Changing this
+    # requires rebuilding the engine, not repinning standalone C-ABI plugins.
     "bevy_solari",
     # built-in post-process effect stack (vignette, lens distortion, chromatic aberration)
     "bevy_post_process",
@@ -327,10 +325,9 @@ static_scripts = ["renzora_runtime?/static_scripts"]
 # `RenderDiagnosticsPlugin` so those GPU zones actually record. Build+run it with
 # `cargo renzora --features profiling` (native) or `renzora run -- --features profiling`.
 #
-# DELIBERATELY out of `default`: compiling `trace_tracy` recompiles `bevy_dylib`
-# and MOVES the plugin ABI (CLAUDE.md §3), so prebuilt community plugins in
-# `plugins/` won't load against a profiling binary — everything built from source
-# in the same invocation (the editor bundle + all workspace plugins) still matches.
+# DELIBERATELY out of `default`: instrumentation adds build/runtime cost.
+# Engine plugins are statically rebuilt with it; standalone C-ABI extensions
+# still negotiate their interface version/prefixes, not a Bevy DLL hash.
 # Keep the in-app "Tracy Profiler" toggle (Settings → Plugins) OFF in this build:
 # Bevy already frame-marks, and the `plugins/tracy` bridge marking too would
 # double-count every frame.
@@ -464,31 +461,9 @@ winres = "0.1"
 # (`cargo build --profile release --workspace`), which is the point of making it
 # a named profile rather than a pile of env overrides.
 
-# ── Windows ships THIS profile, not `release` ────────────────────────────────
-#
-# Not a preference — a format limit. A PE export ordinal is 16 bits, so a DLL
-# exports at most 65,535 symbols, and `bevy_dylib` lands either side of that
-# depending only on the optimisation level. Measured on this workspace:
-#
-#     opt-level = 2      41,958   links
-#     opt-level = "s"   269,482   rust-lld: too many exported symbols
-#
-# `"s"` inlines far less, so generic instantiations that `2` folds into their
-# callers survive as separate functions, and a Rust `dylib` exports every one.
-#
-# A per-package override on `bevy_dylib` does NOT fix it: that crate is a thin
-# re-export of `bevy_internal`, so the symbols come from the ~40 upstream `bevy_*`
-# crates and the level that matters is theirs. Setting `package."*"` would reach
-# them but that is most of the code, i.e. the size win itself.
-#
-# So Windows trades binary size for the shared-image plugin system, which needs
-# `bevy_dylib` to exist at all. `build_one` in `docker/build-all.sh` FORCES this
-# profile for any `windows-*` platform rather than trusting its caller to ask for
-# it — the constraint belongs to the target, and a caller that did not know
-# (`renzora build windows`, from the CLI) silently took the `release` default and
-# failed to link. The `windows-arm64` lane, which runs `cargo renzora` instead of
-# that script, still names it via `RENZORA_PROFILE`. Linux and macOS keep
-# `release`, having no such ceiling.
+# Fast local validation on all platforms. Shipping builds can use `release`
+# on Windows too: the old full-Bevy DLL export limit no longer applies to
+# the statically linked editor/runtime and standalone C-ABI plugin boundary.
 [profile.dist]
 inherits = "release"
 # Fast to link. `opt-level = 2` and NO LTO — restated explicitly rather than
