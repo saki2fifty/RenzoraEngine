@@ -441,3 +441,11 @@ A note on where to spend effort: across this pass, removing *discrete work*
 shaving *per-unit constants* on work that still ran predicted it 0 times out of 3.
 If a change doesn't remove something from the frame entirely, be sceptical of the
 estimate until Tracy confirms it.
+
+## Runtime UI scale
+
+Runtime UI scale still checks the current canvas and display size each frame,
+but only writes the global scale when the calculated value differs. This avoids
+unchanged-scale change notifications without relying on cached resize events.
+The regression workload measures notifications across 1,000 stable frames and
+window/canvas changes; it is not an FPS benchmark.

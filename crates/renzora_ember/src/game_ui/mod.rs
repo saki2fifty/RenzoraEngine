@@ -514,8 +514,13 @@ fn update_ui_scale(
     }
 
     let scale = (actual_w / ref_w).min(actual_h / ref_h);
-    ui_scale.0 = scale;
+    // A mutable dereference marks this global layout input changed. Keep the
+    // inexpensive size check, but invalidate layout only when its result differs.
+    if ui_scale.0 != scale {
+        ui_scale.0 = scale;
+    }
 }
+
 
 // ── Image rehydration ───────────────────────────────────────────────────────
 
@@ -607,6 +612,49 @@ renzora::add!(GameUiPlugin);
 
 #[cfg(test)]
 mod invariant_tests {
+    #[derive(Resource, Default)]
+    struct ScaleChanges(u32);
+
+    fn count_changes(scale: Res<bevy::ui::UiScale>, mut changes: ResMut<ScaleChanges>) {
+        if scale.is_changed() {
+            changes.0 += 1;
+        }
+    }
+
+    #[test]
+    fn stable_frames_do_not_invalidate_scale_but_resize_and_canvas_changes_do() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<bevy::ui::UiScale>()
+            .init_resource::<ScaleChanges>()
+            .add_systems(Update, (update_ui_scale, count_changes).chain());
+        let window = app.world_mut().spawn((Window {
+            resolution: bevy::window::WindowResolution::new(1280, 720),
+            ..default()
+        }, bevy::window::PrimaryWindow)).id();
+        app.update();
+        let initial = app.world().resource::<ScaleChanges>().0;
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<ScaleChanges>().0, initial);
+
+        app.world_mut().get_mut::<Window>(window).unwrap().resolution.set(2560., 1440.);
+        app.update();
+        assert_eq!(app.world().resource::<bevy::ui::UiScale>().0, 2.0);
+        assert_eq!(app.world().resource::<ScaleChanges>().0, initial + 1);
+
+        let canvas = app.world_mut().spawn(UiCanvas {
+            reference_width: 2560., reference_height: 1440., ..default()
+        }).id();
+        app.update();
+        assert_eq!(app.world().resource::<bevy::ui::UiScale>().0, 1.0);
+        app.world_mut().despawn(canvas);
+        app.update();
+        assert_eq!(app.world().resource::<bevy::ui::UiScale>().0, 2.0);
+        assert_eq!(app.world().resource::<ScaleChanges>().0, initial + 3);
+        eprintln!("UiScale measurement: 1000 stable frames, 0 scale-change notifications; 3 size changes, 3 notifications");
+    }
     use super::*;
     use crate::game_ui::components::UiCanvas;
 
