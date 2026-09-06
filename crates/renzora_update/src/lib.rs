@@ -123,6 +123,15 @@ pub struct UpdateState {
 impl UpdateState {
     /// Start a check on a worker thread, unless one is already running.
     pub fn start_check(&mut self) {
+        self.start_check_with(check::spawn_check);
+    }
+
+    fn start_check_with(
+        &mut self,
+        spawn: impl FnOnce(
+            UpdateChannel,
+        ) -> std::sync::mpsc::Receiver<Result<UpdateCheckResult, String>>,
+    ) {
         if self.checking {
             return;
         }
@@ -131,7 +140,19 @@ impl UpdateState {
         self.error = None;
         self.overwrite_armed = false;
         let channel = UpdateChannel::resolve(&self.channel_pref, self.dev_mode);
-        self.check_rx = Some(std::sync::Mutex::new(check::spawn_check(channel)));
+        self.check_rx = Some(std::sync::Mutex::new(spawn(channel)));
+    }
+
+    fn start_initial_check_with(
+        &mut self,
+        ready: bool,
+        spawn: impl FnOnce(
+            UpdateChannel,
+        ) -> std::sync::mpsc::Receiver<Result<UpdateCheckResult, String>>,
+    ) {
+        if ready && self.layout.is_some() && !self.checked_once {
+            self.start_check_with(spawn);
+        }
     }
 
     /// Switch channel and re-check — the answer is channel-dependent, so a
@@ -256,6 +277,7 @@ impl Plugin for UpdatePlugin {
                 .add_systems(
                     Update,
                     (
+                        start_initial_check,
                         watch_dev_mode,
                         open_on_request,
                         poll_check,
@@ -267,7 +289,7 @@ impl Plugin for UpdatePlugin {
     }
 }
 
-/// Read the stored channel and do one check at startup.
+/// Read the stored channel and prepare the automatic startup check.
 ///
 /// The check is silent — it only inserts [`renzora::core::UpdateAvailable`], so
 /// the Help menu can offer "Update to …" instead of "Check for Updates". Nothing
@@ -286,10 +308,20 @@ fn load_prefs_and_check(mut state: ResMut<UpdateState>) {
         Ok(layout) => {
             state.install_path = layout.target.display().to_string();
             state.layout = Some(layout);
-            state.start_check();
         }
         Err(e) => state.error = Some(e),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn start_initial_check(mut state: ResMut<UpdateState>) {
+    // Startup and first-frame assembly can exceed the network watchdog before
+    // Last adopts the backend. Optional work must wait for that adoption.
+    // Avoid marking this UI resource changed on every settled frame.
+    if state.checked_once || state.layout.is_none() || !renzora_net::is_available() {
+        return;
+    }
+    state.start_initial_check_with(renzora_net::is_available(), check::spawn_check);
 }
 
 /// Follow the developer-mode toggle: what the channel resolves to depends on it,
@@ -456,3 +488,58 @@ pub(crate) fn install_and_restart(state: &mut UpdateState) {
 }
 
 renzora::add!(UpdatePlugin, Editor);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod startup_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn startup_prepares_layout_without_spawning_a_request() {
+        let mut app = App::new();
+        app.init_resource::<UpdateState>()
+            .add_systems(Startup, load_prefs_and_check);
+        app.update();
+        let state = app.world().resource::<UpdateState>();
+        assert!(state.layout.is_some());
+        assert!(!state.checked_once);
+        assert!(!state.checking);
+        assert!(state.check_rx.is_none());
+    }
+
+    #[test]
+    fn automatic_check_waits_and_failed_check_does_not_retry_every_frame() {
+        let mut state = UpdateState {
+            layout: Some(install::detect_layout().unwrap()),
+            ..default()
+        };
+        for _ in 0..1_000 {
+            state.start_initial_check_with(false, |_| panic!("backend is not ready"));
+        }
+        assert!(!state.checked_once);
+        let (tx, rx) = mpsc::channel();
+        state.start_initial_check_with(true, |_| rx);
+        assert!(state.checking);
+        assert!(state.checked_once);
+        state.start_initial_check_with(true, |_| panic!("duplicate request"));
+        tx.send(Err("offline".into())).unwrap();
+
+        let mut app = App::new();
+        app.insert_resource(state).add_systems(Update, poll_check);
+        app.update();
+        let mut state = app.world_mut().resource_mut::<UpdateState>();
+        assert!(!state.checking);
+        assert_eq!(state.error.as_deref(), Some("offline"));
+        state.start_initial_check_with(true, |_| panic!("automatic retry storm"));
+        // Explicit retries still work after the one automatic attempt fails.
+        let (_tx, rx) = mpsc::channel();
+        state.start_check_with(|_| rx);
+        assert!(state.checking);
+        assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn missing_layout_does_not_start_an_automatic_check() {
+        UpdateState::default().start_initial_check_with(true, |_| panic!("no installation layout"));
+    }
+}

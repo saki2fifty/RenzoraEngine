@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 21:40 UTC
+
+- Made the automatic update check wait for networking during startup, while keeping manual update checks and retries available.
+
 ## September 6, 2026 — 20:31 UTC
 
 - Delayed the splash screen's optional GitHub lookup until networking is ready, avoiding an unnecessary timeout during slow startup.

@@ -19,6 +19,12 @@ continues normally. Once started, the request is attempted only once and its
 result is polled without blocking the editor. This avoids racing the HTTP
 watchdog while the editor is still assembling its first frame.
 
+The automatic software-update check also waits for backend readiness. It does
+not consume its one automatic attempt while networking is unavailable. Manual
+checks and retries in the update dialog remain available. Readiness is not a
+guarantee against later stalls: if a frame stops progressing long enough, an
+in-flight request can still report the HTTP watchdog error.
+
 ## Why HTTP is a plugin and not part of the engine
 
 **It was twenty packages every build paid for.** `ureq` plus the TLS stack under
