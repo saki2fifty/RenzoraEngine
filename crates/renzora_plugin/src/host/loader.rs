@@ -1562,13 +1562,8 @@ fn apply_reload_requests(world: &mut World) {
 
 /// Notices a rebuilt plugin and queues it for reload.
 ///
-/// Polls `mtime` + `size` rather than subscribing to filesystem events. Not for
-/// lack of a watcher crate — `notify` is already in the tree behind `bevy_asset` —
-/// but because polling answers the question that actually matters more directly.
-/// A build writes a DLL in pieces, and loading a half-written one is the failure
-/// mode to avoid; "the stamp has not changed since the last poll" is a settle test,
-/// whereas an event stream needs debouncing to become one. It also keeps a crate
-/// that publishes to crates.io from gaining a dependency to stat eight files.
+/// OS notifications select files for settling. Slow recovery scans catch lost
+/// events and retry unavailable watches; idle frames do not stat every plugin.
 #[derive(Resource)]
 pub struct PluginWatcher {
     /// Directory the watcher polls. `pub` so test harnesses can
@@ -1582,9 +1577,36 @@ pub struct PluginWatcher {
     /// Seconds until the next poll. `pub` for tests; production sets
     /// it to `POLL_INTERVAL` so the next `poll_plugin_dir` tick fires.
     pub countdown: f32,
+    events: Option<super::image_events::ImageEvents>,
+    recovery: f32,
+    test_polling: bool,
+    quiet: std::collections::HashMap<PathBuf, f32>,
+    #[cfg(test)]
+    io_counts: (usize, usize),
 }
 
 impl PluginWatcher {
+    fn new(dir: PathBuf) -> Self {
+        // Install before seeding so changes during the scan remain queued.
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let events = super::image_events::ImageEvents::new(&dir).ok();
+        if events.is_none() {
+            warn!("[plugin] image notifications unavailable; using recovery scans");
+        }
+        Self {
+            seen: stamp_dir(&dir),
+            dir,
+            settling: Default::default(),
+            countdown: POLL_INTERVAL,
+            recovery: if events.is_some() { 30.0 } else { 1.0 },
+            events,
+            test_polling: false,
+            quiet: Default::default(),
+            #[cfg(test)]
+            io_counts: (0, 0),
+        }
+    }
+
     /// Test-only constructor that builds a watcher pointing at `dir`
     /// with an initial poll cycle primed so the next `Last` schedule
     /// run will stat the directory. `countdown` is initialised to
@@ -1597,12 +1619,17 @@ impl PluginWatcher {
             seen,
             settling: Default::default(),
             countdown: 0.0,
+            events: None,
+            recovery: 0.0,
+            test_polling: true,
+            quiet: Default::default(),
+            #[cfg(test)]
+            io_counts: (0, 0),
         }
     }
 }
 
-/// How often to stat the plugin directory. Two polls are needed to settle a file,
-/// so this is half the reload latency.
+/// Quiet interval between targeted settling checks.
 const POLL_INTERVAL: f32 = 0.25;
 
 /// `(mtime, size)` for every plugin-shaped file in `dir`.
@@ -1631,57 +1658,266 @@ fn poll_plugin_dir(
     mut watcher: ResMut<PluginWatcher>,
     mut queue: ResMut<PluginReloadQueue>,
 ) {
-    watcher.countdown -= time.delta_secs();
-    if watcher.countdown > 0.0 {
-        return;
-    }
-    watcher.countdown = POLL_INTERVAL;
+    watcher.tick(time.delta_secs(), &mut queue.0);
+}
 
-    let Ok(entries) = std::fs::read_dir(&watcher.dir) else {
-        return;
-    };
-    let ext = std::env::consts::DLL_EXTENSION;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some(ext) {
-            continue;
+impl PluginWatcher {
+    fn tick(&mut self, delta: f32, queue: &mut Vec<PathBuf>) {
+        let watcher = self;
+        let mut overflow = false;
+        for remaining in watcher.quiet.values_mut() {
+            *remaining -= delta;
         }
-        let Ok(meta) = entry.metadata() else { continue };
-        let Ok(mtime) = meta.modified() else { continue };
-        let stamp = (mtime, meta.len());
+        if let Some(events) = &watcher.events {
+            overflow = events.drain(|path| {
+                // A nonrecursive directory watch must not admit another directory's
+                // images even if a backend supplies a rename's other endpoint.
+                if path.parent() == Some(watcher.dir.as_path()) {
+                    watcher.settling.insert(path.clone());
+                    watcher.quiet.insert(path, POLL_INTERVAL);
+                }
+            });
+        }
+        watcher.recovery -= delta;
+        let scan = watcher.test_polling || overflow || watcher.recovery <= 0.0;
+        watcher.countdown -= delta;
+        if watcher.countdown > 0.0 && !overflow {
+            return;
+        }
+        watcher.countdown = POLL_INTERVAL;
 
-        // Copied out rather than matched on in place: the arms below mutate
-        // `watcher`, and holding a borrow of `seen` across them does not compile.
-        let previous = watcher.seen.get(&path).copied();
-        match previous {
-            // A file that was not present at boot. `seen` is seeded from the
-            // startup scan, so this can only be a plugin dropped in mid-session —
-            // pick it up. Recording it and doing nothing (which is what this arm
-            // used to do) meant a newly added plugin sat there until the next
-            // restart, and "I put a dll in plugins/, why is nothing happening" is
-            // the one question that behaviour guarantees.
-            //
-            // Still goes through the settle check: a file being copied in is
-            // exactly as half-written as one being rebuilt.
-            None => {
-                watcher.seen.insert(path.clone(), stamp);
-                watcher.settling.insert(path);
+        let current = if scan {
+            #[cfg(test)]
+            {
+                watcher.io_counts.0 += 1;
             }
-            Some(prev) if prev != stamp => {
-                watcher.seen.insert(path.clone(), stamp);
-                watcher.settling.insert(path);
+            if !watcher.test_polling {
+                // Reattach periodically: a directory can be deleted and recreated
+                // while an OS watcher still holds the old directory's identity.
+                watcher.events = super::image_events::ImageEvents::new(&watcher.dir).ok();
             }
-            // Unchanged. If it moved last poll, the write has finished.
-            Some(_) => {
-                if watcher.settling.remove(&path) && !queue.0.contains(&path) {
-                    info!(
-                        "[plugin] {} changed on disk, reloading",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    );
-                    queue.0.push(path);
+            watcher.recovery = if watcher.events.is_some() { 30.0 } else { 1.0 };
+            let current = stamp_dir(&watcher.dir);
+            watcher.seen.retain(|path, _| current.contains_key(path));
+            watcher.settling.retain(|path| current.contains_key(path));
+            if overflow {
+                // Lost events can include same-size, same-time replacements.
+                watcher.settling.extend(current.keys().cloned());
+                watcher.seen.clear();
+            }
+            current
+        } else {
+            #[cfg(test)]
+            {
+                watcher.io_counts.1 += watcher
+                    .settling
+                    .iter()
+                    .filter(|path| watcher.quiet.get(*path).copied().unwrap_or(0.0) <= 0.0)
+                    .count();
+            }
+            watcher
+                .settling
+                .iter()
+                .filter_map(|path| {
+                    if watcher.quiet.get(path).copied().unwrap_or(0.0) > 0.0 {
+                        return None;
+                    }
+                    let meta = std::fs::metadata(path).ok()?;
+                    Some((path.clone(), (meta.modified().ok()?, meta.len())))
+                })
+                .collect()
+        };
+        if !scan {
+            watcher.settling.retain(|path| {
+                current.contains_key(path) || watcher.quiet.get(path).copied().unwrap_or(0.0) > 0.0
+            });
+        }
+        for (path, stamp) in current {
+            if watcher.quiet.get(&path).copied().unwrap_or(0.0) > 0.0 {
+                continue;
+            }
+            // Copied out rather than matched on in place: the arms below mutate
+            // `watcher`, and holding a borrow of `seen` across them does not compile.
+            let previous = watcher.seen.get(&path).copied();
+            match previous {
+                // A file that was not present at boot. `seen` is seeded from the
+                // startup scan, so this can only be a plugin dropped in mid-session —
+                // pick it up. Recording it and doing nothing (which is what this arm
+                // used to do) meant a newly added plugin sat there until the next
+                // restart, and "I put a dll in plugins/, why is nothing happening" is
+                // the one question that behaviour guarantees.
+                //
+                // Still goes through the settle check: a file being copied in is
+                // exactly as half-written as one being rebuilt.
+                None => {
+                    watcher.seen.insert(path.clone(), stamp);
+                    watcher.settling.insert(path);
+                }
+                Some(prev) if prev != stamp => {
+                    watcher.seen.insert(path.clone(), stamp);
+                    watcher.settling.insert(path);
+                }
+                // Unchanged. If it moved last poll, the write has finished.
+                Some(_) => {
+                    if watcher.settling.remove(&path) && !queue.contains(&path) {
+                        info!(
+                            "[plugin] {} changed on disk, reloading",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                        queue.push(path);
+                    }
                 }
             }
         }
+        watcher
+            .quiet
+            .retain(|path, _| watcher.settling.contains(path));
+    }
+}
+
+#[cfg(test)]
+mod image_watcher_tests {
+    use super::*;
+
+    fn image(dir: &Path, name: &str) -> PathBuf {
+        dir.join(format!("{name}.{}", std::env::consts::DLL_EXTENSION))
+    }
+
+    #[test]
+    fn idle_frames_do_not_scan_or_probe_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(image(dir.path(), "one"), b"image").unwrap();
+        let mut watcher = PluginWatcher::new(dir.path().to_path_buf());
+        assert!(watcher.events.is_some());
+        let mut queue = Vec::new();
+        for frames in [0, 10, 100, 1000] {
+            watcher.io_counts = (0, 0);
+            watcher.recovery = 30.0;
+            for _ in 0..frames {
+                watcher.tick(1.0 / 60.0, &mut queue);
+            }
+            assert_eq!(watcher.io_counts, (0, 0), "{frames} idle frames");
+            assert!(queue.is_empty());
+        }
+    }
+
+    #[test]
+    fn targeted_settling_handles_new_changed_and_deleted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = image(dir.path(), "one");
+        let mut watcher = PluginWatcher::for_tests(dir.path().to_path_buf());
+        watcher.test_polling = false;
+        watcher.recovery = 30.0;
+        let mut queue = Vec::new();
+        std::fs::write(&path, b"first").unwrap();
+        watcher.settling.insert(path.clone());
+        watcher.tick(0.3, &mut queue);
+        assert!(queue.is_empty());
+        std::fs::write(&path, b"larger second").unwrap();
+        watcher.tick(0.3, &mut queue);
+        assert!(queue.is_empty());
+        watcher.tick(0.3, &mut queue);
+        assert_eq!(queue, [path.clone()]);
+        assert_eq!(watcher.io_counts, (0, 3));
+        queue.clear();
+        // Notifications must reload even when metadata compares equal.
+        watcher.settling.insert(path.clone());
+        watcher.tick(0.3, &mut queue);
+        assert_eq!(queue, [path.clone()]);
+        queue.clear();
+        std::fs::remove_file(&path).unwrap();
+        watcher.settling.insert(path);
+        watcher.tick(0.3, &mut queue);
+        assert!(queue.is_empty());
+        assert!(watcher.settling.is_empty());
+    }
+
+    #[test]
+    fn recovery_scan_finds_missed_changes_and_prunes_deleted_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = image(dir.path(), "old");
+        std::fs::write(&old, b"old").unwrap();
+        let mut watcher = PluginWatcher::for_tests(dir.path().to_path_buf());
+        watcher.test_polling = false;
+        std::fs::remove_file(&old).unwrap();
+        let new = image(dir.path(), "new");
+        std::fs::write(&new, b"new").unwrap();
+        let mut queue = Vec::new();
+        watcher.tick(0.3, &mut queue);
+        assert!(!watcher.seen.contains_key(&old));
+        assert!(queue.is_empty());
+        watcher.tick(0.3, &mut queue);
+        assert_eq!(queue, [new]);
+        assert_eq!(watcher.io_counts, (1, 1));
+    }
+
+    #[test]
+    fn real_os_notification_selects_new_image_without_full_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut watcher = PluginWatcher::new(dir.path().to_path_buf());
+        assert!(watcher.events.is_some());
+        let path = image(dir.path(), "new");
+        std::fs::write(&path, b"image").unwrap();
+        let mut queue = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while queue.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            watcher.tick(0.01, &mut queue);
+        }
+        assert_eq!(queue, [path]);
+        assert_eq!(watcher.io_counts.0, 0);
+    }
+
+    #[test]
+    fn overflow_rechecks_same_stamp_images_but_waits_for_settling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = image(dir.path(), "existing");
+        std::fs::write(&path, b"image").unwrap();
+        let mut watcher = PluginWatcher::new(dir.path().to_path_buf());
+        watcher.events.as_ref().unwrap().force_rescan();
+        let mut queue = Vec::new();
+        watcher.tick(0.0, &mut queue);
+        assert!(queue.is_empty(), "recovery must not bypass settling");
+        assert_eq!(watcher.io_counts.0, 1);
+        watcher.tick(0.3, &mut queue);
+        assert_eq!(queue, [path]);
+    }
+
+    #[test]
+    fn initially_missing_directory_recovers_and_picks_up_new_image() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("plugins");
+        let mut watcher = PluginWatcher::new(dir.clone());
+        assert!(watcher.events.is_none());
+        std::fs::create_dir(&dir).unwrap();
+        let path = image(&dir, "new");
+        std::fs::write(&path, b"image").unwrap();
+        let mut queue = Vec::new();
+        watcher.tick(1.1, &mut queue);
+        assert!(watcher.events.is_some());
+        assert!(queue.is_empty());
+        watcher.tick(0.3, &mut queue);
+        assert_eq!(queue, [path]);
+    }
+
+    #[test]
+    fn continuously_changing_image_does_not_delay_another_settled_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let busy = image(dir.path(), "busy");
+        let ready = image(dir.path(), "ready");
+        let mut watcher = PluginWatcher::for_tests(dir.path().to_path_buf());
+        watcher.test_polling = false;
+        watcher.recovery = 30.0;
+        std::fs::write(&busy, b"busy").unwrap();
+        std::fs::write(&ready, b"ready").unwrap();
+        watcher.settling.extend([busy.clone(), ready.clone()]);
+        let mut queue = Vec::new();
+        for _ in 0..2 {
+            watcher.quiet.insert(busy.clone(), 1.0);
+            watcher.tick(0.3, &mut queue);
+        }
+        assert_eq!(queue, [ready]);
+        assert!(watcher.settling.contains(&busy));
     }
 }
 
@@ -1779,17 +2015,8 @@ impl Plugin for RenzoraPluginHostPlugin {
         // plugin directory forever, and swapping code under a player is not a
         // feature — it is how a save file gets corrupted by a half-written build.
         if self.is_editor {
-            app.insert_resource(PluginWatcher {
-                dir: dir.clone(),
-                // Seeded with what is on disk right now, which is what lets the
-                // poll treat an unseen path as "added since boot" and load it. An
-                // empty map would make every plugin look new a quarter-second
-                // after startup and reload the lot.
-                seen: stamp_dir(&dir),
-                settling: Default::default(),
-                countdown: POLL_INTERVAL,
-            })
-            .add_systems(Last, poll_plugin_dir);
+            app.insert_resource(PluginWatcher::new(dir.clone()))
+                .add_systems(Last, poll_plugin_dir);
 
             // The other half of the loop: watch plugin SOURCE, rebuild it, and drop
             // the artifact here — where the watcher above then picks it up. Only

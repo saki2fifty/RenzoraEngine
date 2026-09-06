@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 00:00 UTC
+
+- Reduced background disk activity by watching for plugin updates instead of repeatedly scanning every plugin. Recovery checks still catch missed changes.
+- Made editor-built plugin updates appear only after copying finishes, keeping the previous file intact if copying fails.
+
 ## September 5, 2026 — 23:52 UTC
 
 - Made plugin reload retries use separate files, preventing them from overwriting code that is still running.

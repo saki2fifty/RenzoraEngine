@@ -111,18 +111,39 @@ pub(super) fn copy(path: &Path, generation: u32) -> io::Result<PathBuf> {
 }
 
 fn copy_into(path: &Path, generation: u32, dir: &Path) -> io::Result<PathBuf> {
-    let mut source = File::open(path)?;
-    let before = source.metadata()?;
-    if !before.is_file() {
-        return Err(io::Error::other("plugin image is not a regular file"));
-    }
     // Generation is only a diagnostic hint. A failed generation can be retried,
     // and no attempt may truncate a previous attempt's mapped image.
     let mut output = tempfile::Builder::new()
         .prefix(&format!("image-{generation}-"))
         .suffix(&format!(".{}", std::env::consts::DLL_EXTENSION))
         .tempfile_in(dir)?;
-    let copied = io::copy(&mut source, &mut output)?;
+    copy_complete(path, &mut output)?;
+    // The path reaches the loader only after the complete copy is durable and
+    // the write handle is closed. Failure drops just this unexposed temp file.
+    output.into_temp_path().keep().map_err(|error| error.error)
+}
+
+/// Publishes a completed build without exposing a partially copied destination.
+pub(super) fn stage(path: &Path, destination: &Path) -> io::Result<()> {
+    let dir = destination.parent().unwrap_or_else(|| Path::new("."));
+    // No DLL suffix: the directory watcher must ignore the incomplete file.
+    let mut output = tempfile::Builder::new()
+        .prefix(".stage-")
+        .tempfile_in(dir)?;
+    copy_complete(path, &mut output)?;
+    output
+        .into_temp_path()
+        .persist(destination)
+        .map_err(|error| error.error)
+}
+
+fn copy_complete(path: &Path, output: &mut tempfile::NamedTempFile) -> io::Result<()> {
+    let mut source = File::open(path)?;
+    let before = source.metadata()?;
+    if !before.is_file() {
+        return Err(io::Error::other("plugin image is not a regular file"));
+    }
+    let copied = io::copy(&mut source, output)?;
     let after = source.metadata()?;
     if copied != before.len()
         || after.len() != before.len()
@@ -133,15 +154,27 @@ fn copy_into(path: &Path, generation: u32, dir: &Path) -> io::Result<PathBuf> {
             "plugin image changed while staging",
         ));
     }
-    output.as_file().sync_all()?;
-    // The path reaches the loader only after the complete copy is durable and
-    // the write handle is closed. Failure drops just this unexposed temp file.
-    output.into_temp_path().keep().map_err(|error| error.error)
+    output.as_file().sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_staging_preserves_destination_on_failure_and_replaces_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("plugin.dll");
+        let source = dir.path().join("build.bin");
+        fs::write(&destination, b"last good").unwrap();
+        assert!(stage(&source, &destination).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"last good");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        fs::write(&source, b"new complete image").unwrap();
+        stage(&source, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new complete image");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
 
     #[test]
     fn repeated_generation_never_overwrites_prior_image() {

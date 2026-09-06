@@ -1642,3 +1642,13 @@ Reload directories are protected by process-held file locks. New sessions clean
 up recognized directories whose owning process has exited, but leave live
 sessions, unknown directories and older flat `.reload/` files alone. Images in
 a running session are retained; this is not an in-session memory or disk limit.
+
+Compiled-image changes are selected by operating-system notifications, with a
+250 ms quiet interval and targeted metadata checks before queueing a reload.
+Normal recovery scans run every 30 seconds; unavailable watches retry after
+about one second. A bounded notification queue requests a recovery scan if it
+overflows. Idle frames no longer scan every plugin four times per second.
+The editor's source-build staging writes a temporary file first and atomically
+replaces the visible image only after the copy completes. External tools should
+also publish complete images by rename; settling alone cannot prove that an
+external writer has finished if it pauses midway through a copy.

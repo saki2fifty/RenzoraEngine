@@ -514,7 +514,7 @@ fn stage(dir: &Path, stage_to: &Path) -> std::io::Result<()> {
                 _ => {}
             }
         }
-        std::fs::copy(&path, stage_to.join(&name))?;
+        super::shadow_images::stage(&path, &stage_to.join(&name))?;
         copied += 1;
     }
     if copied == 0 {

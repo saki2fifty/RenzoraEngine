@@ -85,12 +85,21 @@ fn raw_cells_append_without_replacing_the_destination() {
     let entity: FilteredEntityRef = world.entity(entity).into();
     let mut bytes = Vec::with_capacity(4_000);
     let allocation = bytes.as_ptr();
-    ALLOCATIONS.with(|count| count.set(Some(0)));
-    for _ in 0..1_000 {
-        assert!(append_cell(&entity, &plan, &mut bytes));
+    for copies in [0, 10, 100, 1_000] {
+        bytes.clear();
+        let allocations = allocations_during(|| {
+            for _ in 0..copies {
+                assert!(append_cell(&entity, &plan, &mut bytes));
+            }
+        });
+        assert_eq!(allocations, 0, "warm cell copies allocate nothing");
+        assert_eq!(bytes.len(), copies * size_of::<Counter>());
+        assert_eq!(bytes.as_ptr(), allocation);
+        println!(
+            "raw cells={copies}: copied bytes={}, allocations={allocations}",
+            bytes.len()
+        );
     }
-    let allocations = ALLOCATIONS.with(|count| count.replace(None));
-    assert_eq!(allocations, Some(0), "warm cell copies allocate nothing");
     assert_eq!(bytes.len(), 4_000);
     assert_eq!(bytes.as_ptr(), allocation);
     for cell in bytes.chunks_exact(4) {
