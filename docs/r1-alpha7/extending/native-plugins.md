@@ -151,6 +151,8 @@ Auto exposure follows the same split: `renzora_auto_exposure` handles runtime me
 
 The starfield uses `renzora_night_stars` plus editor-only `renzora_night_stars_editor`. Existing `NightStarsData`, the `night_stars` preference and seven inspector fields are unchanged. The renderer embeds its shader under the new workspace crate namespace and retains the existing material type name.
 
+Unchanged star settings and camera positions reuse the existing material and dome transform without republishing them. Twinkle animation still uses the shader clock; edits to the star settings, sun elevation or camera position update the relevant values.
+
 Procedural trees use `renzora_procedural_tree` for mesh generation and wind integration, and `renzora_procedural_tree_editor` for the preset and inspector. Shared tree/settings types live in `renzora::procedural_tree` and keep their original scene names. Embedded leaf textures and generator attribution remain with the runtime crate; the `procedural_tree` preference is unchanged.
 
 3D text uses `renzora_text3d` for flat SDF and extruded glyph rendering, with its preset and six inspector fields in `renzora_text3d_editor`. Both use the shared `renzora::text3d::Text3d` component, preserving its original scene type name and settings. The bundled Noto Sans font, custom font selection and `text3d` enable preference remain available.

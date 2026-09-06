@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 23:22 UTC
 
 - Kept the editor open and showed an error when a Marketplace restart cannot launch.
+- Avoided repeated night-star material and position updates while the scene is unchanged; twinkle animation is preserved.
 
 ## September 6, 2026 — 23:08 UTC
 

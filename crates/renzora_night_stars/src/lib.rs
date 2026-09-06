@@ -84,6 +84,7 @@ fn sync_night_stars(
     mut star_materials: ResMut<Assets<NightStarsMaterial>>,
     has_data: Query<(), With<NightStarsData>>,
     mut removed: RemovedComponents<NightStarsData>,
+    dome_transforms: Query<&Transform, With<NightStarsDomeMarker>>,
 ) {
     let had_removals = removed.read().count() > 0;
     if had_removals && has_data.is_empty() {
@@ -135,14 +136,29 @@ fn sync_night_stars(
     if let Some(dome_entity) = state.entity {
         if commands.get_entity(dome_entity).is_ok() {
             if let Some(ref mat_handle) = state.material_handle {
-                if let Some(mut mat) = star_materials.get_mut(mat_handle) {
-                    mat.params_a = params_a;
-                    mat.params_b = params_b;
-                    mat.star_color = star_color;
+                let changed = star_materials.get(mat_handle).is_some_and(|mat| {
+                    mat.params_a != params_a
+                        || mat.params_b != params_b
+                        || mat.star_color != star_color
+                });
+                if changed {
+                    if let Some(mut mat) = star_materials.get_mut(mat_handle) {
+                        mat.params_a = params_a;
+                        mat.params_b = params_b;
+                        mat.star_color = star_color;
+                    }
                 }
             }
             let transform = Transform::from_translation(camera_pos).with_scale(Vec3::splat(800.0));
-            commands.entity(dome_entity).insert(transform);
+            // Twinkle uses the shader's clock. An unchanged CPU material or
+            // dome transform need not be re-extracted just to keep animating.
+            if dome_transforms
+                .get(dome_entity)
+                .ok()
+                .is_none_or(|old| *old != transform)
+            {
+                commands.entity(dome_entity).insert(transform);
+            }
         } else {
             state.entity = None;
             state.material_handle = None;
@@ -281,6 +297,79 @@ mod tests {
         app.world_mut().run_system_once(sync_night_stars).unwrap();
         assert!(app.world().resource::<NightStarsState>().entity.is_none());
         assert!(app.world().get_entity(dome).is_err());
+    }
+
+    #[test]
+    fn stable_frames_do_not_republish_material_or_transform() {
+        use bevy::ecs::message::MessageCursor;
+        let mut app = app();
+        let source = app.world_mut().spawn(NightStarsData::default()).id();
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), Transform::default()))
+            .id();
+        app.update();
+        app.update();
+        let dome = app.world().resource::<NightStarsState>().entity.unwrap();
+        let changed = app
+            .world()
+            .entity(dome)
+            .get_ref::<Transform>()
+            .unwrap()
+            .last_changed();
+        let mut events = MessageCursor::<AssetEvent<NightStarsMaterial>>::default();
+        events.clear(
+            app.world()
+                .resource::<Messages<AssetEvent<NightStarsMaterial>>>(),
+        );
+        for _ in 0..1000 {
+            app.update();
+            assert_eq!(
+                app.world()
+                    .entity(dome)
+                    .get_ref::<Transform>()
+                    .unwrap()
+                    .last_changed(),
+                changed
+            );
+            assert_eq!(
+                events
+                    .read(
+                        app.world()
+                            .resource::<Messages<AssetEvent<NightStarsMaterial>>>()
+                    )
+                    .count(),
+                0
+            );
+        }
+        app.world_mut()
+            .get_mut::<NightStarsData>(source)
+            .unwrap()
+            .brightness = 3.0;
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation = Vec3::X;
+        app.update();
+        let material = app
+            .world()
+            .resource::<NightStarsState>()
+            .material_handle
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<NightStarsMaterial>>()
+                .get(material)
+                .unwrap()
+                .params_a
+                .y,
+            3.0
+        );
+        assert_eq!(
+            app.world().get::<Transform>(dome).unwrap().translation,
+            Vec3::X
+        );
     }
 
     #[test]
