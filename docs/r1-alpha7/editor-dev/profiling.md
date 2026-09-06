@@ -459,6 +459,12 @@ The contact sets are still checked every frame; this is not an event-driven
 physics rewrite or a measured FPS improvement. Contact ordering remains
 unspecified, as before.
 
+Contact-name strings retain capacity across enter/exit notifications. A
+two-entity regression checks 1,000 alternating contact frames without growing
+the warmed name buffers. Longer names can still grow those buffers; their
+capacity is retained until the component is dropped. Contact-set allocation
+and per-frame contact traversal are unchanged.
+
 Velocity mirrors still read the current backend every frame, but only mark
 `PhysicsReadState` changed when the velocity or speed bits differ. Missing
 velocities still reset the reading to zero, and switching between 2D and 3D

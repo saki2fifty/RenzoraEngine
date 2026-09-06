@@ -191,7 +191,7 @@ fn diff_collision_state(
 ) {
     let name_of = |e: Option<&Entity>| {
         e.and_then(|x| names.get(*x).ok())
-            .map(|n| n.as_str().to_string())
+            .map(|n| n.as_str())
             .unwrap_or_default()
     };
     // The public snapshot exposes only one name per transition. Stop at the
@@ -201,8 +201,12 @@ fn diff_collision_state(
     rs.colliding = !current.is_empty();
     rs.entered = entered.is_some();
     rs.exited = exited.is_some();
-    rs.entered_name = name_of(entered);
-    rs.exited_name = name_of(exited);
+    // Keep each entity's name capacity across one-frame notifications instead
+    // of dropping the allocation as soon as a transition flag clears.
+    rs.entered_name.clear();
+    rs.entered_name.push_str(name_of(entered));
+    rs.exited_name.clear();
+    rs.exited_name.push_str(name_of(exited));
     rs.prev = current;
 }
 
@@ -211,6 +215,58 @@ mod tests {
     use super::*;
     use bevy::ecs::system::SystemState;
     use std::collections::HashSet;
+
+    #[test]
+    fn collision_names_reuse_capacity_without_mixing_entities() {
+        let mut world = World::new();
+        let entities: Vec<_> = (0..64)
+            .map(|i| world.spawn(Name::new(format!("contact-{i:02}"))).id())
+            .collect();
+        let mut query = SystemState::<Query<&Name>>::new(&mut world);
+        let names = query.get(&world).expect("name query");
+        let mut states = [CollisionReadState::default(), CollisionReadState::default()];
+        let frame = |states: &mut [CollisionReadState; 2], active| {
+            for (i, state) in states.iter_mut().enumerate() {
+                let mut current = HashSet::new();
+                let contacts = &entities[i * 32..(i + 1) * 32];
+                if active {
+                    current.extend(contacts.iter().copied());
+                }
+                diff_collision_state(state, current, &names);
+                assert_eq!(state.colliding, active);
+                assert_eq!(state.entered, active);
+                assert_eq!(state.exited, !active);
+                assert_eq!(state.prev.len(), if active { 32 } else { 0 });
+                assert!(state.prev.iter().all(|entity| contacts.contains(entity)));
+                if active {
+                    assert!(state.exited_name.is_empty());
+                } else {
+                    assert!(state.entered_name.is_empty());
+                }
+            }
+        };
+        let capacity = |states: &[CollisionReadState; 2]| {
+            states
+                .iter()
+                .map(|s| s.entered_name.capacity() + s.exited_name.capacity())
+                .sum::<usize>()
+        };
+        for i in 0..4 {
+            frame(&mut states, i % 2 == 0);
+        }
+        let warmed = capacity(&states);
+        assert!(
+            states
+                .iter()
+                .all(|state| state.entered_name.capacity() >= 10
+                    && state.exited_name.capacity() >= 10)
+        );
+        for i in 0..1000 {
+            frame(&mut states, i % 2 == 0);
+            assert_eq!(capacity(&states), warmed);
+        }
+        eprintln!("collision reuse: 1000 alternating frames across two entities retained {warmed} bytes of name capacity after warmup");
+    }
 
     #[test]
     fn velocity_mirror_preserves_float_bits() {

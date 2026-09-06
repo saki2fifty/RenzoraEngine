@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 05:36 UTC
+
+- Reused collision notification name buffers instead of repeatedly discarding and recreating them.
+
 ## September 6, 2026 — 05:27 UTC
 
 - Stopped unchanged physics velocity readings from repeatedly reporting changes, while preserving live updates and backend switching.
