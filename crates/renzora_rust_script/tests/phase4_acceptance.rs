@@ -356,6 +356,26 @@ const _SCRIPT_BODY_CYCLE_RESERVED: [&str; 0] = [];
 /// `OpenFirst` performs `discovery::collect_canonical_scripts` and
 /// submits initial builds; tests do NOT push Create events.
 #[test]
+fn current_starters_compile_and_activate_through_the_production_host() {
+    let _guard = TEST_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for boilerplate in [false, true] {
+        let project = tempfile::tempdir().unwrap();
+        let source = renzora_scripting::starter_rust(boilerplate);
+        let id = write_script_to_project(project.path(), "starter.rs", &source);
+        let cache = tempfile::tempdir().unwrap();
+        let svc = make_build_service(cache.path().to_path_buf());
+        let (mut app, _installed) = build_production_host(
+            project.path().to_path_buf(), cache.path().to_path_buf(), svc,
+        );
+        app.world_mut().spawn((Transform::default(), Visibility::default(),
+            ScriptComponent::from_file(project.path().join(id.path()))));
+        assert_eq!(wait_for_active(&mut app, &id, Duration::from_secs(600)), Some(1),
+            "starter must activate with boilerplate={boilerplate}");
+        app.update();
+    }
+}
+
+#[test]
 fn u4_a_initial_build_runs_and_applies_set_position() {
     let _guard = TEST_BUILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let project = tempfile::tempdir().unwrap();

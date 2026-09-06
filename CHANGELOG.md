@@ -10,6 +10,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Removed the old shared-engine build option and its libraries. Normal staging no longer searches for or copies those retired engine files.
 - Removed unused legacy compiler helpers while preserving built-in plugin artwork in editor and engine-extension packages.
 - Updated optional compression to recognize the current editor/runtime package layout, and stopped Docker staging from copying retired shared-engine libraries.
+- Fixed newly created Rust scripts to use the current script SDK instead of the retired engine interface.
 
 ## September 6, 2026 — 00:00 UTC
 

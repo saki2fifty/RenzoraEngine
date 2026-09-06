@@ -265,3 +265,10 @@ a compiled-script descriptor through `renzora_plugin::rust_script!`.
 Both go through the shared `BuildService`; the cache key differs
 (`cdylib-plugin` vs `cdylib-script`) so a plugin edit does not invalidate
 a script cache entry.
+
+## New-file templates
+
+New Rust scripts created from the hierarchy use the current small SDK in both
+boilerplate settings. The minimal template has an empty update function; the
+illustrated template rotates its attached entity around the vertical axis.
+Neither template requires Bevy imports or the retired `renzora::script!` macro.

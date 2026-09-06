@@ -69,44 +69,16 @@ pub fn starter_lua(boilerplate: bool) -> String {
     .to_string()
 }
 
-/// Starter contents for a new `.rs` script.
+/// Starter contents for a new C-ABI Rust script.
 ///
-/// `boilerplate` only decides whether the body is commented and illustrative.
-/// The `use` lines and `renzora::script!` are written either way: a `.rs`
-/// without that macro compiles, loads, and then reports "exports no entry
-/// point", which is a poor first impression of a feature whose whole promise is
-/// that it compiles.
+/// Both settings emit a complete declaration; illustrative code is optional.
 pub fn starter_rust(boilerplate: bool) -> String {
-    if !boilerplate {
-        return concat!(
-            "use bevy::prelude::*;\n",
-            "use renzora::ScriptCtx;\n",
-            "\n",
-            "fn update(ctx: &mut ScriptCtx) {\n",
-            "    let _ = ctx;\n",
-            "}\n",
-            "\n",
-            "renzora::script!(update);\n",
-        )
-        .to_string();
-    }
-    concat!(
-        "// A Rust script. Compiled to a native plugin on save and called once\n",
-        "// per frame for each entity it is attached to, with full `&mut World`\n",
-        "// access — which is the reason to write one instead of Lua.\n",
-        "use bevy::prelude::*;\n",
-        "use renzora::ScriptCtx;\n",
-        "\n",
-        "fn update(ctx: &mut ScriptCtx) {\n",
-        "    let dt = ctx.delta();\n",
-        "    if let Some(mut transform) = ctx.get_mut::<Transform>() {\n",
-        "        transform.rotate_y(dt);\n",
-        "    }\n",
-        "}\n",
-        "\n",
-        "// Exports the entry point. Without it the script builds and then loads\n",
-        "// as \"exports no entry point\".\n",
-        "renzora::script!(update);\n",
+    let body = if boilerplate {
+        "    // Rotate this entity around its vertical axis (command angles are degrees).\n    reply.commands.push(ScriptCommand::Rotate { x: 0.0, y: ctx.frame.time.delta.to_degrees(), z: 0.0 });\n"
+    } else {
+        "    let _ = (ctx, reply);\n"
+    };
+    format!(
+        "use renzora_plugin::script::*;\n\nfn update(ctx: &Ctx, reply: &mut ScriptReply) -> Result<(), String> {{\n{body}    Ok(())\n}}\n\nrenzora_plugin::rust_script!(update);\n"
     )
-    .to_string()
 }
