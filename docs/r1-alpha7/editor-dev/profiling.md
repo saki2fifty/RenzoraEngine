@@ -547,3 +547,12 @@ hash. The full layout walk and hash still run; this is allocation reduction,
 not a dirty-canvas scheduler. Headless tests retain all five rectangle buffers
 through 1,000 fills and keep the actual canvas mesh handle across 1,000 stable
 updates before checking a layout edit.
+
+## Audio timeline bookkeeping
+
+The playback scheduler borrows the duration cache, removes stale voices in place,
+and resolves source paths only for clips that need starting. It no longer clones
+the full duration map or builds a temporary stale-clip list each active frame.
+Scheduling still walks the timeline; seek tolerance, clip windows and backend
+requests are unchanged. Headless coverage checks 1,000 stable playback updates,
+muted/missing/future clips, finite-duration trimming, seeking and stopping.

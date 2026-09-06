@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 06:38 UTC
 
 - Reused world-space UI working buffers and avoided copying unchanged labels. Font and text-opacity edits now participate in its rebuild check.
+- Reduced audio timeline bookkeeping copies while preserving active clips, seek handling, and duration trimming.
 
 ## September 6, 2026 — 06:31 UTC
 

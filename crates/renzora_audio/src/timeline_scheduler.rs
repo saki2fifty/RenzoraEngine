@@ -107,38 +107,31 @@ pub fn drive_clip_playback(
 
     // Drop voices for clips that are gone, no longer audible, or whose window
     // the playhead has left.
-    let stale: Vec<ClipId> = active
-        .by_clip
-        .keys()
-        .copied()
-        .filter(|id| {
-            !timeline
-                .clip(*id)
-                .map(|c| {
-                    timeline.is_clip_audible(c)
-                        && now >= c.start - START_WINDOW
-                        && now < c.start + c.length
-                })
-                .unwrap_or(false)
-        })
-        .collect();
-    for id in stale {
-        if let Some(voice) = active.by_clip.remove(&id) {
+    active.by_clip.retain(|id, voice| {
+        let keep = timeline
+            .clip(*id)
+            .map(|c| {
+                timeline.is_clip_audible(c)
+                    && now >= c.start - START_WINDOW
+                    && now < c.start + c.length
+            })
+            .unwrap_or(false);
+        if !keep {
             link.stop(&StopRequest {
                 target: StopTarget::Voice(voice.0),
                 fade: 0.0,
             });
         }
-    }
+        keep
+    });
 
     // Start clips that should be sounding and aren't.
     for i in 0..timeline.clips.len() {
-        let (id, track_id, source, start, length, gain, audible) = {
+        let (id, track_id, start, length, gain, audible) = {
             let clip = &timeline.clips[i];
             (
                 clip.id,
                 clip.track,
-                clip.source.clone(),
                 clip.start,
                 clip.length,
                 clip.gain,
@@ -151,6 +144,7 @@ pub fn drive_clip_playback(
         if !(now >= start && now < start + length) {
             continue;
         }
+        let source = &timeline.clips[i].source;
 
         let bus = timeline
             .track(track_id)
@@ -194,7 +188,7 @@ pub fn drive_clip_playback(
     }
 
     // Trim clip lengths to the underlying file length once it is known.
-    let durations = active.durations.clone();
+    let durations = &active.durations;
     for clip in timeline.clips.iter_mut() {
         if let Some(&natural) = durations.get(&clip.source) {
             if natural.is_finite() && clip.length > natural + 0.001 {
@@ -256,4 +250,62 @@ pub fn cache_clip_durations(
 /// Drop every clip voice. For a transport reset while stopped.
 pub fn stop_all_clips(mut link: ResMut<AudioLink>, mut active: ResMut<ActiveClips>) {
     stop_all(&mut link, &mut active);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timeline::TransportState;
+
+    #[test]
+    fn playback_retains_live_voices_and_trims_from_borrowed_durations() {
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track("test", "Sfx");
+        let live = timeline.add_clip(track, "live.wav".into(), 0.0, 100.0);
+        let muted = timeline.add_clip(track, "muted.wav".into(), 0.0, 100.0);
+        timeline.clip_mut(muted).unwrap().muted = true;
+        let future = timeline.add_clip(track, "future.wav".into(), 10.0, 100.0);
+        timeline.transport.state = TransportState::Playing;
+        let mut active = ActiveClips::default();
+        active.by_clip.insert(live, VoiceId(1));
+        active.by_clip.insert(muted, VoiceId(2));
+        active.by_clip.insert(future, VoiceId(3));
+        active.by_clip.insert(ClipId(u64::MAX), VoiceId(4));
+        active.durations.insert("live.wav".into(), 50.0);
+        active.durations.insert("muted.wav".into(), f64::NAN);
+        active.durations.insert("future.wav".into(), f64::INFINITY);
+        let mut app = App::new();
+        app.insert_resource(timeline)
+            .insert_resource(active)
+            .init_resource::<AudioLink>()
+            .init_resource::<SoundCache>()
+            .add_systems(Update, drive_clip_playback);
+        for _ in 0..1_000 {
+            app.update();
+            let active = app.world().resource::<ActiveClips>();
+            assert_eq!(active.by_clip.len(), 1);
+            assert_eq!(active.by_clip[&live], VoiceId(1));
+            assert_eq!(active.durations.len(), 3);
+            let timeline = app.world().resource::<TimelineState>();
+            assert_eq!(timeline.clip(live).unwrap().length, 50.0);
+            assert_eq!(timeline.clip(muted).unwrap().length, 100.0);
+            assert_eq!(timeline.clip(future).unwrap().length, 100.0);
+        }
+        app.world_mut()
+            .resource_mut::<TimelineState>()
+            .transport
+            .position = 60.0;
+        app.update();
+        assert!(app.world().resource::<ActiveClips>().by_clip.is_empty());
+        app.world_mut()
+            .resource_mut::<ActiveClips>()
+            .by_clip
+            .insert(live, VoiceId(5));
+        app.world_mut()
+            .resource_mut::<TimelineState>()
+            .transport
+            .state = TransportState::Stopped;
+        app.update();
+        assert!(app.world().resource::<ActiveClips>().by_clip.is_empty());
+    }
 }
