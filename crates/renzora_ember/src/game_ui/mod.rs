@@ -21,6 +21,8 @@ pub mod script_canvas;
 pub mod world_panel;
 pub mod world_ui_mesh;
 
+use bevy::ecs::entity_disabling::{DefaultQueryFilters, Disabled};
+use bevy::ecs::query::Allow;
 use bevy::prelude::*;
 
 pub use components::{
@@ -567,12 +569,29 @@ struct UiOrderChanges<'w, 's> {
     removed_canvases: RemovedComponents<'w, 's, UiCanvas>,
     removed_widgets: RemovedComponents<'w, 's, UiWidget>,
     removed_zindex: RemovedComponents<'w, 's, ZIndex>,
+    disabled: Query<'w, 's, Entity, (Added<Disabled>, Allow<Disabled>)>,
+    removed_disabled: RemovedComponents<'w, 's, Disabled>,
+}
+
+struct UiOrderPolicy {
+    custom_disabling: bool,
+}
+
+impl FromWorld for UiOrderPolicy {
+    fn from_world(world: &mut World) -> Self {
+        let standard = world.register_component::<Disabled>();
+        Self {
+            custom_disabling: world
+                .get_resource::<DefaultQueryFilters>()
+                .is_some_and(|filters| filters.disabling_ids().any(|id| id != standard)),
+        }
+    }
 }
 
 impl UiOrderChanges<'_, '_> {
     fn collect_parents(
         &mut self,
-        hierarchy: &Query<&ChildOf>,
+        hierarchy: &Query<&ChildOf, Allow<Disabled>>,
         parents: &mut std::collections::HashSet<Entity>,
     ) {
         parents.clear();
@@ -584,6 +603,14 @@ impl UiOrderChanges<'_, '_> {
             .chain(self.removed_widgets.read())
             .chain(self.removed_zindex.read())
         {
+            if let Ok(parent) = hierarchy.get(entity) {
+                parents.insert(parent.parent());
+            }
+        }
+        for entity in self.disabled.iter().chain(self.removed_disabled.read()) {
+            // Enabling a parent affects its group; disabling a child affects
+            // the remaining siblings even though ChildOf itself did not change.
+            parents.insert(entity);
             if let Ok(parent) = hierarchy.get(entity) {
                 parents.insert(parent.parent());
             }
@@ -600,14 +627,25 @@ fn sync_ui_zindex(
     widgets: Query<Entity, With<UiWidget>>,
     zindex_query: Query<Option<&ZIndex>>,
     children_query: Query<&Children>,
-    child_of_query: Query<&ChildOf>,
+    child_of_query: Query<&ChildOf, Allow<Disabled>>,
     mut commands: Commands,
     mut changes: UiOrderChanges,
     mut processed_parents: Local<std::collections::HashSet<Entity>>,
+    policy: Local<UiOrderPolicy>,
 ) {
     // Relationships already tell us which sibling groups changed. Marker and
     // output changes cover edits that do not alter the parent's child list.
     changes.collect_parents(&child_of_query, &mut processed_parents);
+    if policy.custom_disabling {
+        // Third-party disabling types are unknown to the typed change readers.
+        // Keep the original eligibility scan for that configuration, rather
+        // than silently leaving stale ordering after a custom marker changes.
+        for entity in canvas_entities.iter().chain(widgets.iter()) {
+            if let Ok(parent) = child_of_query.get(entity) {
+                processed_parents.insert(parent.parent());
+            }
+        }
+    }
     for &parent in processed_parents.iter() {
         let Ok(children) = children_query.get(parent) else {
             continue;
@@ -811,7 +849,7 @@ mod ordering_tests {
 
     fn count_parents(
         mut changes: UiOrderChanges,
-        hierarchy: Query<&ChildOf>,
+        hierarchy: Query<&ChildOf, Allow<Disabled>>,
         mut work: ResMut<ParentWork>,
     ) {
         changes.collect_parents(&hierarchy, &mut work.parents);
@@ -858,6 +896,19 @@ mod ordering_tests {
             app.world().get::<GlobalZIndex>(first),
             Some(&GlobalZIndex(7))
         );
+        app.world_mut().entity_mut(b).insert(Disabled);
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(0)));
+        app.world_mut().entity_mut(b).remove::<Disabled>();
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(1)));
+        app.world_mut().entity_mut(first).insert(Disabled);
+        app.world_mut().entity_mut(a).insert(ZIndex(99));
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(99)));
+        app.world_mut().entity_mut(first).remove::<Disabled>();
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(1)));
         app.world_mut()
             .get_mut::<Children>(first)
             .unwrap()
@@ -896,5 +947,37 @@ mod ordering_tests {
             app.world().get::<GlobalZIndex>(first),
             Some(&GlobalZIndex(8))
         );
+    }
+
+    #[derive(Component)]
+    struct CustomHidden;
+
+    #[test]
+    fn custom_disabling_keeps_original_sibling_eligibility() {
+        let mut app = App::new();
+        let marker = app.world_mut().register_component::<CustomHidden>();
+        app.world_mut()
+            .resource_mut::<DefaultQueryFilters>()
+            .register_disabling_component(marker);
+        app.add_systems(Update, sync_ui_zindex);
+        let parent = app.world_mut().spawn_empty().id();
+        let a = app
+            .world_mut()
+            .spawn((UiWidget::default(), ChildOf(parent)))
+            .id();
+        let b = app
+            .world_mut()
+            .spawn((UiWidget::default(), ChildOf(parent)))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(1)));
+        app.world_mut().entity_mut(b).insert(CustomHidden);
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(0)));
+        app.world_mut().entity_mut(b).remove::<CustomHidden>();
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(1)));
     }
 }

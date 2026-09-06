@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 07:45 UTC
+
+- Preserved UI ordering and sprite/tile refresh when objects are disabled, edited, and re-enabled, including custom disabling rules.
+
 ## September 6, 2026 — 07:26 UTC
 
 - Recalculated UI sibling ordering only for affected parent groups, retaining updates for reordering, reparenting and component edits.

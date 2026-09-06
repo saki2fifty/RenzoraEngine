@@ -357,6 +357,7 @@ impl Plugin for RuntimePlugin {
         // `render_3d` strips PBR from a 2D export).
         #[cfg(feature = "render_2d")]
         {
+            use renzora::query_reactivation::refresh_reactivated_components;
             // Sprite image binding — needs to run in both editor and runtime
             // builds. In the editor it picks up drag-drop / inspector edits;
             // in the runtime it re-binds Handle<Image> from the path string
@@ -390,11 +391,25 @@ impl Plugin for RuntimePlugin {
             // persisted `SpriteAtlasRegion` block so a tree/house stamped as a
             // single sprite from a multi-tile palette selection renders (and
             // reopens/ships) as one entity showing its atlas slice.
-            app.add_systems(Update, scene_io::apply_sprite_atlas_region);
+            app.add_systems(
+                Update,
+                (
+                    refresh_reactivated_components::<renzora::SpriteAtlasRegion>,
+                    scene_io::apply_sprite_atlas_region,
+                )
+                    .chain(),
+            );
             // Y-sort: derive Z from world Y for `YSort` entities so lower
             // sprites draw in front (top-down "walk behind the tree" ordering).
             // Both editor and runtime — the sort must look the same shipped.
-            app.add_systems(Update, scene_io::apply_y_sort);
+            app.add_systems(
+                Update,
+                (
+                    refresh_reactivated_components::<renzora::YSort>,
+                    scene_io::apply_y_sort,
+                )
+                    .chain(),
+            );
         }
 
         app.add_plugins(debug_log::DebugLogPlugin);

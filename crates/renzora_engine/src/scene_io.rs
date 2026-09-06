@@ -3367,6 +3367,11 @@ mod tests {
 #[cfg(all(test, feature = "render_2d"))]
 mod settled_sprite_tests {
     use super::*;
+    use bevy::ecs::entity_disabling::{DefaultQueryFilters, Disabled};
+    use renzora::query_reactivation::refresh_reactivated_components;
+
+    #[derive(Component)]
+    struct Hidden;
 
     #[derive(Resource, Default)]
     struct Visits(usize, usize);
@@ -3383,9 +3388,20 @@ mod settled_sprite_tests {
     #[test]
     fn settled_sprites_skip_derived_work_and_changes_repair_outputs() {
         let mut app = App::new();
+        let hidden = app.world_mut().register_component::<Hidden>();
+        app.world_mut()
+            .resource_mut::<DefaultQueryFilters>()
+            .register_disabling_component(hidden);
         app.init_resource::<Visits>().add_systems(
             Update,
-            (count_work, apply_sprite_atlas_region, apply_y_sort).chain(),
+            (
+                refresh_reactivated_components::<renzora::SpriteAtlasRegion>,
+                refresh_reactivated_components::<renzora::YSort>,
+                count_work,
+                apply_sprite_atlas_region,
+                apply_y_sort,
+            )
+                .chain(),
         );
         let entity = app
             .world_mut()
@@ -3483,5 +3499,46 @@ mod settled_sprite_tests {
             app.world().get::<Transform>(entity).unwrap().translation.z,
             2.0 - 40.0 * 1e-5
         );
+        for custom in [false, true] {
+            if custom {
+                app.world_mut().entity_mut(entity).insert(Hidden);
+            } else {
+                app.world_mut().entity_mut(entity).insert(Disabled);
+            }
+            let col = if custom { 4 } else { 3 };
+            app.world_mut()
+                .get_mut::<renzora::SpriteAtlasRegion>(entity)
+                .unwrap()
+                .col = col;
+            app.world_mut()
+                .get_mut::<renzora::YSort>(entity)
+                .unwrap()
+                .z_base = col as f32;
+            for _ in 0..4 {
+                app.update();
+            }
+            assert_ne!(
+                app.world().get::<Transform>(entity).unwrap().translation.z,
+                col as f32 - 40.0 * 1e-5
+            );
+            app.world_mut()
+                .entity_mut(entity)
+                .remove::<(Disabled, Hidden)>();
+            app.update();
+            assert_eq!(
+                app.world().get::<Transform>(entity).unwrap().translation.z,
+                col as f32 - 40.0 * 1e-5
+            );
+            assert_eq!(
+                app.world()
+                    .get::<bevy::sprite::Sprite>(entity)
+                    .unwrap()
+                    .rect
+                    .unwrap()
+                    .min
+                    .x,
+                col as f32 * 16.0 + 0.05
+            );
+        }
     }
 }

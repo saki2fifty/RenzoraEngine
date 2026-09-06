@@ -575,6 +575,13 @@ A headless test sees no additional eligible entries across 1,000 settled frames
 and verifies edits/movement. Bevy still evaluates change filters; this is not an
 event-only index. Sprite-sheet image-dependent cropping is unchanged.
 
+Atlas regions, Y-sort, tile-object baking and tileset sampling also refresh on
+reactivation. A shared removal reader marks the authored component changed when
+the last query-disabling marker is removed, including custom markers registered
+before schedule initialization. This preserves edits made while disabled after
+their original change ticks or asset events have expired, without scanning all
+enabled inputs again on settled frames.
+
 Tile collider rebuilds also use Bevy's maintained child lists to find each
 owner's tiles and generated shapes. They no longer scan the full tile/shape
 queries once per owner. The existing global dirty gate and per-owner content
@@ -625,3 +632,7 @@ Z-index components. Settled sibling groups are not traversed. Root-canvas global
 ordering still receives the existing compare-first check. A 1,000-frame test
 finds no additional parent work after settling; reordering, reparenting, marker
 changes, output repair, despawn and root sort-order edits remain covered.
+Standard `Disabled` additions/removals invalidate the affected groups too. When
+custom query-disabling components are registered, ordering retains its original
+eligibility scan as a compatibility fallback; the zero-parent-work measurement
+applies to the standard configuration, not that fallback.

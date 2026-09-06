@@ -27,6 +27,7 @@ pub mod core;
 pub use core::*;
 
 pub mod runtime_capabilities;
+pub mod query_reactivation;
 
 // ── Global illumination contract ─────────────────────────────────────────
 // GI settings components (`RtLighting`, `LumenLighting`) + the Lumen

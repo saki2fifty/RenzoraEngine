@@ -423,10 +423,22 @@ impl Plugin for TilemapPlugin {
             .register_type::<TilemapPaintLayer>();
         app.add_systems(
             Update,
-            (sync_tilesets, force_nearest_tileset_sampler).chain(),
+            (
+                sync_tilesets,
+                renzora::query_reactivation::refresh_reactivated_components::<TilesetHandle>,
+                force_nearest_tileset_sampler,
+            )
+                .chain(),
         );
         // Bake picked-cell objects into single sprites (editor + shipped game).
-        app.add_systems(Update, build_tile_object_sprites);
+        app.add_systems(
+            Update,
+            (
+                renzora::query_reactivation::refresh_reactivated_components::<TileObject>,
+                build_tile_object_sprites,
+            )
+                .chain(),
+        );
         // Merged static colliders for solid-marked tiles (editor + shipped game).
         app.add_systems(Update, rebuild_tile_colliders);
         // Paint-layer draw order (Z) + opacity → tiles (editor + shipped game).
@@ -704,22 +716,33 @@ fn load_tileset_nearest(asset_server: &AssetServer, path: String) -> Handle<Imag
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::entity_disabling::{DefaultQueryFilters, Disabled};
+    use renzora::query_reactivation::refresh_reactivated_components;
     use renzora_physics::CollisionShapeType;
     use renzora_test_harness::{minimal_app, pump};
 
     #[test]
     fn sampler_repair_follows_image_changes_without_repeated_notifications() {
         let mut app = minimal_app();
-        app.init_asset::<Image>()
-            .add_systems(Update, force_nearest_tileset_sampler);
+        app.init_asset::<Image>().add_systems(
+            Update,
+            (
+                refresh_reactivated_components::<TilesetHandle>,
+                force_nearest_tileset_sampler,
+            )
+                .chain(),
+        );
         let image = app
             .world_mut()
             .resource_mut::<Assets<Image>>()
             .add(Image::default());
-        app.world_mut().spawn(TilesetHandle {
-            path: "atlas".into(),
-            image: image.clone(),
-        });
+        let entity = app
+            .world_mut()
+            .spawn(TilesetHandle {
+                path: "atlas".into(),
+                image: image.clone(),
+            })
+            .id();
         pump(&mut app, 3);
         let nearest = |app: &App| {
             matches!(
@@ -747,19 +770,45 @@ mod tests {
             .sampler = ImageSampler::Default;
         pump(&mut app, 3);
         assert!(nearest(&app));
+        app.world_mut().entity_mut(entity).insert(Disabled);
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .get_mut(&image)
+            .expect("atlas")
+            .sampler = ImageSampler::Default;
+        // Let the image event expire while its only tileset owner is disabled.
+        pump(&mut app, 5);
+        assert!(!nearest(&app));
+        app.world_mut().entity_mut(entity).remove::<Disabled>();
+        app.update();
+        assert!(nearest(&app));
     }
 
     #[test]
     fn settled_tile_objects_leave_baker_and_pending_edits_retry() {
+        #[derive(Component)]
+        struct Hidden;
         #[derive(Resource, Default)]
         struct Visits(usize);
         fn count(query: Query<&TileObject, TileObjectNeedsBake>, mut visits: ResMut<Visits>) {
             visits.0 += query.iter().count();
         }
         let mut app = minimal_app();
+        let hidden = app.world_mut().register_component::<Hidden>();
+        app.world_mut()
+            .resource_mut::<DefaultQueryFilters>()
+            .register_disabling_component(hidden);
         app.init_asset::<Image>()
             .init_resource::<Visits>()
-            .add_systems(Update, (count, build_tile_object_sprites).chain());
+            .add_systems(
+                Update,
+                (
+                    refresh_reactivated_components::<TileObject>,
+                    count,
+                    build_tile_object_sprites,
+                )
+                    .chain(),
+            );
         let object = TileObject {
             tileset_path: "phase10-pending.png".into(),
             tile_px: 1,
@@ -823,6 +872,22 @@ mod tests {
                 .image,
             baked
         );
+        for custom in [false, true] {
+            let previous = app.world().get::<Sprite>(entity).unwrap().image.clone();
+            if custom {
+                app.world_mut().entity_mut(entity).insert(Hidden);
+            } else {
+                app.world_mut().entity_mut(entity).insert(Disabled);
+            }
+            app.world_mut().get_mut::<TileObject>(entity).unwrap().w += 1;
+            pump(&mut app, 5);
+            assert_eq!(app.world().get::<Sprite>(entity).unwrap().image, previous);
+            app.world_mut()
+                .entity_mut(entity)
+                .remove::<(Disabled, Hidden)>();
+            app.update();
+            assert_ne!(app.world().get::<Sprite>(entity).unwrap().image, previous);
+        }
     }
 
     // ── atlas slicing ────────────────────────────────────────────────────────
