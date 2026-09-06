@@ -1492,55 +1492,9 @@ fn export_worker(
     match result {
         Ok(()) => {
             if !is_wasm && !is_lean {
-                // Copy shared libraries from runtime build (bevy_dylib + std + SDK)
-                let _ = tx.send(ExportMsg::Progress("Copying shared libraries...".into()));
-                for entry in std::fs::read_dir(&runtime_dir)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if let Some(ext) = entry.path().extension() {
-                        let ext = ext.to_string_lossy();
-                        if ext == "dll" || ext == "so" || ext == "dylib" {
-                            // ── The shared images, plus the Rust std the binary
-                            // imports. Not plugins (they live in `plugins/`) and
-                            // not the executables.
-                            //
-                            // Matched on `_dylib` rather than by name, and that
-                            // is a repair as much as a simplification. The list
-                            // used to read `renzora.` / `librenzora.`, from when
-                            // the contract dylib was `renzora.dll`. It is
-                            // `renzora_dylib.dll` now, and `renzora_ember_dylib`
-                            // joined it — so the test matched NEITHER, and every
-                            // copy-based export since the rename shipped a game
-                            // that could not start:
-                            //
-                            //   The code execution cannot proceed because
-                            //   renzora_ember_dylib.dll was not found.
-                            //
-                            // The pattern covers all three today and any shared
-                            // image added later, so the next rename cannot
-                            // silently drop one the same way. `bevy_dylib` also
-                            // carries a `-<hash>` suffix, which is why this is a
-                            // substring test and not an equality one.
-                            //
-                            // `openxr_loader` rides along for the same reason
-                            // `package-release.sh` copies it into every runtime
-                            // template by name: the binary imports it, so a game
-                            // without it fails to start exactly as it does
-                            // without a `_dylib` — the next error in the same
-                            // dialog, found the same way.
-                            let shared = name_str.contains("_dylib")
-                                || name_str.starts_with("std-")
-                                || name_str.starts_with("libstd-")
-                                || name_str.starts_with("openxr_loader");
-                            if shared {
-                                let _ = std::fs::copy(entry.path(), output_dir.join(&name));
-                            }
-                        }
-                    }
+                if let Err(error) = super::build::stage_runtime_support_libraries(&runtime_dir, &output_dir) {
+                    let _ = tx.send(ExportMsg::Error(error));
+                    return;
                 }
             }
 

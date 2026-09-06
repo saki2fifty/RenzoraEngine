@@ -1,23 +1,12 @@
-//! Lean static build backend — compiles the game's `renzora` binary from source
-//! into a single stripped executable (static Bevy + static std, no sibling
-//! dylibs), instead of copying the dynamically-linked dev runtime.
+//! Lean build and export staging for the statically linked runtime.
 //!
-//! A project is a separate asset folder, NOT a Rust workspace — so this compiles
-//! the **engine source checkout** the editor was built from (located by walking
-//! up from the editor's `dist/<platform>/` dir, see [`find_engine_source`]) and
-//! the project's assets ride along in the rpak the caller appends. It builds via
-//! `--no-default-features --features runtime` so the `dynamic_linking` feature is
-//! dropped (see root `Cargo.toml`), under `[profile.dist-lean]`.
+//! Lean builds select engine features and generated C-ABI script/plugin tables
+//! in a prepared source workspace. Copy-based exports instead stage already
+//! built artifacts. Both use static engine code; neither loads Bevy Rust DLLs.
 //!
-//! The one subtlety is `prefer-dynamic`: `.cargo/config.toml` pins it per target
-//! to make the *dev* build share one `bevy_dylib`. Cargo takes RUSTFLAGS from a
-//! single highest-priority source with no merging, so setting
-//! `CARGO_ENCODED_RUSTFLAGS` on the child process makes cargo **ignore** the
-//! config rustflags for this one invocation — dropping `prefer-dynamic` without
-//! editing any file. The separate `linker` config key is *not* rustflags and
-//! survives (so Windows keeps `rust-lld`); on Linux we override it to the
-//! near-universal `cc` because a freshly provisioned toolchain may lack the
-//! repo's pinned `clang`/`mold`.
+//! Child rustflags select a portable lean link configuration. Configuration
+//! sanitization also handles older source kits containing prefer-dynamic,
+//! without changing the user's source checkout or cross-linker search paths.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
@@ -1186,6 +1175,18 @@ pub fn stage_modding_sdk(
 
 
 
+/// Copy known runtime support libraries without reviving cached engine images.
+pub fn stage_runtime_support_libraries(from: &Path, to: &Path) -> Result<(), String> {
+    for name in ["openxr_loader.dll", "libopenxr_loader.so", "libopenxr_loader.so.1", "libopenxr_loader.dylib"] {
+        let source = from.join(name);
+        if source.is_file() {
+            std::fs::copy(&source, to.join(name))
+                .map_err(|error| format!("copy runtime support {}: {error}", source.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Ship the loose Tier-1 plugin cdylibs the editor already built, beside
 /// a copy-based export.
 ///
@@ -1276,10 +1277,8 @@ pub fn canonical_to_safe_dir_name(canonical: &str) -> String {
 /// Ship the script libraries the editor already built, beside a copy-based
 /// export.
 ///
-/// A copy-based export carries the same `bevy_dylib` and `renzora_dylib` the
-/// editor compiled these against, so the `World` on both sides of the `dlopen`
-/// boundary is one type and they load exactly as they do in the editor. The
-/// player needs no SDK and no Rust toolchain — the compiling already happened.
+/// These libraries use the small C-ABI script interface, not Bevy's Rust ABI.
+/// The player needs no SDK or Rust toolchain to execute prebuilt scripts.
 ///
 /// Copies rather than recompiles. Phase 4 reads the compiled
 /// libraries from the shared `BuildService`'s cache (where every
@@ -1643,6 +1642,21 @@ mod tests {
         assert!(!obsolete.exists());
         assert!(!output.path().join("sdk").exists());
         assert!(!output.path().join("sdk.tar.zst").exists());
+    }
+
+    #[test]
+    fn runtime_support_staging_excludes_retired_engine_images() {
+        let source = tempfile::tempdir().expect("source");
+        let output = tempfile::tempdir().expect("output");
+        for name in ["openxr_loader.dll", "libopenxr_loader.so.1", "renzora_dylib.dll", "bevy_dylib-deadbeef.dll", "std-deadbeef.dll"] {
+            std::fs::write(source.path().join(name), name).expect("fixture");
+        }
+        stage_runtime_support_libraries(source.path(), output.path()).expect("stage");
+        assert_eq!(std::fs::read_dir(output.path()).expect("list").count(), 2);
+        assert!(output.path().join("openxr_loader.dll").is_file());
+        assert!(output.path().join("libopenxr_loader.so.1").is_file());
+        assert_eq!(std::fs::read_dir(source.path()).expect("source list").count(), 5);
+        assert!(stage_runtime_support_libraries(source.path(), &output.path().join("missing")).is_err());
     }
 
     #[test]

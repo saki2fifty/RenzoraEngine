@@ -267,15 +267,7 @@ jobs:
       # binary knows its own tag and doesn't have to guess which release matches
       # it. Empty on a non-publishing run, which `version.rs` reads as "dev".
       #
-      # RENZORA_PROFILE names the shipping profile and nothing more. It used to
-      # read `platform == 'windows' && 'dist' || 'release'`, because Windows
-      # cannot link `bevy_dylib` at `opt-level = "s"` (the PE export table is
-      # 16-bit). That put a property of the TARGET in the caller, so it held only
-      # for callers that knew — and `renzora build windows`, which runs this same
-      # script from the CLI, did not: it took the `release` default and failed to
-      # link. `build_one` in docker/build-all.sh now forces `dist` for a
-      # windows-* platform itself, so every caller gets it and this line stays
-      # one value.
+      # RENZORA_PROFILE selects the shipping profile consistently across platforms.
       - name: Build ${{ matrix.platform }} (${{ matrix.arches }})
         run: |
           docker run --rm \
@@ -350,16 +342,7 @@ jobs:
       # `docker/build-all.sh` reads, so both entry points name one profile
       # instead of each holding an idea of what the shipping build is.
       #
-      # It used to reconstruct `release` by overriding two keys on `dist`, with a
-      # comment asking whoever edits `[profile.release]` to keep them in step.
-      # Nothing enforced that, and the drift was invisible until it wasn't:
-      # `bevy_dylib` exceeds the PE 65,535-symbol export cap at `opt-level = "s"`
-      # (269,482 against 41,958 at `2`), and because no local build ever used that
-      # configuration it could only surface here, after a full cross-compile.
-      #
-      # `dist` rather than `release`, for that same cap — Windows cannot ship a
-      # size-optimised build while Bevy is a dylib. See `[profile.dist]` in the
-      # root Cargo.toml.
+      # Keep this lane on the tested dist profile; no shared-Bevy export workaround.
       RENZORA_PROFILE: dist
     steps:
       - uses: actions/checkout@v4

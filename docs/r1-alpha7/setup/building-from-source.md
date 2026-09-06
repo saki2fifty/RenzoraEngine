@@ -18,7 +18,7 @@ cargo run --profile release --manifest-path xtask/Cargo.toml -- dist
 
 This invokes the same helper behind `cargo renzora dist`, while explicitly selecting its release profile. It synchronizes plugin wiring, builds the normal checkout configuration and stages the platform directory without launching it. Omit `dist` to use the helper's build-and-run mode.
 
-The desktop helper builds `renzora_app` and `renzora_editor_app` together and stages both executables. It opens `renzora-editor` by default; explicit `--server`, `--host` and `--vr` launches use `renzora`. `cargo dist` compiles this pair without staging. Do not substitute a whole-workspace build: retained legacy dylib packages are not part of the supported desktop graph.
+The desktop helper builds `renzora_app` and `renzora_editor_app` together and stages both executables. It opens `renzora-editor` by default; explicit `--server`, `--host` and `--vr` launches use `renzora`. `cargo dist` compiles this pair without staging. The retired engine dylib packages have been removed.
 
 Default native builds link the engine statically. The installed engine-plugin build uses the same executable split in an isolated, reproducible workspace, as described below. Old shared libraries are not substitutes for either executable.
 
@@ -109,3 +109,13 @@ The optional `docker/upx-compress.sh` helper recognizes flat editor/runtime
 packages as well as older nested layouts. It targets host executables and plugin
 libraries, not retired engine SDK libraries. Docker staging likewise leaves old
 shared-engine cache files out of the staged package without deleting the cache.
+
+Runtime templates exclude retired shared Bevy/Renzora/Rust libraries while
+preserving native support files. Copy-based game export stages the known OpenXR
+loader files and reports copy failures instead of silently omitting them.
+
+Docker cross-build dispatch honors `RENZORA_PROFILE` on Windows too; it no longer
+silently replaces `release` with `dist` for the retired shared-Bevy DLL limit.
+Use a non-debug profile. The CI lane explicitly configured with `dist` stays on
+that profile. This cleanup was checked with routing fixtures, not a new Windows
+binary build.

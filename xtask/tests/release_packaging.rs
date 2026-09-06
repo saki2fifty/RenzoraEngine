@@ -45,6 +45,10 @@ fn flat_release_keeps_source_sdk_and_omits_legacy_archive_without_deleting_it() 
     write(&platform.join("renzora.exe"), b"runtime fixture");
     write(&platform.join("renzora-editor.exe"), b"editor fixture");
     write(&platform.join("plugins/example.dll"), b"plugin fixture");
+    write(&platform.join("openxr_loader.dll"), b"OpenXR fixture");
+    write(&platform.join("native_support.dll"), b"native dependency");
+    write(&platform.join("renzora_dylib.dll"), b"retired engine");
+    write(&platform.join("std-deadbeef.dll"), b"retired Rust runtime");
     write(
         &platform.join("rust-sdk/Cargo.toml"),
         b"source package fixture",
@@ -61,6 +65,11 @@ fn flat_release_keeps_source_sdk_and_omits_legacy_archive_without_deleting_it() 
     assert!(runtime.lines().any(|p| p == "renzora.exe"));
     assert!(runtime.lines().any(|p| p == "plugins/example.dll"));
     assert!(!runtime.contains("renzora-editor"));
+    assert!(runtime.lines().any(|p| p == "openxr_loader.dll"));
+    assert!(runtime.lines().any(|p| p == "native_support.dll"));
+    assert!(!runtime.contains("renzora_dylib"));
+    assert!(!runtime.contains("std-deadbeef"));
+    assert!(platform.join("renzora_dylib.dll").is_file());
     assert!(platform.join("sdk/old.rmeta").is_file());
     assert!(platform.join("sdk.tar.zst").is_file());
 }

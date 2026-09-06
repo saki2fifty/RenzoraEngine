@@ -144,12 +144,14 @@ package_runtime_template() {
     for f in "$src/renzora" "$src/renzora.exe" "$src/openxr_loader.dll"; do
         [ -f "$f" ] && cp -p "$f" "$stage/"
     done
-    # Sibling shared libraries (libstd, and any dylib a warm cargo cache left
-    # beside the exe). Skip the editor's own, which never ships with a game.
+    # Preserve native support libraries, but not retired Rust engine images
+    # that may remain beside the runtime in an older staging directory.
     for f in "$src"/*.so "$src"/*.dylib "$src"/*.dll; do
         [ -f "$f" ] || continue
         case "$(basename "$f")" in
             *renzora_editor*) continue ;;
+            bevy_dylib*|libbevy_dylib*|renzora_dylib*|librenzora_dylib*|renzora_ember_dylib*|librenzora_ember_dylib*) continue ;;
+            std-*|libstd-*|renzora.dll|librenzora.so|librenzora.dylib) continue ;;
             openxr_loader.dll) continue ;;  # already copied above
         esac
         cp -p "$f" "$stage/"

@@ -12,6 +12,8 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Updated optional compression to recognize the current editor/runtime package layout, and stopped Docker staging from copying retired shared-engine libraries.
 - Fixed newly created Rust scripts to use the current script SDK instead of the retired engine interface.
 - Removed the retired Rust extension declarations and stopped modding exports from shipping the obsolete large SDK as a fallback.
+- Kept retired engine libraries out of game exports and runtime templates while preserving OpenXR support files.
+- Removed the obsolete Windows build-profile override; cross-builds now honor the requested profile.
 
 ## September 6, 2026 — 00:00 UTC
 

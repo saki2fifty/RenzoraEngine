@@ -8,6 +8,27 @@ fn fixture(path: &Path) {
 }
 
 #[test]
+fn windows_dispatch_honors_requested_profile_without_building() {
+    let script = include_str!("../../docker/build-all.sh");
+    let start = script.find("build_one() {").unwrap();
+    let end = start + script[start..].find("\n}\n").unwrap() + 3;
+    for profile in ["release", "dist"] {
+        let command = format!(
+            "{}\nbuild_desktop() {{ test \"$PROFILE\" = \"$EXPECTED\" && test \"$RENZORA_PROFILE\" = \"$EXPECTED\"; }}\nbuild_plugins() {{ :; }}\nbuild_updater() {{ :; }}\ncompress_binaries() {{ :; }}\nbuild_one windows-x64 editor",
+            &script[start..end]
+        );
+        assert!(Command::new("bash")
+            .args(["-c", &command])
+            .env("PROFILE", profile)
+            .env("RENZORA_PROFILE", profile)
+            .env("EXPECTED", profile)
+            .status()
+            .unwrap()
+            .success());
+    }
+}
+
+#[test]
 fn docker_staging_keeps_plugins_and_ignores_retired_engine_images() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");

@@ -557,36 +557,7 @@ build_desktop() {
 build_one() {
     local PLATFORM="$1" FEATURE="$2"
 
-    # ── Windows cannot ship `release`, whoever asked for it ──────────────────
-    #
-    # A PE export ordinal is 16 bits, so a DLL exports at most 65,535 symbols —
-    # a property of the file format that no linker flag gets past. `bevy_dylib`
-    # lands either side of it on optimisation level alone:
-    #
-    #     opt-level = 2      41,958   links
-    #     opt-level = "s"   269,482   rust-lld: too many exported symbols
-    #
-    # `"s"` inlines far less, so generic instantiations that `2` folds into
-    # their callers survive as separate functions, and a Rust `dylib` exports
-    # every one. `[profile.release]` is the size-optimised one, so a Windows
-    # lane built with it does not link at all.
-    #
-    # This is decided HERE, next to the platform, rather than by each caller
-    # passing `RENZORA_PROFILE=dist`. The CI workflow did pass it and was fine;
-    # `renzora build windows` does not, fell through to the `release` default,
-    # and hit the cap — a constraint of the target reached the script only by
-    # every entry point happening to remember it. `local -x` scopes the
-    # override to this call, so a multi-platform run still builds Linux and
-    # macOS at `release`, which have no such ceiling.
-    case "$PLATFORM" in
-        windows-*)
-            if [ "$PROFILE" != "dist" ]; then
-                echo "    windows: profile $PROFILE -> dist (PE exports are 16-bit; bevy_dylib needs it)"
-            fi
-            local PROFILE="dist"
-            local -x RENZORA_PROFILE="dist"
-            ;;
-    esac
+    # Honor the requested non-debug profile; hosts no longer export Bevy DLLs.
 
     case "$PLATFORM" in
         "$LINUX_PLATFORM")
