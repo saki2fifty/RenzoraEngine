@@ -24,12 +24,8 @@
 //! make local iteration pay for `mksquashfs` and would move the binary out from
 //! under `cargo renzora`'s launch step. CI asks for it; a contributor doesn't.
 //!
-//! One thing deliberately stays OUTSIDE the bundle: `sdk/` (or `sdk.tar.zst`).
-//! `renzora_native_build::install::root()` resolves the install directory from
-//! `$APPIMAGE` when it is set, which points at the `.AppImage` *file*, so the
-//! editor looks for the SDK beside the bundle rather than within it. The
-//! container's wrapper moved binaries and shared libraries only, for exactly
-//! this reason, and this port keeps that.
+//! The small `rust-sdk/` source package travels inside the bundle beside the
+//! executables. Writable compilation caches live outside the installation.
 
 use std::path::Path;
 

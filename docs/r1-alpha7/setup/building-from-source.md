@@ -100,3 +100,7 @@ link engine code directly; normal staging does not copy shared Bevy, Renzora, or
 Rust-standard-library images. Live Rust plugins and scripts still use their
 standalone C-ABI libraries and small source SDK. Engine extensions use a generated
 static build and require a restart. Existing stale build files are not deleted.
+
+The former native-build helper now only stages built-in plugin artwork, shared
+by checkout packaging and engine-extension packages. Compilation uses the current
+cached script/plugin service or engine build kit, not the retired SDK compiler.
