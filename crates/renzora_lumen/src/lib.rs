@@ -1,19 +1,14 @@
-//! Renzora Lumen — the GI distribution plugin.
+//! Renzora Lumen — statically linked global illumination.
 //!
-//! Ships as a `cdylib` dlopen plugin (in `plugins/`) like the postprocess
-//! effects. `LumenPlugin` installs the Lumen voxel/trace passes AND its
-//! screen-space backend `renzora_rt::RtPlugin` (Lumen's `ScreenSpace` tier) —
-//! both must live in one dll so `RtLighting` has a single definition across the
-//! main/render worlds. Under the `editor` feature it also registers the Lumen +
+//! `LumenPlugin` installs the Lumen voxel/trace passes and its screen-space
+//! backend `renzora_rt::RtPlugin` (Lumen's `ScreenSpace` tier). Generated runtime
+//! wiring links this crate into the executable. Under the `editor` feature it
+//! also registers the Lumen +
 //! RT inspectors and the diagnostics snapshot the debugger's Lumen panel reads.
 //!
 //! The settings components (`LumenLighting`, `RtLighting`, …) live in the shared
 //! `renzora` contract so the editor inspectors, `renzora_level_presets`, and the
-//! debugger all share one `TypeId` across the dlopen boundary.
-//!
-//! Phase 1 implements only `Off` and `ScreenSpace`. Higher tiers
-//! (`SdfLow`/`SdfHigh`/`Hwrt`) parse but currently render the same as `Off`;
-//! Phases 2-6 of `docs/renzora_lumen_plan.md` fill them in.
+//! debugger use the same definitions within each executable.
 
 use bevy::core_pipeline::Core3d;
 use renzora::RenderPhase;

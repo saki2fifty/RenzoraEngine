@@ -1,9 +1,9 @@
 //! Renzora — the contracts crate. Types, events, components, resources.
 //!
 //! `renzora` is the foundation every other crate in the engine depends on.
-//! It has zero dependencies of its own beyond Bevy + serde, so it cannot
-//! introduce circular dependencies and any crate is free to swap any other
-//! crate as long as both honor the contracts defined here.
+//! Shared definitions let engine crates interact through contracts instead of
+//! depending on each other's implementations. Optional integration features
+//! and their dependencies are declared in this crate's manifest.
 //!
 //! Plugins that want extra functionality (post-process effects, editor
 //! framework, theming, etc.) depend on those crates explicitly:

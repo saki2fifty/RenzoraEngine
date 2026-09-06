@@ -66,7 +66,8 @@ Acceptance work includes actual Linux editor/runtime builds, rendered script exe
 - [Standalone Plugins](../extending/standalone-plugins.md)
 - [Rust Scripts](../scripting/rust-scripts.md)
 - [Exporting](../exporting/overview.md)
-# Shared mesh primitives
+
+## Shared mesh primitives
 
 `renzora_mesh_primitives` owns the procedural mesh generators used by both the
 engine and the shape browser. Their previous `procedural_meshes` module paths

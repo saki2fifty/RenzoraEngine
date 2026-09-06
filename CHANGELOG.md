@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 07:17 UTC
+
+- Corrected remaining architecture descriptions for lighting, post-processing and shared engine contracts, and tidied the shared-mesh documentation.
+
 ## September 6, 2026 — 07:13 UTC
 
 - Cleaned up optional-build warnings and corrected the physics backend documentation to match current builds.
