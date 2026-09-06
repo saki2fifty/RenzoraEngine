@@ -317,6 +317,15 @@ impl TileObject {
 #[derive(Component)]
 struct TileObjectBaked(u64);
 
+#[derive(Component)]
+struct TileObjectBakePending;
+
+type TileObjectNeedsBake = Or<(
+    Changed<TileObject>,
+    Without<TileObjectBaked>,
+    With<TileObjectBakePending>,
+)>;
+
 /// Bake every [`TileObject`] into a single-sprite texture: allocate a
 /// transparent `w·tile_px × h·tile_px` RGBA image and copy each picked atlas
 /// cell into its slot. This is what makes a hand-picked, possibly
@@ -329,16 +338,20 @@ fn build_tile_object_sprites(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
-    objects: Query<(
-        Entity,
-        &TileObject,
-        Option<&TileObjectBaked>,
-        Option<&renzora::core::SpriteCustomSize>,
-    )>,
+    objects: Query<
+        (
+            Entity,
+            &TileObject,
+            Option<&TileObjectBaked>,
+            Option<&renzora::core::SpriteCustomSize>,
+        ),
+        TileObjectNeedsBake,
+    >,
 ) {
     for (entity, obj, baked, custom) in &objects {
         let key = obj.bake_key();
         if baked.map(|b| b.0) == Some(key) {
+            commands.entity(entity).remove::<TileObjectBakePending>();
             continue;
         }
         if obj.cells.is_empty() || obj.tile_px == 0 || obj.w == 0 || obj.h == 0 {
@@ -349,6 +362,9 @@ fn build_tile_object_sprites(
         // Scope the atlas borrow so it ends before `images.add()` needs `&mut`.
         let baked_img = {
             let Some(atlas) = images.get(&atlas_handle) else {
+                // A changed, already-baked object must remain eligible after
+                // its change tick expires while the replacement atlas loads.
+                commands.entity(entity).insert(TileObjectBakePending);
                 continue; // atlas still loading — retry next frame
             };
             let asize = atlas.size_f32();
@@ -382,7 +398,7 @@ fn build_tile_object_sprites(
             img
         };
         let handle = images.add(baked_img);
-        commands.entity(entity).insert((
+        commands.entity(entity).remove::<TileObjectBakePending>().insert((
             Sprite {
                 image: handle,
                 custom_size: custom.map(|c| c.0),
@@ -618,24 +634,50 @@ fn sync_tilesets(
 /// happened to reorder the loads. Forcing the sampler on the asset is
 /// load-order-proof and applies to every user of the image.
 fn force_nearest_tileset_sampler(
-    tilesets: Query<&TilesetHandle>,
+    tilesets: Query<Ref<TilesetHandle>>,
+    changed_tilesets: Query<&TilesetHandle, Changed<TilesetHandle>>,
+    mut events: MessageReader<AssetEvent<Image>>,
+    mut dirty: Local<std::collections::HashSet<AssetId<Image>>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    for tileset in &tilesets {
-        // Read first, mutate only when needed — `get_mut` marks the asset
-        // changed (GPU re-upload), which must not happen every frame.
-        let needs_fix = images
-            .get(&tileset.image)
-            .is_some_and(|img| !matches!(
-                &img.sampler,
-                ImageSampler::Descriptor(d)
-                    if d.min_filter == ImageFilterMode::Nearest
-                        && d.mag_filter == ImageFilterMode::Nearest
-            ));
-        if needs_fix {
-            if let Some(mut img) = images.get_mut(&tileset.image) {
-                img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
+    dirty.clear();
+    for event in events.read() {
+        if let AssetEvent::Added { id }
+        | AssetEvent::Modified { id }
+        | AssetEvent::LoadedWithDependencies { id } = event
+        {
+            dirty.insert(*id);
+        }
+    }
+    // Settled atlases leave the image-check working set. Asset messages retain
+    // retry behavior for late loads and sampler changes by another consumer.
+    if dirty.is_empty() {
+        for tileset in &changed_tilesets {
+            repair_tileset_sampler(tileset, &mut images);
+        }
+    } else {
+        for tileset in &tilesets {
+            if tileset.is_changed() || dirty.contains(&tileset.image.id()) {
+                repair_tileset_sampler(&tileset, &mut images);
             }
+        }
+    }
+}
+
+fn repair_tileset_sampler(tileset: &TilesetHandle, images: &mut Assets<Image>) {
+    // Read first, mutate only when needed — `get_mut` marks the asset
+    // changed (GPU re-upload), which must not happen every frame.
+    let needs_fix = images.get(&tileset.image).is_some_and(|img| {
+        !matches!(
+            &img.sampler,
+            ImageSampler::Descriptor(d)
+                if d.min_filter == ImageFilterMode::Nearest
+                    && d.mag_filter == ImageFilterMode::Nearest
+        )
+    });
+    if needs_fix {
+        if let Some(mut img) = images.get_mut(&tileset.image) {
+            img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::nearest());
         }
     }
 }
@@ -661,6 +703,124 @@ mod tests {
     use super::*;
     use renzora_physics::CollisionShapeType;
     use renzora_test_harness::{minimal_app, pump};
+
+    #[test]
+    fn sampler_repair_follows_image_changes_without_repeated_notifications() {
+        let mut app = minimal_app();
+        app.init_asset::<Image>()
+            .add_systems(Update, force_nearest_tileset_sampler);
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut().spawn(TilesetHandle {
+            path: "atlas".into(),
+            image: image.clone(),
+        });
+        pump(&mut app, 3);
+        let nearest = |app: &App| {
+            matches!(
+            &app.world().resource::<Assets<Image>>().get(&image).expect("atlas").sampler,
+            ImageSampler::Descriptor(d) if d.min_filter == ImageFilterMode::Nearest
+                && d.mag_filter == ImageFilterMode::Nearest)
+        };
+        assert!(nearest(&app));
+        app.world_mut()
+            .resource_mut::<Messages<AssetEvent<Image>>>()
+            .clear();
+        pump(&mut app, 10);
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<AssetEvent<Image>>>()
+                .drain()
+                .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+                .count(),
+            0
+        );
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .get_mut(&image)
+            .expect("atlas")
+            .sampler = ImageSampler::Default;
+        pump(&mut app, 3);
+        assert!(nearest(&app));
+    }
+
+    #[test]
+    fn settled_tile_objects_leave_baker_and_pending_edits_retry() {
+        #[derive(Resource, Default)]
+        struct Visits(usize);
+        fn count(query: Query<&TileObject, TileObjectNeedsBake>, mut visits: ResMut<Visits>) {
+            visits.0 += query.iter().count();
+        }
+        let mut app = minimal_app();
+        app.init_asset::<Image>()
+            .init_resource::<Visits>()
+            .add_systems(Update, (count, build_tile_object_sprites).chain());
+        let object = TileObject {
+            tileset_path: "phase10-pending.png".into(),
+            tile_px: 1,
+            w: 1,
+            h: 1,
+            cells: vec![TileObjectCell::default()],
+        };
+        let atlas = app
+            .world()
+            .resource::<AssetServer>()
+            .load::<Image>(object.tileset_path.clone());
+        let entity = app
+            .world_mut()
+            .spawn((object, TileObjectBaked(u64::MAX)))
+            .id();
+        app.update();
+        assert!(app.world().get::<TileObjectBakePending>(entity).is_some());
+        app.update();
+        assert!(app.world().get::<TileObjectBakePending>(entity).is_some());
+        let image = Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[255, 0, 0, 255],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(atlas.id(), image)
+            .expect("atlas handle");
+        app.update();
+        assert!(app.world().get::<TileObjectBakePending>(entity).is_none());
+        let baked = app
+            .world()
+            .get::<Sprite>(entity)
+            .expect("baked sprite")
+            .image
+            .clone();
+        let visits = app.world().resource::<Visits>().0;
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Visits>().0, visits);
+        assert_eq!(
+            app.world().get::<Sprite>(entity).expect("sprite").image,
+            baked
+        );
+        app.world_mut()
+            .get_mut::<TileObject>(entity)
+            .expect("object")
+            .w = 2;
+        app.update();
+        assert_ne!(
+            app.world()
+                .get::<Sprite>(entity)
+                .expect("rebaked sprite")
+                .image,
+            baked
+        );
+    }
 
     // ── atlas slicing ────────────────────────────────────────────────────────
 

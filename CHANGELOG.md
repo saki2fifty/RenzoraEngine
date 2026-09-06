@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 06:22 UTC
+
+- Stopped settled tile objects from repeating bake checks, while retaining retries for late atlas loads and keeping tileset sampling crisp after image changes.
+
 ## September 6, 2026 — 06:06 UTC
 
 - Kept script components attached during execution and shared their read-handler name lookup, reducing repeated structural changes and copying.

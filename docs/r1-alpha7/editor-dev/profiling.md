@@ -509,3 +509,15 @@ main, fixed or floating dock. Its existing refresh interval remains in effect.
 Underlying diagnostic capture stays enabled; only the view's sorting, formatting
 and entity-count scans are gated. The headless gate regression checks 1,000
 hidden updates and resumption in the main and fixed docks.
+
+## Tile maintenance
+
+Tile-object baking queries changed, unbaked or explicitly waiting objects.
+Successfully baked objects leave the working set until edited. The waiting
+marker preserves retries when a replacement atlas loads after the object's
+change tick expires. A headless workload checks zero baker visits across 1,000
+settled frames and successful re-baking after an edit.
+
+Tileset sampler repair considers changed handles and image-added/modified/loaded
+messages. Settled frames with no image messages visit only changed handles;
+late loads and another consumer changing the sampler still trigger repair.
