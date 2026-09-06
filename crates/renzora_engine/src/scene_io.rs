@@ -2196,6 +2196,12 @@ pub fn apply_sprite_sheet_crop(
     }
 }
 
+#[cfg(feature = "render_2d")]
+type AtlasRegionDirty = Or<(
+    Changed<renzora::core::SpriteAtlasRegion>,
+    Changed<bevy::sprite::Sprite>,
+)>;
+
 /// Derive `Sprite.rect` from a [`renzora::core::SpriteAtlasRegion`] block —
 /// the multi-cell counterpart of [`apply_sprite_sheet_crop`]. A painted
 /// tilemap "object" (a tree stamped from a multi-tile palette block) is a
@@ -2212,7 +2218,7 @@ pub fn apply_sprite_sheet_crop(
 /// `Changed<Sprite>` every frame.
 #[cfg(feature = "render_2d")]
 pub fn apply_sprite_atlas_region(
-    mut sprites: Query<(&renzora::core::SpriteAtlasRegion, &mut bevy::sprite::Sprite)>,
+    mut sprites: Query<(&renzora::core::SpriteAtlasRegion, &mut bevy::sprite::Sprite), AtlasRegionDirty>,
 ) {
     for (region, mut sprite) in &mut sprites {
         let w = region.w.max(1);
@@ -2231,6 +2237,13 @@ pub fn apply_sprite_atlas_region(
     }
 }
 
+#[cfg(feature = "render_2d")]
+type YSortDirty = Or<(
+    Changed<renzora::core::YSort>,
+    Changed<Transform>,
+    Changed<GlobalTransform>,
+)>;
+
 /// Y-sort: overwrite `Transform.translation.z` from world Y for every
 /// [`renzora::core::YSort`] entity, so 2D entities lower on screen draw in
 /// front (Bevy's 2D transparent pass sorts by Z — no render work needed).
@@ -2245,7 +2258,7 @@ pub fn apply_sprite_atlas_region(
 /// an unchanged scene) every frame.
 #[cfg(feature = "render_2d")]
 pub fn apply_y_sort(
-    mut q: Query<(&renzora::core::YSort, &mut Transform, &GlobalTransform)>,
+    mut q: Query<(&renzora::core::YSort, &mut Transform, &GlobalTransform), YSortDirty>,
 ) {
     /// One world unit of Y = this much Z. f32 around a small `z_base` resolves
     /// steps of ~1e-7, so 1e-5 still separates sub-pixel Y differences.
@@ -3348,5 +3361,127 @@ mod tests {
         let b = Path::new("/nonexistent/scenes/bar.ron");
         assert!(!paths_equal(a, b));
         assert!(!is_self_reference(a, b));
+    }
+}
+
+#[cfg(all(test, feature = "render_2d"))]
+mod settled_sprite_tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct Visits(usize, usize);
+
+    fn count_work(
+        atlas: Query<(&renzora::SpriteAtlasRegion, &bevy::sprite::Sprite), AtlasRegionDirty>,
+        sorted: Query<(&renzora::YSort, &Transform, &GlobalTransform), YSortDirty>,
+        mut visits: ResMut<Visits>,
+    ) {
+        visits.0 += atlas.iter().count();
+        visits.1 += sorted.iter().count();
+    }
+
+    #[test]
+    fn settled_sprites_skip_derived_work_and_changes_repair_outputs() {
+        let mut app = App::new();
+        app.init_resource::<Visits>().add_systems(
+            Update,
+            (count_work, apply_sprite_atlas_region, apply_y_sort).chain(),
+        );
+        let entity = app
+            .world_mut()
+            .spawn((
+                renzora::SpriteAtlasRegion {
+                    col: 1,
+                    row: 2,
+                    w: 2,
+                    h: 1,
+                    tile_px: 16,
+                },
+                bevy::sprite::Sprite::default(),
+                renzora::YSort::default(),
+                Transform::default(),
+                GlobalTransform::from_translation(Vec3::Y * 20.0),
+            ))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        let before = (
+            app.world().resource::<Visits>().0,
+            app.world().resource::<Visits>().1,
+        );
+        for _ in 0..1_000 {
+            app.update();
+        }
+        assert_eq!(
+            before,
+            (
+                app.world().resource::<Visits>().0,
+                app.world().resource::<Visits>().1
+            )
+        );
+        assert_eq!(
+            app.world()
+                .get::<bevy::sprite::Sprite>(entity)
+                .unwrap()
+                .rect,
+            Some(Rect::new(16.05, 32.05, 47.95, 47.95))
+        );
+        assert_eq!(
+            app.world().get::<Transform>(entity).unwrap().translation.z,
+            1.0 - 20.0 * 1e-5
+        );
+        app.world_mut()
+            .get_mut::<renzora::SpriteAtlasRegion>(entity)
+            .unwrap()
+            .col = 2;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<bevy::sprite::Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .min
+                .x,
+            32.05
+        );
+        app.world_mut()
+            .get_mut::<bevy::sprite::Sprite>(entity)
+            .unwrap()
+            .rect = None;
+        app.world_mut()
+            .get_mut::<Transform>(entity)
+            .unwrap()
+            .translation
+            .z = 99.0;
+        app.update();
+        assert!(app
+            .world()
+            .get::<bevy::sprite::Sprite>(entity)
+            .unwrap()
+            .rect
+            .is_some());
+        assert_eq!(
+            app.world().get::<Transform>(entity).unwrap().translation.z,
+            1.0 - 20.0 * 1e-5
+        );
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(GlobalTransform::from_translation(Vec3::Y * 40.0));
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(entity).unwrap().translation.z,
+            1.0 - 40.0 * 1e-5
+        );
+        app.world_mut()
+            .get_mut::<renzora::YSort>(entity)
+            .unwrap()
+            .z_base = 2.0;
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(entity).unwrap().translation.z,
+            2.0 - 40.0 * 1e-5
+        );
     }
 }

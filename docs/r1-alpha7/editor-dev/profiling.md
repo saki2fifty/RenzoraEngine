@@ -565,3 +565,12 @@ The existing quantization and authored-pattern scaling remain in place. A
 1,000-frame stable regression retains baseline storage and emits no additional
 water-component notifications; wind changes, authored edits and cascade removal
 still update. The system still checks surfaces each frame.
+
+## Sprite-derived state
+
+Atlas-region cropping runs for changed regions or sprites. Y-sort runs for
+changed settings, local transforms or propagated global transforms. Including
+the output components preserves repair after another system edits those outputs.
+A headless test sees no additional eligible entries across 1,000 settled frames
+and verifies edits/movement. Bevy still evaluates change filters; this is not an
+event-only index. Sprite-sheet image-dependent cropping is unchanged.

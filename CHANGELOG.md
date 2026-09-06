@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 06:49 UTC
+
+- Skipped repeated atlas-region and depth-sorting calculations for settled sprites, while retaining updates after edits and movement.
+
 ## September 6, 2026 — 06:43 UTC
 
 - Kept settled wind from repeatedly rewriting water settings, while preserving authored wave patterns and live wind changes.
