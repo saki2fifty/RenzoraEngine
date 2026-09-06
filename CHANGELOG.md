@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 07:56 UTC
+
+- Reused one startup graphics capability check for ray tracing and integrated-graphics hints, and corrected stale runtime architecture descriptions.
+
 ## September 6, 2026 — 07:45 UTC
 
 - Preserved UI ordering and sprite/tile refresh when objects are disabled, edited, and re-enabled, including custom disabling rules.

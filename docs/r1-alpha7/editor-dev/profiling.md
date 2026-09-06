@@ -636,3 +636,14 @@ Standard `Disabled` additions/removals invalidate the affected groups too. When
 custom query-disabling components are registered, ordering retains its original
 eligibility scan as a compatibility fallback; the zero-parent-work measurement
 applies to the standard configuration, not that fallback.
+
+## Startup GPU capability probe
+
+Ray-tracing availability and the integrated-GPU hint share one cached temporary
+adapter probe, including a cached failure. Backend mapping is shared with renderer
+settings. This removes the second preliminary request; Bevy still creates its
+own renderer adapter/device. The probe has no surface, so its answers remain
+startup hints rather than guaranteed identification of the final adapter.
+Headless tests inject the probe and count one request across 1,000 reads of both
+answers, for success and failure. They also check backend/device policy. This is
+not a measured startup-time or FPS claim.

@@ -5,15 +5,17 @@
 //! plugin list. Editor-scope plugins are the matching list in `renzora_editor`.
 //!
 //! Adding a new plugin:
-//! - Write the plugin crate as an ordinary Bevy plugin — no registration macro.
-//! - Add it as a `[dependencies]` entry here (optional + in `default` if the
-//!   lean exporter should be able to strip it), and add a line to `plugins.rs`
-//!   under the matching feature gate. Editor-only crates go in `renzora_editor`
-//!   instead.
+//! - Declare an ordinary Bevy plugin with `renzora::add!` in its owning crate.
+//! - The build-time generator maintains dependencies and `plugins.rs` wiring.
+//!   Runtime feature gates let lean exports omit optional engine subsystems;
+//!   editor-only plugins are wired into `renzora_editor` instead.
 //! - Third-party: ship a C-ABI plugin (`renzora_plugin`), `dlopen`'d from
 //!   `plugins/` by the loader, no engine source edits required.
 
 use bevy::prelude::*;
+
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
+mod gpu_probe;
 
 
 pub use renzora;
@@ -99,38 +101,8 @@ pub fn platform_wgpu_settings() -> bevy::render::settings::WgpuSettings {
     #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
     {
         use bevy::render::settings::{Backends, WgpuFeatures, WgpuSettings};
-        use renzora::RendererBackend;
-
-        // Per-OS default, used when the preference is `Auto`. Vulkan is the
-        // standard backend on Windows, Linux and the BSDs — it's the one path
-        // shared across most platforms and gives the best experience here (fast
-        // load, clean splash, no DX12 frame-flicker). The play-mode crash that
-        // once pushed us toward DX12 was never Vulkan's fault: it came from
-        // Bevy's default `Backends::all()` loading the DX12/DXGI backend
-        // alongside Vulkan, and DXGI's occlusion handling clobbering the Vulkan
-        // surface when the runtime window took the foreground. Pinning to a
-        // single backend here — which `Auto` now always does — removes that, so
-        // Vulkan is both the fastest and the safe default. DX12 remains a
-        // user-selectable fallback for Windows machines with weak/missing Vulkan
-        // drivers (see `RendererBackend`). Metal is the first-class (and only)
-        // backend on Apple platforms.
-        #[cfg(target_os = "windows")]
-        let default_backend = Backends::VULKAN;
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        let default_backend = Backends::METAL;
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
-        let default_backend = Backends::VULKAN;
-
-        // User override persisted under `~/.renzora/renderer.toml`. Read here
-        // because wgpu selects the backend at render-plugin build time and
-        // can't change it afterwards; `Auto` keeps the per-OS default above.
-        let backends = match renzora::load_renderer_backend() {
-            RendererBackend::Auto => default_backend,
-            RendererBackend::Dx12 => Backends::DX12,
-            RendererBackend::Vulkan => Backends::VULKAN,
-            RendererBackend::Metal => Backends::METAL,
-            RendererBackend::Gl => Backends::GL,
-        };
+        // Keep capability probes and renderer configuration on one backend policy.
+        let backends = gpu_probe::selected_backend();
 
         // Wireframe (`PolygonMode::Line`) for the editor viewport — supported on
         // DX12, Vulkan and Metal but NOT OpenGL, so requesting it as a *required*
@@ -167,14 +139,11 @@ pub fn platform_wgpu_settings() -> bevy::render::settings::WgpuSettings {
 /// Whether the GPU + selected backend support the wgpu ray-tracing features
 /// `bevy_solari` (Solari) needs. Probed ONCE at startup and cached.
 ///
-/// Why a standalone probe instead of reading the live `RenderDevice`: the device
-/// is created — with its feature set frozen — *before* any dlopen plugin loads,
-/// so the only way the `renzora_solari` plugin can know in time to gate
-/// `SolariPlugins` in its `build()` is for the host to find out first and stash
-/// it in [`renzora::GpuRaytracing`]. We spin up a throwaway wgpu adapter on the
-/// same backend the renderer will use and check it reports
-/// `SolariPlugins::required_wgpu_features()`. Any failure ⇒ `false` (Solari
-/// stays inert; the engine boots normally on non-RT GPUs).
+/// The required features must be selected before creating the renderer's
+/// `RenderDevice`. One cached temporary adapter probe supplies both this answer
+/// and the integrated-GPU hint. It uses the renderer's backend policy, but has
+/// no surface and is not the renderer's final adapter. Failure returns false;
+/// unsupported GPUs retain the non-Solari path.
 #[cfg(all(
     not(target_os = "android"),
     not(target_arch = "wasm32"),
@@ -184,126 +153,34 @@ pub fn raytracing_supported() -> bool {
     use std::sync::OnceLock;
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(|| {
-        use renzora::RendererBackend;
-        use wgpu::Backends;
-
-        // Mirror `platform_wgpu_settings`' backend selection so the probe sees
-        // the same adapter the renderer will.
-        #[cfg(target_os = "windows")]
-        let default_backend = Backends::VULKAN;
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        let default_backend = Backends::METAL;
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
-        let default_backend = Backends::VULKAN;
-
-        let backends = match renzora::load_renderer_backend() {
-            RendererBackend::Auto => default_backend,
-            RendererBackend::Dx12 => Backends::DX12,
-            RendererBackend::Vulkan => Backends::VULKAN,
-            RendererBackend::Metal => Backends::METAL,
-            RendererBackend::Gl => Backends::GL,
-        };
-        // OpenGL has no ray-tracing path — skip the probe entirely.
-        if backends == Backends::GL {
+        // GL cannot support Solari; do not create an adapter just for this query.
+        if gpu_probe::selected_backend() == wgpu::Backends::GL {
             return false;
         }
-
         let required = bevy::solari::SolariPlugins::required_wgpu_features();
-        // wgpu 29's `InstanceDescriptor` has no `Default`; start from its
-        // defaults constructor and override only the backend.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = bevy::tasks::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-            },
-        ));
-        match adapter {
-            Ok(adapter) => {
-                let ok = adapter.features().contains(required);
-                if ok {
-                    info!("[runtime] GPU ray tracing supported — Solari can run if its plugin is present");
-                } else {
-                    info!("[runtime] GPU ray tracing unsupported by adapter — Solari will stay inert");
-                }
-                ok
-            }
-            Err(e) => {
-                info!("[runtime] ray-tracing probe found no adapter ({e}) — Solari will stay inert");
-                false
-            }
+        let supported = gpu_probe::capabilities()
+            .is_some_and(|capabilities| capabilities.features.contains(required));
+        if supported {
+            info!("[runtime] GPU ray tracing supported — Solari can run if its plugin is present");
+        } else {
+            info!("[runtime] GPU ray tracing unavailable — Solari will stay inert");
         }
+        supported
     })
 }
 
-/// Is the adapter the renderer will pick an integrated GPU (or a software
-/// fallback) rather than a discrete card?
+/// Does the startup probe find an integrated GPU (or software adapter)?
 ///
-/// Cached in a `OnceLock` and mirroring `platform_wgpu_settings()`' backend
-/// selection for the same reason `raytracing_supported` does: the probe must see
-/// the same adapter the renderer will, or the answer is about the wrong GPU.
+/// Shares the cached probe used by `raytracing_supported` and the renderer's
+/// backend-selection policy. This is a startup hint, not inspection of the
+/// final renderer adapter, whose surface may affect selection.
 ///
 /// Used only as a hint — see [`renzora::GpuIsIntegrated`]. `Other` is treated as
 /// *not* integrated: it usually means a driver that did not report a type, and
 /// wrongly nudging a discrete-GPU user toward `Low` is worse than staying quiet.
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 pub fn gpu_is_integrated() -> bool {
-    use std::sync::OnceLock;
-    static INTEGRATED: OnceLock<bool> = OnceLock::new();
-    *INTEGRATED.get_or_init(|| {
-        use renzora::RendererBackend;
-        use wgpu::Backends;
-
-        #[cfg(target_os = "windows")]
-        let default_backend = Backends::VULKAN;
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        let default_backend = Backends::METAL;
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
-        let default_backend = Backends::VULKAN;
-
-        let backends = match renzora::load_renderer_backend() {
-            RendererBackend::Auto => default_backend,
-            RendererBackend::Dx12 => Backends::DX12,
-            RendererBackend::Vulkan => Backends::VULKAN,
-            RendererBackend::Metal => Backends::METAL,
-            RendererBackend::Gl => Backends::GL,
-        };
-
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter =
-            bevy::tasks::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: None,
-            }));
-        match adapter {
-            Ok(adapter) => {
-                let info = adapter.get_info();
-                let integrated = matches!(
-                    info.device_type,
-                    wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu
-                );
-                if integrated {
-                    info!(
-                        "[runtime] integrated/software adapter detected ({}) — the editor \
-                         will suggest the Low graphics tier",
-                        info.name
-                    );
-                }
-                integrated
-            }
-            // No adapter means rendering is about to fail for bigger reasons;
-            // don't add a misleading performance hint on top.
-            Err(_) => false,
-        }
-    })
+    gpu_probe::capabilities().is_some_and(|capabilities| capabilities.integrated)
 }
 
 /// Non-desktop targets have no meaningful discrete/integrated distinction here.
@@ -583,7 +460,7 @@ pub fn add_default_rendering(app: &mut App, is_editor: bool) {
     });
     // Record GPU ray-tracing capability so the `renzora_solari` distribution
     // plugin can gate `SolariPlugins` in its `build()`. The `RenderDevice`'s
-    // feature set is frozen here (before dlopen plugins load), so the plugin
+    // feature set is frozen here (before engine plugin installation), so the plugin
     // can't probe the device itself in time — see `renzora::GpuRaytracing`.
     app.insert_resource(renzora::GpuRaytracing {
         enabled: raytracing_supported(),
@@ -1237,7 +1114,5 @@ pub fn build_runtime_app() -> App {
     app
 }
 
-// Editor plugins are NOT installed here. They live in the separate
-// `renzora_editor` bundle dll (loaded at startup beside the exe) and are
-// installed via its `plugin_install_scope` FFI entry with `host_scope = Editor`.
-// `renzora_runtime` is purely the runtime foundation.
+// Editor plugins are installed by the separate editor executable through
+// `renzora_editor`'s generated static wiring, not by this runtime foundation.
