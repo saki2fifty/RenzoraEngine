@@ -491,3 +491,13 @@ release their unused cached queries.
 The headless regression compares a scan of over 10,000 unrelated entities with
 zero matching groups in the cached path, and checks 100 stable updates. This
 measures avoided search work, not editor FPS or GPU timing.
+
+## Script execution storage
+
+Script execution temporarily owns only the entry list; it leaves the component
+and its ID allocator attached to the entity. Runtime state returns to the same
+list storage after hooks finish. Script commands remain deferred. A 1,000-update
+regression observes zero component removals and preserves initialization and
+disabled entries. The reflection read handlers share one immutable name lookup
+per pass rather than cloning that map for each handler. Other public context
+snapshots are still owned copies; this is not a complete snapshot redesign.

@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 06:06 UTC
+
+- Kept script components attached during execution and shared their read-handler name lookup, reducing repeated structural changes and copying.
+
 ## September 6, 2026 — 05:46 UTC
 
 - Kept existing collision snapshots when contacts stay the same, avoiding repeated set rebuilding during settled contact.

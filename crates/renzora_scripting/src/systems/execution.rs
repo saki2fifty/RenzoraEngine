@@ -4,6 +4,7 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 // `bevy::platform::time::Instant`, never `std`'s — std's panics on wasm.
 use bevy::platform::time::Instant;
@@ -247,6 +248,10 @@ pub fn run_scripts(world: &mut World) {
         }
     }
 
+    // All three read handlers borrow the same immutable frame lookup. Their
+    // boxed lifetimes require ownership, not a full map copy for every script.
+    let name_to_entity = Arc::new(name_to_entity);
+
     // A real frame number, not a placeholder. This was hardcoded to 0 for as
     // long as nothing read it — and then the plugin bridge started using it to
     // decide when its cached frame context had gone stale, so a constant 0 meant
@@ -385,7 +390,7 @@ pub fn run_scripts(world: &mut World) {
         )>();
         for (entity, sc, transform, name, parent, children) in query.iter(world) {
             // Skip entities with nothing to run: the per-entity subtree walk +
-            // `take`/`insert` archetype churn below is pure waste for them, since
+            // context construction below is pure waste for them, since
             // the inner loop would execute nothing anyway. This peek is the same
             // `enabled && path` test the executor applies per entry.
             //
@@ -446,12 +451,15 @@ pub fn run_scripts(world: &mut World) {
             }
         }
 
-        // Take the ScriptComponent off the entity so we can use world freely
-        let Some(mut sc) = world.entity_mut(sed.entity).take::<ScriptComponent>() else {
+        // Move only the execution list, keeping the component and its ID
+        // allocator in their archetype. Script world writes are queued until
+        // after this pass; no mutable component borrow crosses a backend call.
+        let Some(mut scripts) = world.get_mut::<ScriptComponent>(sed.entity)
+            .map(|mut component| std::mem::take(&mut component.scripts)) else {
             continue;
         };
 
-        for entry in sc.scripts.iter_mut() {
+        for entry in scripts.iter_mut() {
             if !entry.enabled {
                 continue;
             }
@@ -872,8 +880,9 @@ pub fn run_scripts(world: &mut World) {
             }
         }
 
-        // Put the ScriptComponent back on the entity
-        world.entity_mut(sed.entity).insert(sc);
+        world.get_mut::<ScriptComponent>(sed.entity)
+            .expect("script commands are deferred until execution completes")
+            .scripts = scripts;
     }
 
     // Publish this frame's immediate-mode draw lists for the UI vector renderer to
@@ -886,4 +895,51 @@ pub fn run_scripts(world: &mut World) {
     // Deferred until after the per-entity loop so we don't fight the
     // immutable `ScriptEngine` borrow held inside it.
     perf_batch.flush(world);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_execution_keeps_components_installed_and_preserves_entries() {
+        #[derive(Resource, Default)]
+        struct Removals(usize);
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.init_resource::<ScriptInput>();
+        world.init_resource::<ScriptTimers>();
+        world.init_resource::<ScriptPerfStats>();
+        world.init_resource::<ScriptCommandQueue>();
+        world.init_resource::<Removals>();
+        world.add_observer(|_: On<Remove, ScriptComponent>, mut count: ResMut<Removals>| {
+            count.0 += 1;
+        });
+        let backend = crate::test_util::FakeBackend::new("execution", &["fake"]);
+        let calls = backend.state_handle();
+        let mut engine = ScriptEngine::new();
+        engine.add_backend(Box::new(backend));
+        world.insert_resource(engine);
+        let mut component = ScriptComponent::from_file(PathBuf::from("test.fake"));
+        component.add_file_script(PathBuf::from("disabled.fake"));
+        component.scripts[1].enabled = false;
+        let entity = world.spawn((component, Name::new("actor"))).id();
+        let archetype = world.entity(entity).archetype().id();
+        let entry_storage = world.get::<ScriptComponent>(entity).expect("component").scripts.as_ptr();
+        for _ in 0..1000 {
+            run_scripts(&mut world);
+            assert_eq!(world.entity(entity).archetype().id(), archetype);
+            let component = world.get::<ScriptComponent>(entity).expect("component");
+            assert_eq!(component.scripts.as_ptr(), entry_storage);
+            assert_eq!(component.scripts.len(), 2);
+            assert!(!component.scripts[1].enabled);
+        }
+        assert_eq!(world.resource::<Removals>().0, 0);
+        let calls = calls.lock().expect("backend state");
+        assert_eq!(calls.ready_paths.len(), 1);
+        assert_eq!(calls.update_paths.len(), 1000);
+        assert!(calls.seen_found_entities.iter().all(|names| names.get("actor") == Some(&entity.to_bits())));
+        assert_eq!(world.get_mut::<ScriptComponent>(entity).expect("component").add_script("next"), 3);
+        eprintln!("script execution: 1000 updates, zero component removals; entry storage and next ID retained");
+    }
 }
