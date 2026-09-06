@@ -15,7 +15,7 @@ use crate::components::*;
 use crate::config::NetworkConfig;
 use crate::messages::GameEvent;
 use crate::status::{ConnectedClient, ConnectionState, NetworkStatus};
-use crate::transport::{decode, encode, Packet, Peer, MAX_DATAGRAM};
+use crate::transport::{decode, encode, Packet, Peer, MAX_DATAGRAM, MAX_POLL_PACKETS};
 
 /// Server-side networking plugin. Binds the UDP socket on startup and runs the
 /// receive/relay loop. A dedicated server adds only this; a host/listen server
@@ -66,6 +66,7 @@ struct ServerNetworkConfig(NetworkConfig);
 pub struct NetworkServer {
     socket: UdpSocket,
     peers: HashMap<SocketAddr, Peer>,
+    max_clients: usize,
 }
 
 /// What [`NetworkServer::update`] observed this frame.
@@ -82,11 +83,17 @@ pub struct ServerUpdate {
 impl NetworkServer {
     /// Bind a non-blocking UDP socket on `0.0.0.0:port`.
     pub fn bind(port: u16) -> std::io::Result<Self> {
+        Self::bind_with_capacity(port, NetworkConfig::default().max_clients as usize)
+    }
+
+    /// Bind a server with an explicit admission limit (zero admits no clients).
+    pub fn bind_with_capacity(port: u16, max_clients: usize) -> std::io::Result<Self> {
         let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port))?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,
             peers: HashMap::new(),
+            max_clients,
         })
     }
 
@@ -94,8 +101,8 @@ impl NetworkServer {
     /// disconnects/timeouts. Also acks, resends, and keep-alives.
     pub fn update(&mut self) -> ServerUpdate {
         let mut out = ServerUpdate::default();
-        let mut buf = [0u8; MAX_DATAGRAM];
-        loop {
+        let mut buf = [0u8; MAX_DATAGRAM + 1];
+        for _ in 0..MAX_POLL_PACKETS {
             let (n, addr) = match self.socket.recv_from(&mut buf) {
                 Ok(v) => v,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -104,6 +111,9 @@ impl NetworkServer {
             let Some(packet) = decode(&buf[..n]) else { continue };
             match packet {
                 Packet::ConnectRequest { client_id } => {
+                    if !self.peers.contains_key(&addr) && self.peers.len() >= self.max_clients {
+                        continue;
+                    }
                     if let std::collections::hash_map::Entry::Vacant(e) = self.peers.entry(addr) {
                         e.insert(Peer::new(addr, client_id));
                         out.joined.push(client_id);
@@ -170,17 +180,41 @@ impl NetworkServer {
     /// Reliably send an event to every connected client, optionally skipping
     /// one (used to avoid echoing a relayed RPC back to its sender).
     pub fn broadcast(&mut self, event: GameEvent, except: Option<u64>) {
+        for (client, error) in self.try_broadcast(event, except) {
+            warn!("[network] Event not queued for client {client}: {error}");
+        }
+    }
+
+    /// Return only recipients that did not accept the event; others retain it.
+    pub fn try_broadcast(
+        &mut self,
+        event: GameEvent,
+        except: Option<u64>,
+    ) -> Vec<(SocketAddr, crate::SendError)> {
+        let mut refused = Vec::new();
         for peer in self.peers.values_mut() {
             if Some(peer.client_id) != except {
-                peer.send_reliable(&self.socket, event.clone());
+                if let Err(error) = peer.send_reliable(&self.socket, event.clone()) {
+                    refused.push((peer.addr, error));
+                }
             }
         }
+        refused
+    }
+
+    /// Retry one refused recipient without resending to successful recipients.
+    pub fn try_send_to(&mut self, addr: SocketAddr, event: GameEvent) -> Result<(), crate::SendError> {
+        let peer = self
+            .peers
+            .get_mut(&addr)
+            .ok_or(crate::SendError::NotConnected)?;
+        peer.send_reliable(&self.socket, event)
     }
 }
 
 /// Bind the server socket at startup.
 fn start_server(mut commands: Commands, config: Res<ServerNetworkConfig>) {
-    match NetworkServer::bind(config.0.port) {
+    match NetworkServer::bind_with_capacity(config.0.port, config.0.max_clients as usize) {
         Ok(server) => {
             info!("[network] Server listening on 0.0.0.0:{}", config.0.port);
             commands.insert_resource(server);
@@ -233,5 +267,32 @@ fn assign_network_ids(
     for entity in &query {
         *next_id += 1;
         commands.entity(entity).insert(NetworkId(*next_id));
+    }
+}
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn client_limit_preserves_existing_peer_and_reopens_after_disconnect() {
+        let mut server = NetworkServer::bind_with_capacity(0, 1).unwrap();
+        let addr = (std::net::Ipv4Addr::LOCALHOST, server.socket.local_addr().unwrap().port());
+        let first = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second = UdpSocket::bind("127.0.0.1:0").unwrap();
+        first.send_to(&encode(&Packet::ConnectRequest { client_id: 1 }), addr).unwrap();
+        assert_eq!(server.update().joined, [1]);
+        second.send_to(&encode(&Packet::ConnectRequest { client_id: 2 }), addr).unwrap();
+        assert!(server.update().joined.is_empty());
+        assert_eq!(server.peers.len(), 1);
+        first.send_to(&encode(&Packet::ConnectRequest { client_id: 1 }), addr).unwrap();
+        assert!(server.update().joined.is_empty());
+        first.send_to(&encode(&Packet::Disconnect), addr).unwrap();
+        assert_eq!(server.update().left, [1]);
+        second.send_to(&encode(&Packet::ConnectRequest { client_id: 2 }), addr).unwrap();
+        assert_eq!(server.update().joined, [2]);
+        let refused = server.try_broadcast(GameEvent { name: "large".into(), data: vec![0; MAX_DATAGRAM] }, None);
+        assert_eq!(refused, [(second.local_addr().unwrap(), crate::SendError::TooLarge)]);
+        server.try_send_to(second.local_addr().unwrap(), GameEvent { name: "small".into(), data: Vec::new() }).unwrap();
+        assert_eq!(server.try_send_to(first.local_addr().unwrap(), GameEvent { name: "gone".into(), data: Vec::new() }), Err(crate::SendError::NotConnected));
     }
 }

@@ -25,6 +25,8 @@ pub mod server;
 pub mod status;
 #[cfg(not(target_arch = "wasm32"))]
 mod transport;
+#[cfg(not(target_arch = "wasm32"))]
+pub use transport::SendError;
 
 pub use components::{
     NetworkId, NetworkOwner, NetworkPlayer, NetworkTransform, Networked, OwnerKind,

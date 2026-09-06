@@ -11,7 +11,7 @@ use bevy::prelude::*;
 
 use crate::messages::GameEvent;
 use crate::status::{ConnectionState, NetworkStatus};
-use crate::transport::{decode, encode, Packet, Peer, MAX_DATAGRAM};
+use crate::transport::{decode, encode, Packet, Peer, MAX_DATAGRAM, MAX_POLL_PACKETS};
 
 /// How often to re-send a `ConnectRequest` while waiting to be accepted.
 const CONNECT_RETRY: Duration = Duration::from_millis(250);
@@ -63,8 +63,8 @@ impl NetworkClient {
     /// de-duplicated). Also drives the handshake, acks, and resends.
     pub fn update(&mut self) -> Vec<GameEvent> {
         let mut delivered = Vec::new();
-        let mut buf = [0u8; MAX_DATAGRAM];
-        loop {
+        let mut buf = [0u8; MAX_DATAGRAM + 1];
+        for _ in 0..MAX_POLL_PACKETS {
             match self.socket.recv_from(&mut buf) {
                 Ok((n, from)) if from == self.server.addr => {
                     self.server.last_recv = Instant::now();
@@ -98,9 +98,15 @@ impl NetworkClient {
 
     /// Reliably send a `GameEvent` to the server (no-op until connected).
     pub fn send_event(&mut self, event: GameEvent) {
-        if self.connected {
-            self.server.send_reliable(&self.socket, event);
+        if let Err(error) = self.try_send_event(event) {
+            warn!("[network] Event not queued: {error}");
         }
+    }
+
+    /// Accept a reliable event or report backpressure/invalid input to the caller.
+    pub fn try_send_event(&mut self, event: GameEvent) -> Result<(), crate::SendError> {
+        if !self.connected { return Err(crate::SendError::NotConnected); }
+        self.server.send_reliable(&self.socket, event)
     }
 
     /// Best-effort graceful close (a single Disconnect datagram).

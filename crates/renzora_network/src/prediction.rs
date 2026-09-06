@@ -1,7 +1,4 @@
-//! Client-side prediction setup.
-//!
-//! Owned entities get `Predicted`, others get interpolated.
-//! Transform-only prediction first — full physics rollback deferred.
+//! Reserved client-side prediction API; no prediction or interpolation is implemented.
 
 use bevy::prelude::*;
 
@@ -22,7 +19,5 @@ pub fn smooth_correction(
 ) {
     if !status.is_connected() {
     }
-    // Lightyear handles the actual rollback/correction internally.
-    // This system is a hook point for custom smoothing if needed.
-    // For now, Lightyear's built-in interpolation handles everything.
+    // Retained as an API hook; the UDP transport does not supply snapshots.
 }

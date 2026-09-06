@@ -660,8 +660,8 @@ containment and library retirement.
 
 The measurements below count work avoided and storage retained; they are not FPS
 benchmarks. No Windows build or graphical/hardware performance test was run for
-this batch. Larger follow-ons remain: shared shader clock ownership, bounded
-reliable-network flow control, vendor dependency migration and fully incremental
+this batch. Larger follow-ons remain: shared shader clock ownership,
+vendor dependency migration and fully incremental
 render/input/navigation/physics processing. Completing this batch does not mean
 every audit finding or all repeated traversal has been eliminated.
 
@@ -713,9 +713,14 @@ script paths and other frame snapshots are still owned copies.
 Reliable UDP packets are encoded once and their bytes retained until acknowledged.
 The loopback regression sends 1,000 retries from the same allocation and checks
 identical received bytes, acknowledgement cleanup and duplicate suppression.
-The wire protocol and delivery policy are unchanged. Replay history still grows
-for the connection's lifetime; safely bounding it needs coordinated flow control,
-not simply forgetting old sequence numbers that could be retransmitted later.
+The subsequent bounded-network change retains the packet format but limits the
+send window to 1,024 sequence positions beyond the oldest unacknowledged event.
+A fixed 128-byte replay bitmap and sequence floor replace lifetime history.
+Accepted packets remain retryable; refused submissions report backpressure,
+oversized data or connection/sequence exhaustion instead of growing indefinitely.
+Server admission honors `max_clients`, and receive polls have a packet budget.
+Delivery remains unordered and unauthenticated; these are memory/work bounds,
+not internet-security guarantees. See [Multiplayer Overview](../multiplayer/overview.md).
 
 ## Gamepad input snapshots
 

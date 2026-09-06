@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 15:15 UTC
+
+- Bounded multiplayer retry memory and receive work, enforced the configured player limit, and added explicit reporting when messages cannot be queued. Corrected multiplayer documentation to describe the features actually available.
+
 ## September 6, 2026 — 15:14 UTC
 
 - Reduced repeated work in unchanged world-space UI and script scene-name lookups. Scene edits, font changes and script cleanup still refresh the affected data.
