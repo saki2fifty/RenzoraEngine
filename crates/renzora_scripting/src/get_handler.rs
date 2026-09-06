@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy::prelude::Resource;
 
@@ -75,9 +76,9 @@ thread_local! {
     /// Latest asset-load progress, refreshed by the execution system before
     /// each script tick and cleared after. `None` when no progress data is
     /// available (e.g. running outside the standard scene-load pipeline).
-    static ASSET_PROGRESS: RefCell<Option<AssetProgressSnapshot>> = const { RefCell::new(None) };
+    static ASSET_PROGRESS: RefCell<Option<Arc<AssetProgressSnapshot>>> = const { RefCell::new(None) };
     /// Latest scene-load state, refreshed alongside [`ASSET_PROGRESS`].
-    static SCENE_LOAD: RefCell<Option<SceneLoadSnapshot>> = const { RefCell::new(None) };
+    static SCENE_LOAD: RefCell<Option<Arc<SceneLoadSnapshot>>> = const { RefCell::new(None) };
 }
 
 /// Set the get-field handler for the current script execution.
@@ -106,22 +107,32 @@ pub fn clear_get_handler() {
 
 /// Stash the current asset-load progress for the script that's about to run.
 pub fn set_asset_progress(snapshot: AssetProgressSnapshot) {
-    ASSET_PROGRESS.with(|p| *p.borrow_mut() = Some(snapshot));
+    ASSET_PROGRESS.with(|p| *p.borrow_mut() = Some(Arc::new(snapshot)));
 }
 
 /// Read the asset-load progress snapshot stashed for this script tick.
 pub fn call_asset_progress() -> Option<AssetProgressSnapshot> {
-    ASSET_PROGRESS.with(|p| p.borrow().clone())
+    ASSET_PROGRESS.with(|p| p.borrow().as_deref().cloned())
 }
 
 /// Stash the current scene-load state for the script that's about to run.
 pub fn set_scene_load(snapshot: SceneLoadSnapshot) {
-    SCENE_LOAD.with(|p| *p.borrow_mut() = Some(snapshot));
+    SCENE_LOAD.with(|p| *p.borrow_mut() = Some(Arc::new(snapshot)));
 }
 
 /// Read the scene-load snapshot stashed for this script tick.
 pub fn call_scene_load() -> Option<SceneLoadSnapshot> {
-    SCENE_LOAD.with(|p| p.borrow().clone())
+    SCENE_LOAD.with(|p| p.borrow().as_deref().cloned())
+}
+
+pub(crate) fn set_shared_load_snapshots(
+    asset: Option<&Arc<AssetProgressSnapshot>>,
+    scene: Option<&Arc<SceneLoadSnapshot>>,
+) {
+    // Reset absent values too: a custom backend may have installed its own
+    // snapshot during the previous entry. Never leak that state to the next.
+    ASSET_PROGRESS.with(|p| *p.borrow_mut() = asset.cloned());
+    SCENE_LOAD.with(|p| *p.borrow_mut() = scene.cloned());
 }
 
 /// Read a single field from a component.
@@ -155,4 +166,43 @@ pub fn call_get_components(entity_name: Option<&str>) -> Vec<String> {
         let borrow = h.borrow();
         borrow.as_ref().map(|f| f(entity_name)).unwrap_or_default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_snapshots_share_storage_but_public_reads_remain_owned() {
+        let asset = Arc::new(AssetProgressSnapshot {
+            current_path: Some("models/example.glb".into()),
+            ..Default::default()
+        });
+        let scene = Arc::new(SceneLoadSnapshot {
+            current_path: Some("scenes/example.ron".into()),
+            ..Default::default()
+        });
+        for _ in 0..1000 {
+            set_shared_load_snapshots(Some(&asset), Some(&scene));
+            ASSET_PROGRESS
+                .with(|value| assert!(Arc::ptr_eq(value.borrow().as_ref().unwrap(), &asset)));
+            SCENE_LOAD.with(|value| assert!(Arc::ptr_eq(value.borrow().as_ref().unwrap(), &scene)));
+            let mut owned = call_asset_progress().unwrap();
+            owned.current_path.as_mut().unwrap().clear();
+            assert_eq!(
+                call_asset_progress().unwrap().current_path,
+                asset.current_path
+            );
+            clear_get_handler();
+            assert!(call_asset_progress().is_none());
+            assert!(call_scene_load().is_none());
+        }
+        set_asset_progress(AssetProgressSnapshot::default());
+        set_scene_load(SceneLoadSnapshot::default());
+        set_shared_load_snapshots(None, None);
+        assert!(call_asset_progress().is_none());
+        assert!(call_scene_load().is_none());
+        assert_eq!(Arc::strong_count(&asset), 1);
+        assert_eq!(Arc::strong_count(&scene), 1);
+    }
 }

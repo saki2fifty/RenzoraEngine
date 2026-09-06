@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 08:43 UTC
+
+- Shared loading-status snapshots between scripts, avoiding repeated path copies for scripts that never request them.
+
 ## September 6, 2026 — 08:39 UTC
 
 - Avoided repeatedly sending unchanged sound positions, while retrying failed movement updates and refreshing replacement audio backends.

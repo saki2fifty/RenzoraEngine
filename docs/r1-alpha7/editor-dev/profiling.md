@@ -643,6 +643,12 @@ Entity counting, state transitions and snapshot publication still run each frame
 `done` remains a persistent state and elapsed time continues after completion;
 this change does not turn completion into a one-frame event or freeze the clock.
 
+Script execution captures each loading bridge once per pass and shares its
+immutable snapshot between entries. Installing the per-script handlers no longer
+copies path strings; public reads still return independent owned snapshots.
+Handlers are cleared after execution, and custom overrides cannot leak into the
+next entry. A 1,000-pass regression covers both shared-input and legacy backends.
+
 ## UI sibling ordering
 
 Z-index synchronization retains a parent work set populated from changed child

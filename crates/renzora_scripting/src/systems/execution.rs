@@ -378,6 +378,17 @@ pub fn run_scripts(world: &mut World) {
         timers_just_finished: timers_finished,
     });
 
+    // Script commands are deferred; bridge data cannot change between entries.
+    // Clone paths once per pass instead of for scripts that never read them.
+    let asset_progress = world
+        .get_resource::<crate::AssetProgressBridge>()
+        .and_then(|bridge| bridge.snapshot.clone())
+        .map(std::sync::Arc::new);
+    let scene_load = world
+        .get_resource::<crate::SceneLoadBridge>()
+        .and_then(|bridge| bridge.snapshot.clone())
+        .map(std::sync::Arc::new);
+
     // Collect all script entities and their data
     struct ScriptEntityData {
         entity: Entity,
@@ -610,25 +621,10 @@ pub fn run_scripts(world: &mut World) {
                 }
             }));
 
-            // Snapshot asset-load progress for `asset_progress()` reads inside
-            // this script's tick. The data is published into the
-            // `AssetProgressBridge` resource by `renzora_engine` (which depends
-            // on this crate, so we can't reference its types directly — the
-            // bridge is the indirection that breaks the dep cycle).
-            {
-                let world_ref = unsafe { &*world_ptr };
-                if let Some(bridge) = world_ref.get_resource::<crate::AssetProgressBridge>() {
-                    if let Some(snapshot) = bridge.snapshot.clone() {
-                        crate::get_handler::set_asset_progress(snapshot);
-                    }
-                }
-                // Same indirection for `scene_load_state()`.
-                if let Some(bridge) = world_ref.get_resource::<crate::SceneLoadBridge>() {
-                    if let Some(snapshot) = bridge.snapshot.clone() {
-                        crate::get_handler::set_scene_load(snapshot);
-                    }
-                }
-            }
+            crate::get_handler::set_shared_load_snapshots(
+                asset_progress.as_ref(),
+                scene_load.as_ref(),
+            );
 
             // Execute script
             let engine = world.resource::<ScriptEngine>();
@@ -917,6 +913,38 @@ mod tests {
             let mut backend = crate::test_util::FakeBackend::new("frame", &["fake"]);
             backend.shared_inputs = shared;
             backend.mutate_owned_inputs = !shared;
+            backend.on_update = || {
+                assert_eq!(
+                    crate::get_handler::call_asset_progress()
+                        .unwrap()
+                        .current_path
+                        .as_deref(),
+                    Some("asset.glb")
+                );
+                assert_eq!(
+                    crate::get_handler::call_scene_load()
+                        .unwrap()
+                        .current_path
+                        .as_deref(),
+                    Some("scene.ron")
+                );
+                // A backend's explicit override must not affect the next entry.
+                crate::get_handler::set_asset_progress(crate::AssetProgressSnapshot::default());
+                crate::get_handler::set_scene_load(crate::SceneLoadSnapshot::default());
+                Ok(Vec::new())
+            };
+            world.insert_resource(crate::AssetProgressBridge {
+                snapshot: Some(crate::AssetProgressSnapshot {
+                    current_path: Some("asset.glb".into()),
+                    ..default()
+                }),
+            });
+            world.insert_resource(crate::SceneLoadBridge {
+                snapshot: Some(crate::SceneLoadSnapshot {
+                    current_path: Some("scene.ron".into()),
+                    ..default()
+                }),
+            });
             let calls = backend.state_handle();
             let mut engine = ScriptEngine::new();
             engine.add_backend(Box::new(backend));
@@ -926,6 +954,8 @@ mod tests {
             let entity = world.spawn((scripts, Name::new("actor"))).id();
             for _ in 0..1000 {
                 run_scripts(&mut world);
+                assert!(crate::get_handler::call_asset_progress().is_none());
+                assert!(crate::get_handler::call_scene_load().is_none());
             }
             let calls = calls.lock().unwrap();
             assert_eq!(calls.update_paths.len(), 2000);
