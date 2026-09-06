@@ -252,10 +252,14 @@ fn clear_avian_forces_2d(
 /// kinematic_slide) from scripts and blueprints.
 fn handle_physics_script_actions(
     trigger: On<renzora::ScriptAction>,
-    mut commands: Commands,
+    commands: Commands,
     mut pending_slides: Option<ResMut<PendingKinematicSlides>>,
     bodies_2d: Query<(), With<RuntimePhysics2d>>,
 ) {
+    #[cfg(any(feature = "avian3d", feature = "avian2d"))]
+    let mut commands = commands;
+    #[cfg(not(any(feature = "avian3d", feature = "avian2d")))]
+    let _ = commands;
     let action = trigger.event();
     let name = action.name.as_str();
 
@@ -333,9 +337,8 @@ fn handle_physics_script_actions(
             }
         }
         "apply_impulse" => {
-            // Avian 0.6.1 doesn't have a built-in one-shot impulse component in prelude.
-            // We'll apply it by inserting LinearVelocity which avian's solver will integrate.
-            // This is a simplified impulse. For a true additive impulse we'd need a solver hook.
+            // Legacy behavior replaces velocity here, just like set_velocity.
+            // Additive, mass-aware impulse semantics need a separate correction.
             if is_2d {
                 #[cfg(feature = "avian2d")]
                 commands

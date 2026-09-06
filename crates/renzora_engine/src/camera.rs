@@ -16,7 +16,7 @@ use bevy::light::{
 #[cfg(feature = "render_3d")]
 use bevy::pbr::AtmosphereSettings;
 // Fog is not attached on the web — see the note at the insert below.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "render_3d", not(target_arch = "wasm32")))]
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy::render::render_resource::{

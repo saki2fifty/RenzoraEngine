@@ -4,12 +4,12 @@ Add rigid bodies, colliders, and forces to your game with Avian, wrapped by the 
 
 ## Backends: Avian 3D + Avian 2D
 
-Renzora's physics live in `renzora_physics`, which wraps **[Avian](https://github.com/Jondolf/avian)** — both the `avian3d` and `avian2d` crates (0.6.1 line). The crate exposes a backend-agnostic API and converts your scene components into Avian's components at runtime. `PhysicsPlugin` is part of the engine's foundation (installed by `add_engine_plugins`), so physics is always available — in the editor, in a shipped game, and on the headless server. The two simulations coexist in one app and never touch each other's bodies.
+Renzora's physics live in `renzora_physics`, which wraps **[Avian](https://github.com/Jondolf/avian)** — both the `avian3d` and `avian2d` crates (0.7 line). The crate exposes a backend-agnostic API and converts your scene components into Avian's components at runtime. `PhysicsPlugin` is registered by the static runtime plugin wiring when physics is enabled. Standard runtime builds enable both backends; lean exports can omit either. When both are enabled, the two simulations coexist in one app and never touch each other's bodies.
 
 - In the **editor**, the companion `renzora_physics_editor` pauses the simulation at startup so your scene sits still until you press play (both worlds pause and resume together).
 - In a **shipped game** the simulation runs immediately.
 
-> Avian is the engine's only physics backend. The default feature set is `["avian", "avian2d", "lua"]`; the data components below are backend-agnostic by design.
+> `renzora_physics` has no default backend features. The runtime selects `avian3d` and `avian2d` through `physics_3d` and `physics_2d`; its `scripting` feature enables script declarations without linking an interpreter. The data components below are backend-agnostic by design.
 
 ### Which backend does an entity get?
 

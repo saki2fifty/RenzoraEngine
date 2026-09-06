@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 07:13 UTC
+
+- Cleaned up optional-build warnings and corrected the physics backend documentation to match current builds.
+
 ## September 6, 2026 — 07:10 UTC
 
 - Reused loading-progress filename storage instead of copying unchanged paths every frame, and clarified completion and elapsed-time behavior.
