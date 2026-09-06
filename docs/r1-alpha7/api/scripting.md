@@ -457,6 +457,11 @@ An HTTP error status is **not** a failure here: a 404 arrives at `on_http` with 
 >
 > Two limits on `asset_progress()` worth knowing before you promise a percentage: it counts glTF model loads (via `PendingMeshInstanceRehydrate`), not textures, audio or materials outside that path; and `total_bytes`/`loaded_bytes` come from the rpak index, so they are **zero in the editor or a `--project` run** — fall back to the file-count ratio there.
 
+`done` is a persistent state, not a one-frame event: it remains until another
+pending load starts. `elapsed_secs` continues advancing after completion, so it
+is not a frozen final load duration. Detect the transition in your script if you
+need a one-time completion action.
+
 ## Events
 
 | Function | Description |

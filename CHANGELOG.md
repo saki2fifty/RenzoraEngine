@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 07:10 UTC
+
+- Reused loading-progress filename storage instead of copying unchanged paths every frame, and clarified completion and elapsed-time behavior.
+
 ## September 6, 2026 — 07:05 UTC
 
 - Released navigation target records when agents or their required components are removed, including during scene teardown.

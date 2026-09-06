@@ -607,3 +607,12 @@ slots are removed; reconnecting into a free slot starts with fresh values. The
 1,000-frame regression checks retained value storage, held/edge buttons, axis
 values, disconnect and reuse. Input still updates every frame, including while
 scripts are inactive; timer and preview behavior are unchanged.
+
+## Load-progress path storage
+
+Asset tracking and the asset/scene scripting bridges reuse unchanged filename
+storage rather than cloning it each update. A headless 1,000-update regression
+checks all three path buffers, path replacement/removal and an advancing clock.
+Entity counting, state transitions and snapshot publication still run each frame.
+`done` remains a persistent state and elapsed time continues after completion;
+this change does not turn completion into a one-frame event or freeze the clock.

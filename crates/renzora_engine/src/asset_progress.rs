@@ -9,7 +9,7 @@
 //! and the script can fall back to the file-count ratio.
 //!
 //! The single [`AssetLoadProgress`] resource is the source of truth.
-//! Scripts read it through the `asset_progress()` Lua/Rhai binding (the
+//! Scripts read it through the `asset_progress()` binding (the
 //! scripting crate copies it into a thread-local before each script
 //! tick — see `renzora_scripting::asset_progress_handler`).
 
@@ -21,6 +21,20 @@ use crate::scene_io;
 use crate::Vfs;
 use renzora::MeshInstanceData;
 
+fn update_progress_path(target: &mut Option<String>, source: Option<&str>) {
+    if target.as_deref() == source {
+        return;
+    }
+    match source {
+        Some(path) => {
+            let text = target.get_or_insert_with(String::new);
+            text.clear();
+            text.push_str(path);
+        }
+        None => *target = None,
+    }
+}
+
 /// Lifecycle state for the asset-load progress tracker.
 #[derive(Default, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadProgressState {
@@ -30,10 +44,8 @@ pub enum LoadProgressState {
     Idle,
     /// At least one asset is still loading.
     Loading,
-    /// Every tracked asset finished. Holds for one frame after the last
-    /// pending entity clears so scripts polling on `on_update` get exactly
-    /// one tick where they can react to "loading just finished" before
-    /// the next scene swap drops us back into `Loading`.
+    /// Every tracked asset finished. Persists until another pending load
+    /// starts; this is a state, not a one-frame completion event.
     Done,
 }
 
@@ -55,9 +67,9 @@ pub struct AssetLoadProgress {
     /// Path of the most recently observed pending file. Useful as
     /// "currently loading: X" UI text.
     pub current_path: Option<String>,
-    /// Wall-clock seconds since the tracker last entered `Loading`.
+    /// Wall-clock seconds since tracking began, including time after completion.
     pub elapsed_secs: f32,
-    /// Wall-clock seconds at which `Loading` started. Used to compute
+    /// Wall-clock seconds at which the tracking interval started. Used to compute
     /// `elapsed_secs`. Internal — scripts should read `elapsed_secs`.
     started_at: Option<f64>,
 }
@@ -128,7 +140,7 @@ pub fn tick_asset_load_progress(
     #[cfg_attr(not(feature = "gltf"), allow(unused_mut))]
     let mut pending_bytes: u64 = 0;
     #[cfg_attr(not(feature = "gltf"), allow(unused_mut))]
-    let mut current: Option<String> = None;
+    let mut current: Option<&str> = None;
     #[cfg(feature = "gltf")]
     for data in pending.iter() {
         if let Some(path) = data.model_path.as_deref() {
@@ -139,7 +151,7 @@ pub fn tick_asset_load_progress(
                 }
             }
             if current.is_none() {
-                current = Some(path.to_string());
+                current = Some(path);
             }
         }
     }
@@ -183,16 +195,13 @@ pub fn tick_asset_load_progress(
         .map(|s| (now_secs - s).max(0.0) as f32)
         .unwrap_or(0.0);
 
-    *progress = AssetLoadProgress {
-        state: next_state,
-        total_files,
-        loaded_files,
-        total_bytes,
-        loaded_bytes,
-        current_path: current,
-        elapsed_secs: elapsed,
-        started_at: progress.started_at,
-    };
+    update_progress_path(&mut progress.current_path, current);
+    progress.state = next_state;
+    progress.total_files = total_files;
+    progress.loaded_files = loaded_files;
+    progress.total_bytes = total_bytes;
+    progress.loaded_bytes = loaded_bytes;
+    progress.elapsed_secs = elapsed;
 }
 
 /// No-op stand-in when scripting is stripped — the bridge exists only so
@@ -218,16 +227,15 @@ pub fn publish_asset_progress_to_bridge(
         LoadProgressState::Loading => "loading",
         LoadProgressState::Done => "done",
     };
-    bridge.snapshot = Some(renzora_scripting::AssetProgressSnapshot {
-        state,
-        total_files: progress.total_files,
-        loaded_files: progress.loaded_files,
-        total_bytes: progress.total_bytes,
-        loaded_bytes: progress.loaded_bytes,
-        current_path: progress.current_path.clone(),
-        elapsed_secs: progress.elapsed_secs,
-        fraction: progress.fraction(),
-    });
+    let snapshot = bridge.snapshot.get_or_insert_with(Default::default);
+    snapshot.state = state;
+    snapshot.total_files = progress.total_files;
+    snapshot.loaded_files = progress.loaded_files;
+    snapshot.total_bytes = progress.total_bytes;
+    snapshot.loaded_bytes = progress.loaded_bytes;
+    update_progress_path(&mut snapshot.current_path, progress.current_path.as_deref());
+    snapshot.elapsed_secs = progress.elapsed_secs;
+    snapshot.fraction = progress.fraction();
 }
 
 /// No-op stand-in when scripting is stripped; see
@@ -258,9 +266,132 @@ pub fn publish_scene_load_to_bridge(
         SceneLoadPhase::Ready => "ready",
         SceneLoadPhase::Failed => "failed",
     };
-    bridge.snapshot = Some(renzora_scripting::SceneLoadSnapshot {
-        phase,
-        current_path: state.current_path.clone(),
-        progress: state.progress,
-    });
+    let snapshot = bridge.snapshot.get_or_insert_with(Default::default);
+    snapshot.phase = phase;
+    update_progress_path(&mut snapshot.current_path, state.current_path.as_deref());
+    snapshot.progress = state.progress;
+}
+
+#[cfg(all(test, feature = "gltf", feature = "scripting"))]
+mod tests {
+    use super::*;
+    use renzora_scripting::{AssetProgressBridge, SceneLoadBridge};
+
+    #[test]
+    fn progress_retains_paths_without_changing_lifecycle_or_elapsed_time() {
+        let mut app = App::new();
+        app.init_resource::<AssetLoadProgress>()
+            .init_resource::<AssetProgressBridge>()
+            .init_resource::<SceneLoadBridge>()
+            .init_resource::<Time>()
+            .insert_resource(scene_io::SceneLoadState {
+                phase: scene_io::SceneLoadPhase::Loading,
+                current_path: Some("scene.ron".into()),
+                progress: 0.25,
+            })
+            .add_systems(
+                Update,
+                (
+                    tick_asset_load_progress,
+                    publish_asset_progress_to_bridge,
+                    publish_scene_load_to_bridge,
+                )
+                    .chain(),
+            );
+        let entity = app
+            .world_mut()
+            .spawn((
+                MeshInstanceData {
+                    model_path: Some("model.glb".into()),
+                },
+                scene_io::PendingMeshInstanceRehydrate(Handle::default()),
+            ))
+            .id();
+        app.update();
+        let pointers = |world: &World| {
+            (
+                world
+                    .resource::<AssetLoadProgress>()
+                    .current_path
+                    .as_ref()
+                    .unwrap()
+                    .as_ptr(),
+                world
+                    .resource::<AssetProgressBridge>()
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .current_path
+                    .as_ref()
+                    .unwrap()
+                    .as_ptr(),
+                world
+                    .resource::<SceneLoadBridge>()
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .current_path
+                    .as_ref()
+                    .unwrap()
+                    .as_ptr(),
+            )
+        };
+        let storage = pointers(app.world());
+        for _ in 0..1_000 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(10));
+            app.update();
+            assert_eq!(storage, pointers(app.world()));
+            let progress = app.world().resource::<AssetLoadProgress>();
+            assert!(progress.is_loading());
+            assert_eq!(progress.total_files, 1);
+            assert_eq!(progress.loaded_files, 0);
+        }
+        assert!(app.world().resource::<AssetLoadProgress>().elapsed_secs >= 9.99);
+        app.world_mut()
+            .get_mut::<MeshInstanceData>(entity)
+            .unwrap()
+            .model_path = Some("other.glb".into());
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<AssetLoadProgress>()
+                .current_path
+                .as_deref(),
+            Some("other.glb")
+        );
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<scene_io::PendingMeshInstanceRehydrate>();
+        app.update();
+        assert!(app.world().resource::<AssetLoadProgress>().is_done());
+        assert!(app
+            .world()
+            .resource::<AssetProgressBridge>()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .current_path
+            .is_none());
+        let elapsed = app.world().resource::<AssetLoadProgress>().elapsed_secs;
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs(1));
+        app.update();
+        assert!(app.world().resource::<AssetLoadProgress>().is_done());
+        assert!(app.world().resource::<AssetLoadProgress>().elapsed_secs > elapsed);
+        app.world_mut()
+            .resource_mut::<scene_io::SceneLoadState>()
+            .current_path = None;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<SceneLoadBridge>()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .current_path
+            .is_none());
+    }
 }
