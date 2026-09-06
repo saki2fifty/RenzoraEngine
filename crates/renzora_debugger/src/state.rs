@@ -696,6 +696,7 @@ pub fn update_system_timing(world: &mut World) {
     world.resource_mut::<SystemTimingState>().schedule_timings = timings;
 }
 
+
 /// Count live entities carrying `component`, by scanning archetypes — the only
 /// way to count by a runtime [`ComponentId`] (registered attribution rules are
 /// type-erased, so a static query isn't possible).
@@ -1102,4 +1103,67 @@ pub fn update_ecs_stats(world: &mut World) {
     state.archetype_count = archetype_count;
     state.top_archetypes = top_archetypes;
     state.component_stats = stats;
+}
+
+#[cfg(test)]
+mod system_timing_tests {
+    use super::*;
+    use renzora_ember::dock::{Dock, DockTree, FixedDock};
+
+    #[test]
+    fn hidden_profiler_does_not_advance_and_visible_docks_resume() {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs(1));
+        app.insert_resource(time)
+            .insert_resource(SystemTimingState {
+                schedule_timings: Vec::new(),
+                update_interval: 10_000.0,
+                time_since_update: 0.0,
+                limitation_note: String::new(),
+            })
+            .add_systems(
+                Update,
+                update_system_timing.run_if(renzora_ember::dock::panel_active("system_profiler")),
+            );
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .resource::<SystemTimingState>()
+                .time_since_update,
+            0.0
+        );
+        app.insert_resource(Dock {
+            tree: DockTree::tabs(&["system_profiler"]),
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<SystemTimingState>()
+                .time_since_update,
+            1.0
+        );
+        app.world_mut().resource_mut::<Dock>().tree = DockTree::Empty;
+        app.insert_resource(FixedDock {
+            tree: DockTree::tabs(&["system_profiler"]),
+            ..default()
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<SystemTimingState>()
+                .time_since_update,
+            2.0
+        );
+        app.world_mut().resource_mut::<FixedDock>().tree = DockTree::Empty;
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<SystemTimingState>()
+                .time_since_update,
+            2.0
+        );
+    }
 }

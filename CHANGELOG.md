@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 06:06 UTC
 
 - Kept script components attached during execution and shared their read-handler name lookup, reducing repeated structural changes and copying.
+- Stopped the hidden System Profiler from refreshing its view data; opening it resumes updates.
 
 ## September 6, 2026 — 05:46 UTC
 

@@ -165,7 +165,9 @@ impl Plugin for DebuggerPlugin {
         );
         app.add_systems(
             Update,
-            update_system_timing.run_if(in_state(SplashState::Editor)),
+            update_system_timing
+                .run_if(in_state(SplashState::Editor))
+                .run_if(renzora_ember::dock::panel_active("system_profiler")),
         );
         // The entity-inventory pass iterates *every* ScriptComponent in the scene
         // each frame. That was once a full-scene scan (272k on a stress city,

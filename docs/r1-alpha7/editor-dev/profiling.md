@@ -501,3 +501,11 @@ regression observes zero component removals and preserves initialization and
 disabled entries. The reflection read handlers share one immutable name lookup
 per pass rather than cloning that map for each handler. Other public context
 snapshots are still owned copies; this is not a complete snapshot redesign.
+
+## Hidden System Profiler
+
+The System Profiler refreshes its view data only while its tab is active in a
+main, fixed or floating dock. Its existing refresh interval remains in effect.
+Underlying diagnostic capture stays enabled; only the view's sorting, formatting
+and entity-count scans are gated. The headless gate regression checks 1,000
+hidden updates and resumption in the main and fixed docks.
