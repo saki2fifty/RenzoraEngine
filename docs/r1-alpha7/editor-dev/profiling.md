@@ -462,8 +462,14 @@ unspecified, as before.
 Contact-name strings retain capacity across enter/exit notifications. A
 two-entity regression checks 1,000 alternating contact frames without growing
 the warmed name buffers. Longer names can still grow those buffers; their
-capacity is retained until the component is dropped. Contact-set allocation
-and per-frame contact traversal are unchanged.
+capacity is retained until the component is dropped.
+
+Both backends compare live contacts against the prior snapshot before rebuilding
+the contact set. Unchanged contacts keep that set, while one-frame flags and
+names still clear. A 1,000-frame stable-contact regression performs zero rebuilds.
+Contact traversal still happens each frame, and a transition can require a
+second traversal to collect the replacement set. This is not an event-driven
+update or a measured FPS improvement.
 
 Velocity mirrors still read the current backend every frame, but only mark
 `PhysicsReadState` changed when the velocity or speed bits differ. Missing

@@ -148,16 +148,9 @@ pub fn update_collision_read_state(
     names: Query<&Name>,
 ) {
     for (entity, mut rs) in &mut q {
-        let mut current: std::collections::HashSet<Entity> = std::collections::HashSet::new();
-        for pair in collisions.collisions_with(entity) {
-            let other = if pair.collider1 == entity {
-                pair.collider2
-            } else {
-                pair.collider1
-            };
-            current.insert(other);
-        }
-        diff_collision_state(&mut rs, current, &names);
+        refresh_collision_state(&mut rs, &names, || {
+            collisions.entities_colliding_with(entity)
+        });
     }
 }
 
@@ -169,16 +162,35 @@ pub fn update_collision_read_state_2d(
     names: Query<&Name>,
 ) {
     for (entity, mut rs) in &mut q {
-        let mut current: std::collections::HashSet<Entity> = std::collections::HashSet::new();
-        for pair in collisions.collisions_with(entity) {
-            let other = if pair.collider1 == entity {
-                pair.collider2
-            } else {
-                pair.collider1
-            };
-            current.insert(other);
-        }
-        diff_collision_state(&mut rs, current, &names);
+        refresh_collision_state(&mut rs, &names, || {
+            collisions.entities_colliding_with(entity)
+        });
+    }
+}
+
+/// `contacts` must yield unique collider entities from an unchanged graph.
+/// Avian's ContactGraph enforces one edge per pair; both callers borrow it for
+/// the entire refresh. A transition may need a second traversal, but a settled
+/// contact set needs no allocation, rehashing into a new set, or pool retention.
+#[cfg(any(feature = "avian3d", feature = "avian2d"))]
+fn refresh_collision_state<I: Iterator<Item = Entity>>(
+    state: &mut CollisionReadState,
+    names: &Query<&Name>,
+    contacts: impl Fn() -> I,
+) {
+    let mut count = 0;
+    let unchanged = contacts().all(|entity| {
+        count += 1;
+        state.prev.contains(&entity)
+    }) && count == state.prev.len();
+    if unchanged {
+        state.colliding = count != 0;
+        state.entered = false;
+        state.exited = false;
+        state.entered_name.clear();
+        state.exited_name.clear();
+    } else {
+        diff_collision_state(state, contacts().collect(), names);
     }
 }
 
@@ -215,6 +227,53 @@ mod tests {
     use super::*;
     use bevy::ecs::system::SystemState;
     use std::collections::HashSet;
+
+    #[test]
+    fn stable_contacts_skip_rebuild_and_transitions_keep_frame_semantics() {
+        use std::cell::Cell;
+        let mut world = World::new();
+        let a = world.spawn(Name::new("a")).id();
+        let b = world.spawn(Name::new("b")).id();
+        let c = world.spawn(Name::new("c")).id();
+        let mut query = SystemState::<Query<&Name>>::new(&mut world);
+        let names = query.get(&world).expect("name query");
+        let mut state = CollisionReadState::default();
+        refresh_collision_state(&mut state, &names, || [a, b].into_iter());
+        assert!(state.entered && state.colliding && !state.exited);
+        let calls = Cell::new(0);
+        let original_order: Vec<_> = state.prev.iter().copied().collect();
+        for _ in 0..1000 {
+            refresh_collision_state(&mut state, &names, || {
+                calls.set(calls.get() + 1);
+                // Source iteration order is not part of set equality.
+                [b, a].into_iter()
+            });
+            assert!(state.colliding && !state.entered && !state.exited);
+            assert!(state.entered_name.is_empty() && state.exited_name.is_empty());
+            assert_eq!(
+                state.prev.iter().copied().collect::<Vec<_>>(),
+                original_order
+            );
+        }
+        // A rebuild requests a second iterator; stable frames never do.
+        assert_eq!(calls.get(), 1000);
+        refresh_collision_state(&mut state, &names, || [b, c].into_iter());
+        assert!(state.entered && state.exited && state.colliding);
+        assert_eq!(state.entered_name, "c");
+        assert_eq!(state.exited_name, "a");
+        refresh_collision_state(&mut state, &names, || [b].into_iter());
+        assert!(!state.entered && state.exited && state.colliding);
+        assert_eq!(state.exited_name, "c");
+        refresh_collision_state(&mut state, &names, std::iter::empty);
+        assert!(!state.entered && state.exited && !state.colliding);
+        assert_eq!(state.exited_name, "b");
+        refresh_collision_state(&mut state, &names, std::iter::empty);
+        assert!(!state.entered && !state.exited && !state.colliding);
+        assert!(state.exited_name.is_empty());
+        eprintln!(
+            "stable contacts: 1000 frames, 1000 comparison traversals, zero rebuild traversals"
+        );
+    }
 
     #[test]
     fn collision_names_reuse_capacity_without_mixing_entities() {
