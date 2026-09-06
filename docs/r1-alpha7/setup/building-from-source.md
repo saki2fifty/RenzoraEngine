@@ -104,3 +104,8 @@ static build and require a restart. Existing stale build files are not deleted.
 The former native-build helper now only stages built-in plugin artwork, shared
 by checkout packaging and engine-extension packages. Compilation uses the current
 cached script/plugin service or engine build kit, not the retired SDK compiler.
+
+The optional `docker/upx-compress.sh` helper recognizes flat editor/runtime
+packages as well as older nested layouts. It targets host executables and plugin
+libraries, not retired engine SDK libraries. Docker staging likewise leaves old
+shared-engine cache files out of the staged package without deleting the cache.

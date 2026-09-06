@@ -9,6 +9,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Stopped release packaging from including the retired SDK archive and corrected the release setup instructions. Existing input files are left intact.
 - Removed the old shared-engine build option and its libraries. Normal staging no longer searches for or copies those retired engine files.
 - Removed unused legacy compiler helpers while preserving built-in plugin artwork in editor and engine-extension packages.
+- Updated optional compression to recognize the current editor/runtime package layout, and stopped Docker staging from copying retired shared-engine libraries.
 
 ## September 6, 2026 — 00:00 UTC
 

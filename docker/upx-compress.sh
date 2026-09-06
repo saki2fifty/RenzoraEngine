@@ -9,15 +9,12 @@
 # squeezing the last few percent out with `--brute` where the CPU time is free.
 #
 # Usage:
-#   ./scripts/upx-compress.sh                       # compress every platform under dist/
-#   ./scripts/upx-compress.sh dist/windows-x64      # just one platform
-#   ./scripts/upx-compress.sh dist/windows-x64 dist/linux-x64
+#   ./docker/upx-compress.sh                       # compress every platform under dist/
+#   ./docker/upx-compress.sh dist/windows-x64      # just one platform
+#   ./docker/upx-compress.sh dist/windows-x64 dist/linux-x64
 #
 # Targets per build (editor / runtime):
-#   - host binary (renzora{,.exe} / renzora-runtime{,.exe})
-#   - SDK dylibs (renzora, renzora_editor) on whatever extension the
-#     platform produces (renzora_postprocess folded into renzora)
-#   - bevy_dylib (any hashed name)
+#   - editor and runtime executables (including legacy runtime alias)
 #   - everything in plugins/
 #
 # `--brute` is the slowest UPX setting (tries every algorithm + filter
@@ -57,13 +54,11 @@ else
     done
 fi
 
-# Specific binaries we care about, by basename. The `bevy_dylib*` and
-# `plugins/*` cases are handled by glob below since their names vary.
-SDK_NAMES=(
+# Only current host executables; stale engine libraries are not deployable.
+HOST_NAMES=(
     "renzora" "renzora.exe"
+    "renzora-editor" "renzora-editor.exe"
     "renzora-runtime" "renzora-runtime.exe"
-    "renzora.dll" "librenzora.so" "librenzora.dylib"
-    "renzora_editor.dll" "librenzora_editor.so" "librenzora_editor.dylib"
 )
 
 human_size() {
@@ -107,16 +102,12 @@ collect_files() {
     FILES=()
 
     local name
-    for name in "${SDK_NAMES[@]}"; do
+    for name in "${HOST_NAMES[@]}"; do
         [ -f "$out/$name" ] && FILES+=("$out/$name")
     done
 
-    # bevy_dylib has a hash suffix (bevy_dylib-abc123.dll, libbevy_dylib-….so).
     local f
     shopt -s nullglob
-    for f in "$out"/bevy_dylib*.dll "$out"/libbevy_dylib*.so "$out"/libbevy_dylib*.dylib; do
-        [ -f "$f" ] && FILES+=("$f")
-    done
 
     # Plugins.
     if [ -d "$out/plugins" ]; then
@@ -134,7 +125,8 @@ for platform in "${PLATFORMS[@]}"; do
     [ -d "$platform" ] || { echo "skip: $platform (not a directory)"; continue; }
     platform="${platform%/}"
 
-    for target in editor runtime server; do
+    # Current packages are flat; retain support for older nested layouts.
+    for target in . editor runtime server; do
         out="$platform/$target"
         [ -d "$out" ] || continue
 

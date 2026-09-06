@@ -178,120 +178,31 @@ stage_bin() {
     return 0
 }
 
-# ── Helper: copy shared libraries for a platform ────────────────────────────
+# ── Helper: copy standalone libraries for a platform ────────────────────────
 # Usage: copy_shared_libs <target-dir> <output-dir> <lib-ext>
 copy_shared_libs() {
     local SRC="$1"
     local OUT="$2"
     local EXT="$3"
-    local HOST_BIN="$4"
-    local RUST_TARGET="${5:-native}"
 
     mkdir -p "$OUT/plugins"
 
-    # ── std, the toolchain's own shared runtime ──────────────────────────────
-    #
-    # A `copy_std` helper used to do this and was deleted when Bevy went static,
-    # on the reasoning that with nothing sharing a Bevy there was nothing left to
-    # share a std with either. That reasoning expired: `dynamic_linking` is back
-    # in the default features, so `-C prefer-dynamic` applies again and BOTH
-    # executables import `std-<hash>.$EXT`.
-    #
-    # Missing it does not degrade gracefully. The OS loader refuses the binary
-    # before `main` with a dialog naming the file and nothing else:
-    #
-    #     The code execution cannot proceed because std-<hash>.dll was not found
-    #
-    # Read out of the binary's own import strings, for the same reason
-    # `bevy_dylib` is below: the hash is derived from the toolchain, so globbing
-    # the sysroot or hardcoding a name ships the wrong one the moment the pin in
-    # `rust-toolchain.toml` moves. `--print target-libdir` is asked for the
-    # TARGET's sysroot, which for a cross build is not the host's.
-    local STD_WANT=""
-    [ -n "$HOST_BIN" ] && [ -f "$HOST_BIN" ] && \
-        STD_WANT=$(grep -aoE "(lib)?std-[0-9a-f]+\.$EXT" "$HOST_BIN" 2>/dev/null | head -1)
-    if [ -n "$STD_WANT" ]; then
-        local LIBDIR="" STD_SRC="" cand
-        if [ "$RUST_TARGET" = "native" ]; then
-            LIBDIR=$(rustc --print target-libdir 2>/dev/null || true)
-        else
-            LIBDIR=$(rustc --print target-libdir --target "$RUST_TARGET" 2>/dev/null || true)
-        fi
-        for cand in "$LIBDIR/$STD_WANT" "$SRC/deps/$STD_WANT" "$SRC/$STD_WANT"; do
-            [ -n "$cand" ] && [ -f "$cand" ] && { STD_SRC="$cand"; break; }
-        done
-        if [ -n "$STD_SRC" ]; then
-            cp "$STD_SRC" "$OUT/"
-            echo "    staged $STD_WANT"
-        else
-            # Loud, because the alternative is an artifact that looks complete and
-            # cannot start on any machine.
-            echo "WARN: $HOST_BIN imports $STD_WANT but it was not found (looked in ${LIBDIR:-<no libdir>})"
-            echo "      the shipped binary will refuse to launch"
-        fi
-    fi
 
-    # bevy_dylib — copy the EXACT one the host binary imports, NOT just the
-    # newest by mtime. deps/ accumulates one bevy_dylib-<hash> per feature
-    # config across builds; picking by mtime can copy a hash the binary does
-    # not link, giving "bevy_dylib-<hash>.dll not found" at runtime.
-    local WANT=""
-    [ -n "$HOST_BIN" ] && [ -f "$HOST_BIN" ] && \
-        WANT=$(grep -aoE "(lib)?bevy_dylib-[0-9a-f]+\.$EXT" "$HOST_BIN" 2>/dev/null | head -1)
-    local BEVY_DLL=""
-    [ -n "$WANT" ] && BEVY_DLL=$(ls "$SRC"/deps/"$WANT" 2>/dev/null | head -1)
-    # Never stage a cached Bevy dylib when this static runtime imports none.
-    [ -n "$BEVY_DLL" ] && cp "$BEVY_DLL" "$OUT/"
-
-    # SDK — shared dylibs that the host binary AND every distribution
-    # plugin link against. Each ships once next to the host, not in
-    # plugins/. Adding a new SDK dylib (e.g. another contract crate
-    # promoted to dual-mode dylib) means listing it here.
-    # NOTE: `renzora_postprocess` is no longer here — its framework folded
-    # into `renzora` (module `renzora::postprocess`), so it ships inside
-    # renzora.{dll,so,dylib} and emits no dylib of its own.
-    # NOTE: the "static-Bevy split removed all of these" note that used to sit
-    # here has been out of date since native plugins landed. `dynamic_linking` is
-    # back in `renzora_app`'s default features, so a desktop build produces
-    # `bevy_dylib` (handled above), `renzora_dylib` and `renzora_ember_dylib`
-    # again — and the executables IMPORT them. Missing one does not degrade
-    # gracefully: the OS loader refuses the binary before `main`, with a dialog
-    # naming a filename and nothing else.
-    #
-    # `librenzora.$EXT` / `librenzora_editor.$EXT` stay in the list only so a
-    # stale dylib left in a warm cargo cache from before that change lands beside
-    # the exe rather than being swept into plugins/ below.
-    for f in \
-        "$SRC/librenzora_dylib.$EXT"        "$SRC/renzora_dylib.$EXT" \
-        "$SRC/librenzora_ember_dylib.$EXT"  "$SRC/renzora_ember_dylib.$EXT" \
-        "$SRC/librenzora.$EXT"              "$SRC/renzora.$EXT" \
-        "$SRC/librenzora_editor.$EXT"       "$SRC/renzora_editor.$EXT"; do
-        [ -f "$f" ] && [ -f "$HOST_BIN" ] && grep -aqF "$(basename "$f")" "$HOST_BIN" && cp "$f" "$OUT/"
-    done
-
-    # Plugins — every cdylib distribution plugin output. Excludes the
-    # SDK dylibs above, the wasm-only `renzora_preview` (it produces a
+    # Plugins — exclude stale engine images and the wasm-only `renzora_preview` (it produces a
     # cdylib for desktop too but isn't an engine plugin — no `add!`),
     # and rust-internal artifacts (libstd, renzora_macros).
     for f in "$SRC"/*."$EXT"; do
         [ -f "$f" ] || continue
         local base=$(basename "$f")
         [[ "$base" == *bevy_dylib* ]] && continue
-        # The two shared engine images, staged beside the exe just above. Swept
-        # into plugins/ they would be ~37 MB of duplicate dead weight AND get
-        # `dlopen`'d by the C-ABI loader looking for an entry point they do not
-        # export.
+        # Warm caches can retain removed engine images; never load them as plugins.
         [[ "$base" == *renzora_dylib* ]] && continue
         [[ "$base" == *renzora_ember_dylib* ]] && continue
-        [[ "$base" == *libstd-* ]] && continue
+        [[ "$base" == libstd-* || "$base" == std-* ]] && continue
         [[ "$base" == *renzora_macros* ]] && continue
         [[ "$base" == librenzora."$EXT" ]] && continue
         [[ "$base" == renzora."$EXT" ]] && continue
-        # Editor bundle (renzora_editor.*) ships beside the exe (copied above),
-        # never in plugins/. Also defensively skip the pre-rename name in case a
-        # stale renzora_editor_bundle.* lingers in the cargo cache (cargo doesn't
-        # delete a renamed crate's old dylib) — otherwise it'd be shipped as 100+
-        # MB of dead weight and (now) skipped by the loader as a misplaced bundle.
+        # Retired editor bundles may also remain in a warm cache.
         [[ "$base" == librenzora_editor."$EXT" ]] && continue
         [[ "$base" == renzora_editor."$EXT" ]] && continue
         [[ "$base" == librenzora_editor_bundle."$EXT" ]] && continue
@@ -433,13 +344,6 @@ build_updater() {
     return 0
 }
 
-# NOTE: staging `std-<hash>.{dll,so,dylib}` lives in `copy_shared_libs` above.
-# It was deleted from here when Bevy went static, on the reasoning that nothing
-# was left to share a std with. `dynamic_linking` is back in the default features
-# and brings `-C prefer-dynamic` with it, so the executables import a hashed std
-# again and it has to ship. The cost that argument named — a toolchain-versioned
-# import under a hashed filename — is real and is simply the price of the shared
-# images.
 
 # ── Compress the staged executables with UPX ─────────────────────────────────
 # Usage: compress_binaries <platform-name> <exe-suffix>
@@ -624,22 +528,17 @@ build_desktop() {
     local SUF=""
     [ "$EXT" = "dll" ] && SUF=".exe"
 
-    local HOST_BIN
     case "$FEATURE" in
         editor)
             stage_bin "$SRC/renzora$SUF" "$OUT/renzora$SUF" || true
-            HOST_BIN="$OUT/renzora$SUF"
             ;;
         runtime)
             # Runtime-only lane: rename so the artefact is self-describing.
             stage_bin "$SRC/renzora$SUF" "$OUT/renzora-runtime$SUF" || true
-            HOST_BIN="$OUT/renzora-runtime$SUF"
             ;;
     esac
 
-    # The triple matters: `std-<hash>` must come from the TARGET's sysroot, which
-    # for a cross build is not the host's.
-    copy_shared_libs "$SRC" "$OUT" "$EXT" "$HOST_BIN" "$RUST_TARGET"
+    copy_shared_libs "$SRC" "$OUT" "$EXT"
     return 0
 }
 
