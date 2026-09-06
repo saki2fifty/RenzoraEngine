@@ -57,6 +57,9 @@ fn flat_release_keeps_source_sdk_and_omits_legacy_archive_without_deleting_it() 
     write(&platform.join("sdk.tar.zst"), b"retired archive");
     package(root.path());
     let engine = listing(&root.path().join("out/windows-x64.zip"));
+    assert!(!engine.contains("renzora_dylib.dll"));
+    assert!(!engine.contains("std-deadbeef.dll"));
+    assert!(engine.lines().any(|p| p == "plugins/example.dll"));
     assert!(engine.lines().any(|p| p == "rust-sdk/Cargo.toml"));
     assert!(!engine
         .lines()

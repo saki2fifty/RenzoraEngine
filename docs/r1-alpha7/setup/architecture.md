@@ -6,7 +6,7 @@ Renzora is built around Bevy's ECS: components hold entity data, resources hold 
 
 `renzora_runtime` provides the shared runtime assembly. `renzora_editor` installs the editor on top of it. The native engine-plugin build creates two executables: `renzora-editor` and `renzora`. External play mode launches the sibling runtime; both files and their companion files must be staged together.
 
-Ordinary native builds also use this separate executable pair. The editor library is `rlib`-only, and default builds do not enable Bevy dynamic linking. Placing an old editor library beside `renzora` cannot turn a game into the editor. Legacy SDK utilities remain pending cleanup; they are not the supported extension interface.
+Ordinary native builds also use this separate executable pair. The editor library is `rlib`-only, and default builds do not enable Bevy dynamic linking. Placing an old editor library beside `renzora` cannot turn a game into the editor. The retired shared-engine loaders and compiled-SDK utilities have been removed. Live extensions use the small C-ABI SDK; engine extensions use generated static builds.
 
 ## Plugin registration and shared contracts
 

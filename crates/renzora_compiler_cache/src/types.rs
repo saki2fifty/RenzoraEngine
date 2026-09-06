@@ -204,12 +204,6 @@ pub fn default_target_triple() -> String {
     }
 }
 
-/// Default Tier-1 script entry-point symbol name. The Bevy adapter
-/// overrides this with the project's chosen entry-point.
-pub fn default_script_symbol() -> &'static [u8] {
-    b"renzora_script_update\0"
-}
-
 /// A request to compile `identity` at the supplied source snapshot. The
 /// `Arc<Vec<u8>>` keeps the source bytes alive for the lifetime of the
 /// future returned by `BuildService::submit`, regardless of how many worker
@@ -436,4 +430,3 @@ pub struct LoadedMappedArtifact {
 
 // Make the inner `Revision` importable via this module too.
 // (Revision is defined at the top of this file.)
-

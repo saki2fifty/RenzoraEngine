@@ -61,7 +61,7 @@ rustflags = [
 ]
 ```
 
-> The repo pins the Windows linker to `rust-lld` (rustc's bundled `lld`) rather than MSVC `link.exe`, which hits `LNK1189` (the 65535-object limit) on `bevy_dylib` with `dynamic_linking` enabled. The MSVC build also links against `vcruntime140.dll` / `msvcp140.dll`, which Windows 10/11 ship by default.
+> The repo pins the Windows linker to `rust-lld` (rustc's bundled `lld`). Engine code is statically linked; no Bevy DLL is shipped. Native dependencies may still require the Microsoft Visual C++ Redistributable.
 
 ### macOS & iOS — osxcross
 

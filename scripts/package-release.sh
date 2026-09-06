@@ -194,9 +194,19 @@ package_desktop() {
         # The source SDK is already inside the AppImage beside the binaries.
         ( cd "$dir" && zip -qry "$asset" "$(basename "$appimage")" )
     else
-        # Preserve any legacy files on disk, but do not ship the retired SDK.
-        ( cd "$dir" && zip -qry "$asset" . -x 'sdk/*' 'sdk.tar.*' \
-            '*.app/Contents/MacOS/sdk/*' '*.app/Contents/MacOS/sdk.tar.*' )
+        # Exclude only host-level legacy images, not libraries inside plugins/.
+        local prefix name
+        local excluded=('sdk/*' 'sdk.tar.*' '*.app/Contents/MacOS/sdk/*' '*.app/Contents/MacOS/sdk.tar.*')
+        for prefix in '' '*.app/Contents/MacOS/'; do
+            for name in 'bevy_dylib*' 'libbevy_dylib*' 'renzora_dylib*' 'librenzora_dylib*' \
+                'renzora_ember_dylib*' 'librenzora_ember_dylib*' 'std-*' 'libstd-*' \
+                'renzora.dll' 'librenzora.so' 'librenzora.dylib' \
+                'renzora_editor.dll' 'librenzora_editor.so' 'librenzora_editor.dylib'; do
+                excluded+=("$prefix$name")
+            done
+        done
+        # Preserve the input tree; exclude obsolete files only from the ZIP.
+        ( cd "$dir" && zip -qry "$asset" . -x "${excluded[@]}" )
     fi
     record "$asset" "$platform" engine
 }

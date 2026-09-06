@@ -11,6 +11,7 @@ use renzora_ember::theme::{rgb, text_primary};
 
 const PANEL_ID: &str = "my_panel";
 
+#[derive(Default)]
 pub struct MyPanelPlugin;
 
 impl Plugin for MyPanelPlugin {
@@ -31,22 +32,24 @@ fn build(commands: &mut Commands, fonts: &EmberFonts) -> Entity {
         .id()
 }
 
-renzora::plugin!(MyPanelPlugin);
+fn my_panel_system() {}
+
+renzora::add!(MyPanelPlugin, Editor);
 ```
 
 Open it from **Add Panel** in the dock; it appears under whatever category you registered.
 
 ## Getting `renzora_ember` into your plugin
 
-Ember needs no build configuration. The plugin compiler always passes `--extern renzora_ember`, pointed at the shared `renzora_ember_dylib` image, so the crate is importable whether or not your manifest mentions it.
-
-Add it to `Cargo.toml` anyway, so rust-analyzer can resolve the paths while you author:
+Declare Ember as a dependency of the engine extension's editor half. It is linked
+into the generated editor build, not supplied as a shared SDK image. For the
+project-extension layout described in [Native Plugins](native-plugins.md):
 
 ```toml
 [dependencies]
-bevy = "0.19"
-renzora = { path = "../../crates/renzora" }
-renzora_ember = { path = "../../crates/renzora_ember" }
+bevy = { workspace = true }
+renzora = { path = "../../../crates/renzora", default-features = false, features = ["editor"] }
+renzora_ember = { path = "../../../crates/renzora_ember" }
 ```
 
 The build strips `bevy` and every `renzora*` entry before it hands the rest to cargo (see [Crates from crates.io](native-plugins.md#crates-from-cratesio)), so those three lines are documentation for your editor and nothing else. From a downloaded engine with no source checkout the paths will not resolve and the plugin still compiles; point them at the SDK, or drop them and lose only autocomplete.
@@ -383,9 +386,9 @@ Panels are UI; the editor's *behaviour* extension points — inspector fields, e
 
 Ember keeps the theme palette, the stylesheet, the UI font scale and the viewport-toolbar lists in process-global statics — one set per *process*, not per crate. A plugin that linked its own private copy of ember would get its own set, and every one of them fails silently: your panel would paint in ember's default colours no matter what theme the user picked, and a `register_viewport_tool_group` call would push into a list nothing reads.
 
-So the plugin build points `--extern renzora_ember` at the shared `renzora_ember_dylib` image rather than at ember's rlib. Nothing about this is visible from a plugin — it is the reason panels work, and the reason a one-panel plugin is 270 KB instead of 32 MB.
+Engine extensions are built into the editor executable with the same Ember dependency as the editor. They share its theme and toolbar state through that static build; updating an engine extension requires a restart.
 
-The same reasoning is why `renzora` is a shared image, and why the loader refuses to load anything at all when `dynamic_linking` is off: there is no runtime check that would catch a duplicated static, so the only safe answer is not to be in that situation.
+Standalone live plugins use the host's C-ABI interface instead. They do not link private Bevy/Ember copies or load a shared-engine SDK image.
 
 ## Pitfalls
 

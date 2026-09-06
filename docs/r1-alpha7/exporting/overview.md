@@ -98,9 +98,9 @@ self-contained file with the `.rpak` embedded — no sibling dylibs.
 
 What it strips/changes versus the copy modes:
 
-- **Static Bevy + static `std`** — `bevy_dylib` and the dynamic `std` are gone;
-  everything is linked into the one executable (`--no-default-features --features
-  runtime`, which drops the `dynamic_linking` feature).
+- **Feature-selected static engine** — both copy and lean runtimes link engine
+  code directly. Lean exports rebuild the selected features and generated script
+  tables rather than relying on shared Bevy or Rust libraries.
 - **Thin LTO + size optimisation (`opt-level = "s"`) + symbol strip** (the
   `dist-lean` cargo profile) — dead code is eliminated and the binary is built
   for size. Thin rather than fat because fat LTO merges the whole program into

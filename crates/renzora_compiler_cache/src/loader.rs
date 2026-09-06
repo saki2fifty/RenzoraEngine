@@ -235,9 +235,8 @@ impl Loader {
         // a path the cache owns and writes under an atomic protocol. The
         // loader registers in MappedSet before this call so the retention
         // sweep cannot evict the generation. The library is assumed
-        // trustworthy in the same way `renzora_plugin_build`'s loader
-        // trusts compiled plugins: it is project-authored code on the
-        // user's machine.
+        // trustworthy: this is authorized project-authored native code,
+        // not a sandbox for untrusted libraries.
         let library = unsafe { Library::new(&path) }
             .map_err(|e| {
                 // Step 6 rollback: unregister so the generation is

@@ -119,3 +119,8 @@ silently replaces `release` with `dist` for the retired shared-Bevy DLL limit.
 Use a non-debug profile. The CI lane explicitly configured with `dist` stays on
 that profile. This cleanup was checked with routing fixtures, not a new Windows
 binary build.
+
+Full editor ZIPs also exclude retired host-level engine libraries from older
+staging directories. This does not remove standalone plugin libraries or delete
+the input files. An existing AppImage is packaged as supplied; refresh it through
+the current build/staging workflow before publishing.

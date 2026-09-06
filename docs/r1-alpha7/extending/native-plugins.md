@@ -135,9 +135,9 @@ Script packaging failures stop export. When shipping the small Rust modding SDK,
 
 ## Existing native plugins during migration
 
-Legacy `renzora::plugin!` loader and metadata-SDK source files remain pending cleanup, but the normal static editor/runtime path does not enable them. Use the manifest-based Tier 2 workflow above for full Bevy access. Changing an old plugin's filename or library extension does not migrate its API.
+The legacy `renzora::plugin!` loader and metadata-SDK source files have been removed. Use the manifest-based Tier 2 workflow above for full Bevy access. Changing an old plugin's filename or library extension does not migrate its API.
 
-Replacement build preparation explicitly preserves the eleven existing native distribution plugins: ai_chat, auto_exposure, clouds, gamepad, mesh_draw, night_stars, pool_water, procedural_tree, spline, text3d and vignette. Their editor/runtime scope is preserved through generated static wiring. Final removal of legacy loaders and export machinery is later migration cleanup.
+Replacement build preparation explicitly preserves the eleven existing native distribution plugins: ai_chat, auto_exposure, clouds, gamepad, mesh_draw, night_stars, pool_water, procedural_tree, spline, text3d and vignette. Their editor/runtime scope is preserved through generated static wiring. The retired loader and shared-engine export paths have now been removed.
 
 All eleven first-party native plugins now live in ordinary workspace crates. Spline support lives in `renzora_spline`, retains its shared `SplinePath` scene type and existing `spline` disable preference, and appears as Built-in in Settings. Build-kit preparation uses migrated crates directly instead of adding duplicate copies. This does not remove third-party C-ABI plugin support or the separate restart-required engine-plugin tier.
 

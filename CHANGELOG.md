@@ -14,6 +14,8 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Removed the retired Rust extension declarations and stopped modding exports from shipping the obsolete large SDK as a fallback.
 - Kept retired engine libraries out of game exports and runtime templates while preserving OpenXR support files.
 - Removed the obsolete Windows build-profile override; cross-builds now honor the requested profile.
+- Removed the final unused legacy script helpers and updated architecture, panel, and export documentation for the two-tier extension system.
+- Full editor ZIPs also exclude stale shared-engine libraries without deleting the original staging files.
 
 ## September 6, 2026 — 00:00 UTC
 

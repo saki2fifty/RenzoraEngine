@@ -737,18 +737,6 @@ pub fn declaration_legacy(source: &str) -> bool {
     )
 }
 
-/// `declares_script` kept here as a thin wrapper for backward-
-/// compatibility with `crates/renzora_plugin_build` callers that
-/// still expect it. The real declaration test lives in the watcher
-/// / discovery module.
-#[allow(dead_code)]
-fn declares_script(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    declaration_recognised(&text)
-}
-
 /// Backwards-compatible alias for the production discovery walker.
 /// Used by the copy-based exporter.
 #[deprecated(note = "use `crate::discovery::collect_rust_scripts`")]
