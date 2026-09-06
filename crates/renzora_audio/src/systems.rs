@@ -393,17 +393,19 @@ pub fn sync_spatial_audio(
     voices: Res<ActiveVoices>,
     transforms: Query<&GlobalTransform>,
 ) {
-    let moved = &mut updates.request.moved;
-    moved.clear();
-    if !link.is_active() || voices.is_empty() {
+    if !link.is_active() {
+        updates.reset_positions();
         return;
     }
+    updates.begin_positions(link.generation(), &voices);
     for (entity, ids) in voices.iter() {
         let Ok(transform) = transforms.get(entity) else {
             continue;
         };
         let position = transform.translation().to_array();
-        moved.extend(ids.iter().map(|id| (id.0, position)));
+        for &voice in ids {
+            updates.stage_position(voice, position);
+        }
     }
 }
 

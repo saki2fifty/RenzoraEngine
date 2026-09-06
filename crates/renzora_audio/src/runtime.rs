@@ -146,9 +146,42 @@ pub struct ActiveVoices {
 #[derive(Resource, Default)]
 pub struct AudioFrameUpdates {
     pub(crate) request: UpdateRequest,
+    sent_positions: HashMap<VoiceId, [u32; 3]>,
+    generation: Option<u64>,
 }
 
 impl AudioFrameUpdates {
+    pub(crate) fn begin_positions(&mut self, generation: u64, voices: &ActiveVoices) {
+        self.request.moved.clear();
+        if self.generation != Some(generation) {
+            self.sent_positions.clear();
+            self.generation = Some(generation);
+        }
+        self.sent_positions
+            .retain(|voice, _| voices.contains(*voice));
+    }
+
+    pub(crate) fn stage_position(&mut self, voice: VoiceId, position: [f32; 3]) {
+        if self.sent_positions.get(&voice) != Some(&position.map(f32::to_bits)) {
+            self.request.moved.push((voice.0, position));
+        }
+    }
+
+    fn acknowledge_positions(&mut self) {
+        // Failed updates must retry positions instead of pretending the
+        // backend received them. One-frame control commands keep their policy.
+        for &(voice, position) in &self.request.moved {
+            self.sent_positions
+                .insert(VoiceId(voice), position.map(f32::to_bits));
+        }
+    }
+
+    pub(crate) fn reset_positions(&mut self) {
+        self.sent_positions.clear();
+        self.generation = None;
+        self.request.moved.clear();
+    }
+
     fn clear(&mut self) {
         self.request.listener = None;
         self.request.moved.clear();
@@ -421,6 +454,7 @@ pub fn audio_update(
     play_mode: Option<Res<renzora::PlayModeState>>,
 ) {
     if !link.is_active() {
+        updates.reset_positions();
         updates.clear();
         return;
     }
@@ -476,6 +510,9 @@ pub fn audio_update(
     // Only this owner consumes Update replies. Earlier producers must not drain
     // finished-voice notifications into a reply that nobody examines.
     let result = link.update(&updates.request);
+    if result.is_ok() {
+        updates.acknowledge_positions();
+    }
     // Preserve the existing one-frame command policy on failure; positions are
     // prepared again next frame. Retain capacity, not stale commands.
     updates.clear();
@@ -645,7 +682,17 @@ mod tests {
             );
         }
         assert_eq!(backend.calls, 1001);
-        assert_eq!(backend.last.moved, [(1, [1.0, 2.0, 3.0])]);
+        assert!(backend.last.moved.is_empty());
+        assert_eq!(
+            app.world()
+                .resource::<AudioFrameUpdates>()
+                .sent_positions
+                .len(),
+            1
+        );
+        *app.world_mut()
+            .get_mut::<GlobalTransform>(emitter)
+            .expect("live emitter") = GlobalTransform::from_xyz(4.0, 5.0, 6.0);
         backend.fail = true;
         app.world_mut()
             .resource_mut::<AudioCommandQueue>()
@@ -654,6 +701,7 @@ mod tests {
             });
         app.update();
         assert_eq!(backend.last.paused, [(1, true)]);
+        assert_eq!(backend.last.moved, [(1, [4.0, 5.0, 6.0])]);
         assert!(app
             .world()
             .resource::<AudioFrameUpdates>()
@@ -663,8 +711,36 @@ mod tests {
         backend.fail = false;
         app.update();
         assert!(backend.last.paused.is_empty());
+        assert_eq!(backend.last.moved, [(1, [4.0, 5.0, 6.0])]);
+        app.update();
+        assert!(backend.last.moved.is_empty());
+        app.world_mut()
+            .entity_mut(emitter)
+            .insert(bevy::ecs::entity_disabling::Disabled);
+        *app.world_mut()
+            .get_mut::<GlobalTransform>(emitter)
+            .expect("live emitter") = GlobalTransform::from_xyz(7.0, 8.0, 9.0);
+        app.update();
+        assert!(backend.last.moved.is_empty());
+        app.world_mut()
+            .entity_mut(emitter)
+            .remove::<bevy::ecs::entity_disabling::Disabled>();
+        app.update();
+        assert_eq!(backend.last.moved, [(1, [7.0, 8.0, 9.0])]);
+        app.world_mut().resource_mut::<AudioLink>().adopt(
+            "frame".into(),
+            backend.as_mut() as *mut Backend as usize,
+            entry,
+        );
+        app.update();
+        assert_eq!(backend.last.moved, [(1, [7.0, 8.0, 9.0])]);
         app.world_mut().resource_mut::<AudioLink>().release();
         app.update();
+        assert!(app
+            .world()
+            .resource::<AudioFrameUpdates>()
+            .sent_positions
+            .is_empty());
         assert!(app
             .world()
             .resource::<AudioFrameUpdates>()

@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 08:39 UTC
+
+- Avoided repeatedly sending unchanged sound positions, while retrying failed movement updates and refreshing replacement audio backends.
+
 ## September 6, 2026 — 08:33 UTC
 
 - Combined per-frame audio updates so sound-finished notifications are handled reliably, and reused the update buffers instead of rebuilding them.

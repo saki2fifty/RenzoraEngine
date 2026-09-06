@@ -666,6 +666,14 @@ The regression drives all three production producers and the consumer: one
 Update call per frame, ordered gain changes, finished-voice removal, live meters
 and retained position-buffer storage across 1,000 updates. Failed one-frame
 commands are cleared as before; positions are regenerated the next frame.
+
+Spatial updates now compare each live voice's position against its last
+successful send. Unchanged positions produce no movement payload. Failed sends
+retry, and adopting another backend invalidates the cache even at the same
+address. Ended voices are pruned and releasing the backend clears the cache.
+Disabled emitters are skipped; their latest position is checked on reactivation.
+The system still visits live voices each frame; this is a payload/allocation
+reduction, not elimination of that scan or the listener/meter update call.
 This change does not yet suppress unchanged position entries.
 
 ## Mixer bus comparison
