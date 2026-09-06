@@ -30,21 +30,10 @@ mod gltf_pass;
 mod obj;
 mod ply;
 mod stl;
-// Legacy FBX parser retained for unit detection in `units.rs`; the mesh/anim
-// conversion paths now go through `fbx_ufbx` (ufbx crate).
-mod fbx_legacy;
-// Unused dead-code FBX modules kept temporarily for reference; will be deleted
-// once the ufbx path proves stable.
 mod abc;
 mod blend;
 mod bvh;
 mod dae;
-#[allow(dead_code)]
-mod fbx_anim;
-#[allow(dead_code)]
-mod fbx_ascii;
-#[allow(dead_code)]
-mod fbx_skin;
 pub mod units;
 pub mod usd;
 

@@ -112,6 +112,10 @@ This is what lets the same code path serve assets from a packed `.rpak` in a shi
 
 Notes:
 
+- **FBX uses ufbx on native builds**, including animation, skinning and unit
+  normalization. The unused private binary/ASCII/animation/skin reference
+  parsers have been removed; this does not remove a supported import format.
+
 - **`.blend`** is not parsed in-process — the importer invokes a locally installed Blender via `std::process::Command`, located through `BLENDER_PATH`, common install dirs, or `PATH`. If Blender isn't installed, `.blend` import fails.
 - **`.bvh`** carries no geometry: its `convert()` always errors so the animation-extraction fallback runs instead, pulling clips out via `extract_animations_from_bvh`.
 - **`.stl`** is geometry only — a bag of triangles with a facet normal each, and no hierarchy, names, materials, textures, UVs or units. The converter synthesises the rest: one neutral placeholder material, and a **box-projected UV set** taken from whichever axis each vertex's normal faces most strongly, normalised across the model's bounds. Writing the all-zero UVs it used to would leave the mesh *claiming* to have coordinates, so any texture assigned later sampled a single texel and rendered as a flat block of colour with nothing to explain why. The projection is not a real unwrap — corners seam — but it is a usable starting point. **Flip UVs** inverts it, exactly as it does a real UV set. See [Sibling texture sets](#sibling-texture-sets) for wiring up the `textures/` folder such a model usually ships with.

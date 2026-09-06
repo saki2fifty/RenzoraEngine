@@ -8052,7 +8052,6 @@ dependencies = [
 name = "renzora_import"
 version = "0.1.0"
 dependencies = [
- "flate2",
  "gltf",
  "gltf-json",
  "half",

@@ -43,10 +43,6 @@ half = "2"
 # texture-heavy models; rayon spreads it across all cores.
 rayon = "1"
 
-# Compression (legacy FBX binary arrays)
-flate2 = "1"
-
-
 # Collada XML parsing
 quick-xml = "0.37"
 

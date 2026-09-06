@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 15:16 UTC
+
+- Removed unused older FBX import code while retaining the current importer. Lean scripting builds no longer request a JSON dependency used only by blueprints.
+
 ## September 6, 2026 — 15:15 UTC
 
 - Bounded multiplayer retry memory and receive work, enforced the configured player limit, and added explicit reporting when messages cannot be queued. Corrected multiplayer documentation to describe the features actually available.
