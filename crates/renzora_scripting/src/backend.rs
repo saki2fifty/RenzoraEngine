@@ -14,6 +14,15 @@ pub type FileReader = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 /// Each backend (Lua, Rhai, etc.) provides its own compilation, execution,
 /// and variable marshalling logic while producing the same `ScriptCommand`s.
 pub trait ScriptBackend: Send + Sync {
+    /// Opt into pass-shared inputs read through `ScriptContext::frame_inputs`.
+    ///
+    /// Returning true leaves the context's legacy owned frame-input fields
+    /// empty. Entity-specific inputs and output fields are unchanged. The
+    /// default preserves existing backends, including mutable input snapshots.
+    fn supports_shared_frame_inputs(&self) -> bool {
+        false
+    }
+
     /// Human-readable name (e.g. "Lua", "Rhai")
     fn name(&self) -> &str;
 

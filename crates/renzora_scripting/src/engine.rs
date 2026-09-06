@@ -135,6 +135,11 @@ impl ScriptEngine {
             .map(|b| b.as_ref())
     }
 
+    pub(crate) fn supports_shared_frame_inputs(&self, path: &Path) -> bool {
+        self.backend_for(path)
+            .is_some_and(|backend| backend.supports_shared_frame_inputs())
+    }
+
     /// Get props for a script
     pub fn get_script_props(&self, path: &Path) -> Vec<ScriptVariableDefinition> {
         let resolved = self.resolve_path(path);

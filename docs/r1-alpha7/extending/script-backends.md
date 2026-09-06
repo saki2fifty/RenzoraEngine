@@ -50,6 +50,16 @@ building the context, resolving and reading the script file, applying whatever
 comes back. Your plugin owns exactly one thing — turning source text plus a
 context into a list of `ScriptCommand`s.
 
+The host shares immutable frame-input collections across script contexts before
+encoding them. The standalone protocol and guest `Backend` API are unchanged.
+For custom **engine-side** `renzora_scripting::ScriptBackend` implementations,
+`supports_shared_frame_inputs()` defaults to false, preserving the existing
+owned input fields. An implementation returning true must read keyboard/action
+maps, gamepads, named entities and finished timers through
+`ScriptContext::frame_inputs()`; their legacy owned fields are then empty.
+Entity-specific inputs and command outputs remain on the context. This opt-in
+does not apply to the standalone guest trait shown below.
+
 ## The trait
 
 ```rust

@@ -362,6 +362,21 @@ pub fn run_scripts(world: &mut World) {
         })
         .collect();
     let first_pad = gamepads.first().cloned().unwrap_or_default();
+    // Plugin backends encode the frame once already; avoid making discarded
+    // collection copies for every later script. Legacy backends opt out.
+    let frame_inputs = std::sync::Arc::new(crate::context::ScriptFrameInputs {
+        keys_pressed,
+        keys_just_pressed,
+        keys_just_released,
+        action_pressed,
+        action_just_pressed,
+        action_just_released,
+        action_axis_1d,
+        action_axis_2d,
+        gamepads,
+        found_entities: entities_by_name,
+        timers_just_finished: timers_finished,
+    });
 
     // Collect all script entities and their data
     struct ScriptEntityData {
@@ -475,11 +490,14 @@ pub fn run_scripts(world: &mut World) {
             // Build context
             let mut ctx =
                 ScriptContext::new(script_time, ScriptTransform::from_transform(&sed.transform));
+            let shared = world
+                .resource::<ScriptEngine>()
+                .supports_shared_frame_inputs(&script_path);
+            ctx.install_frame_inputs(&frame_inputs, shared);
 
             ctx.self_entity = Some(sed.entity);
             ctx.self_entity_id = sed.entity.to_bits();
             ctx.self_entity_name = sed.entity_name.clone();
-            ctx.found_entities = entities_by_name.clone();
 
             // Input
             ctx.input_movement = input.get_movement_vector();
@@ -501,18 +519,8 @@ pub fn run_scripts(world: &mut World) {
                 ctx.net_is_connected = net.is_connected;
                 ctx.net_player_count = net.player_count;
             }
-            ctx.keys_pressed = keys_pressed.clone();
-            ctx.keys_just_pressed = keys_just_pressed.clone();
-            ctx.keys_just_released = keys_just_released.clone();
             ctx.mouse_buttons_pressed = mouse_buttons_pressed;
             ctx.mouse_buttons_just_pressed = mouse_buttons_just_pressed;
-
-            // Actions (InputMap-based, unified keyboard + gamepad)
-            ctx.action_pressed = action_pressed.clone();
-            ctx.action_just_pressed = action_just_pressed.clone();
-            ctx.action_just_released = action_just_released.clone();
-            ctx.action_axis_1d = action_axis_1d.clone();
-            ctx.action_axis_2d = action_axis_2d.clone();
 
             // Gamepad (legacy flat fields = first connected pad)
             ctx.gamepad_left_stick = first_pad.left_stick;
@@ -521,10 +529,6 @@ pub fn run_scripts(world: &mut World) {
             ctx.gamepad_right_trigger = first_pad.right_trigger;
             ctx.gamepad_buttons = first_pad.buttons;
             ctx.gamepad_buttons_just_pressed = first_pad.buttons_just_pressed;
-            ctx.gamepads = gamepads.clone();
-
-            // Timers
-            ctx.timers_just_finished = timers_finished.clone();
 
             // Parent
             if let (Some(parent_e), Some(parent_t)) = (sed.parent, &parent_transform) {
@@ -900,6 +904,47 @@ pub fn run_scripts(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_backends_borrow_one_snapshot_and_legacy_backends_keep_isolated_inputs() {
+        for shared in [false, true] {
+            let mut world = World::new();
+            world.init_resource::<Time>();
+            world.init_resource::<ScriptInput>();
+            world.init_resource::<ScriptTimers>();
+            world.init_resource::<ScriptPerfStats>();
+            world.init_resource::<ScriptCommandQueue>();
+            let mut backend = crate::test_util::FakeBackend::new("frame", &["fake"]);
+            backend.shared_inputs = shared;
+            backend.mutate_owned_inputs = !shared;
+            let calls = backend.state_handle();
+            let mut engine = ScriptEngine::new();
+            engine.add_backend(Box::new(backend));
+            world.insert_resource(engine);
+            let mut scripts = ScriptComponent::from_file(PathBuf::from("first.fake"));
+            scripts.add_file_script(PathBuf::from("second.fake"));
+            let entity = world.spawn((scripts, Name::new("actor"))).id();
+            for _ in 0..1000 {
+                run_scripts(&mut world);
+            }
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.update_paths.len(), 2000);
+            assert!(calls
+                .seen_found_entities
+                .iter()
+                .all(|names| names.get("actor") == Some(&entity.to_bits())));
+            if shared {
+                assert!(calls.owned_name_counts.iter().all(|&count| count == 0));
+                assert!(calls
+                    .frame_addresses
+                    .chunks_exact(2)
+                    .all(|pair| pair[0] == pair[1]));
+            } else {
+                // Clearing one script's owned map did not alter the next one's.
+                assert!(calls.owned_name_counts.iter().all(|&count| count == 1));
+            }
+        }
+    }
 
     #[test]
     fn script_execution_keeps_components_installed_and_preserves_entries() {

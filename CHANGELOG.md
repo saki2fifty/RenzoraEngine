@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 08:12 UTC
+
+- Shared common frame data across built-in script executions, avoiding repeated input copies while preserving existing custom backends and script behavior.
+
 ## September 6, 2026 — 07:59 UTC
 
 - Stopped recalculating unchanged sprite-sheet crops while preserving late image loading, image replacement, frame edits, and re-enabled objects.

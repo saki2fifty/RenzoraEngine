@@ -26,6 +26,10 @@ pub struct FakeBackendState {
     pub seen_child_names: Vec<Vec<String>>,
     /// `ctx.found_entities` captured on each `call_on_update`.
     pub seen_found_entities: Vec<HashMap<String, u64>>,
+    /// Borrowed frame-map addresses, compared only within one execution pass.
+    pub frame_addresses: Vec<usize>,
+    /// Owned compatibility-map sizes before a test backend mutates them.
+    pub owned_name_counts: Vec<usize>,
 }
 
 type CommandFactory = fn() -> Result<Vec<ScriptCommand>, String>;
@@ -40,6 +44,10 @@ pub struct FakeBackend {
     pub props: Vec<ScriptVariableDefinition>,
     pub on_ready: CommandFactory,
     pub on_update: CommandFactory,
+    /// Opt this fake backend into the immutable frame-input path.
+    pub shared_inputs: bool,
+    /// Clear each owned map to exercise isolation between legacy contexts.
+    pub mutate_owned_inputs: bool,
 }
 
 impl FakeBackend {
@@ -52,6 +60,8 @@ impl FakeBackend {
             props: Vec::new(),
             on_ready: || Ok(Vec::new()),
             on_update: || Ok(Vec::new()),
+            shared_inputs: false,
+            mutate_owned_inputs: false,
         }
     }
 
@@ -62,6 +72,10 @@ impl FakeBackend {
 }
 
 impl ScriptBackend for FakeBackend {
+    fn supports_shared_frame_inputs(&self) -> bool {
+        self.shared_inputs
+    }
+
     fn name(&self) -> &str {
         self.backend_name
     }
@@ -112,7 +126,15 @@ impl ScriptBackend for FakeBackend {
         state
             .seen_child_names
             .push(ctx.children.iter().map(|c| c.name.clone()).collect());
-        state.seen_found_entities.push(ctx.found_entities.clone());
+        let inputs = ctx.frame_inputs();
+        state
+            .frame_addresses
+            .push(inputs.found_entities as *const _ as usize);
+        state.owned_name_counts.push(ctx.found_entities.len());
+        state.seen_found_entities.push(inputs.found_entities.clone());
+        if self.mutate_owned_inputs {
+            ctx.found_entities.clear();
+        }
         (self.on_update)()
     }
 

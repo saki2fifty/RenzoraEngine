@@ -590,6 +590,7 @@ fn set_of(map: &HashMap<String, bool>) -> Vec<String> {
 }
 
 fn frame_context(ctx: &ScriptContext) -> FrameContext {
+    let inputs = ctx.frame_inputs();
     FrameContext {
         time: ScriptTime {
             elapsed: ctx.time.elapsed,
@@ -602,9 +603,9 @@ fn frame_context(ctx: &ScriptContext) -> FrameContext {
         mouse_delta: ctx.mouse_delta.to_array(),
         mouse_scroll: ctx.mouse_scroll,
         camera_yaw: ctx.camera_yaw,
-        keys_pressed: set_of(&ctx.keys_pressed),
-        keys_just_pressed: set_of(&ctx.keys_just_pressed),
-        keys_just_released: set_of(&ctx.keys_just_released),
+        keys_pressed: set_of(inputs.keys_pressed),
+        keys_just_pressed: set_of(inputs.keys_just_pressed),
+        keys_just_released: set_of(inputs.keys_just_released),
         mouse_buttons_pressed: ctx.mouse_buttons_pressed,
         mouse_buttons_just_pressed: ctx.mouse_buttons_just_pressed,
         camera_ev: ctx.camera_ev,
@@ -613,7 +614,7 @@ fn frame_context(ctx: &ScriptContext) -> FrameContext {
         net_is_server: ctx.net_is_server,
         net_is_connected: ctx.net_is_connected,
         net_player_count: ctx.net_player_count,
-        gamepads: ctx
+        gamepads: inputs
             .gamepads
             .iter()
             .map(|g| GamepadSnapshot {
@@ -626,25 +627,25 @@ fn frame_context(ctx: &ScriptContext) -> FrameContext {
                 buttons_just_pressed: g.buttons_just_pressed,
             })
             .collect(),
-        actions_pressed: set_of(&ctx.action_pressed),
-        actions_just_pressed: set_of(&ctx.action_just_pressed),
-        actions_just_released: set_of(&ctx.action_just_released),
-        action_axis_1d: ctx
+        actions_pressed: set_of(inputs.action_pressed),
+        actions_just_pressed: set_of(inputs.action_just_pressed),
+        actions_just_released: set_of(inputs.action_just_released),
+        action_axis_1d: inputs
             .action_axis_1d
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
-        action_axis_2d: ctx
+        action_axis_2d: inputs
             .action_axis_2d
             .iter()
             .map(|(k, v)| (k.clone(), v.to_array()))
             .collect(),
-        named_entities: ctx
+        named_entities: inputs
             .found_entities
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect(),
-        timers_just_finished: ctx.timers_just_finished.clone(),
+        timers_just_finished: inputs.timers_just_finished.to_vec(),
     }
 }
 
@@ -711,6 +712,10 @@ fn wire_args(
 }
 
 impl ScriptBackend for PluginScriptBackend {
+    fn supports_shared_frame_inputs(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1108,6 +1113,56 @@ pub fn adopt_plugin_backends(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_and_owned_frame_inputs_encode_identical_plugin_data() {
+        use crate::context::{ScriptFrameInputs, ScriptTransform};
+        use bevy::prelude::{Transform, Vec2};
+        let mut frame = ScriptFrameInputs::default();
+        frame.keys_pressed.insert("held".into(), true);
+        frame.keys_just_pressed.insert("down".into(), true);
+        frame.keys_just_released.insert("up".into(), true);
+        frame.action_pressed.insert("jump".into(), true);
+        frame.action_just_pressed.insert("fire".into(), true);
+        frame.action_just_released.insert("aim".into(), true);
+        frame.action_axis_1d.insert("turn".into(), 0.5);
+        frame
+            .action_axis_2d
+            .insert("move".into(), Vec2::new(0.5, -0.25));
+        frame.gamepads.push(crate::context::GamepadSnapshot {
+            id: 3,
+            ..Default::default()
+        });
+        frame.found_entities.insert("actor".into(), 42);
+        frame.timers_just_finished.push("alarm".into());
+        let frame = std::sync::Arc::new(frame);
+        let make_context = || {
+            ScriptContext::new(
+                Default::default(),
+                ScriptTransform::from_transform(&Transform::default()),
+            )
+        };
+        let mut owned = make_context();
+        owned.install_frame_inputs(&frame, false);
+        let mut shared = make_context();
+        shared.install_frame_inputs(&frame, true);
+        assert!(shared.keys_pressed.is_empty());
+        assert!(shared.gamepads.is_empty());
+        assert_eq!(frame_context(&owned), frame_context(&shared));
+        let mut owned_state = State::default();
+        let mut shared_state = State::default();
+        PluginScriptBackend::frame_bytes(&mut owned_state, &owned);
+        PluginScriptBackend::frame_bytes(&mut shared_state, &shared);
+        assert_eq!(owned_state.frame, shared_state.frame);
+        let bytes = shared_state.frame.as_ptr();
+        for _ in 0..1000 {
+            PluginScriptBackend::frame_bytes(&mut shared_state, &shared);
+        }
+        assert_eq!(shared_state.frame.as_ptr(), bytes);
+        owned.keys_pressed.clear();
+        assert!(shared.frame_inputs().keys_pressed["held"]);
+        assert!(owned.frame_inputs().keys_pressed.is_empty());
+    }
 
     #[test]
     fn a_sparse_key_table_encodes_only_the_pressed_keys() {

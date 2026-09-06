@@ -499,8 +499,19 @@ and its ID allocator attached to the entity. Runtime state returns to the same
 list storage after hooks finish. Script commands remain deferred. A 1,000-update
 regression observes zero component removals and preserves initialization and
 disabled entries. The reflection read handlers share one immutable name lookup
-per pass rather than cloning that map for each handler. Other public context
-snapshots are still owned copies; this is not a complete snapshot redesign.
+per pass rather than cloning that map for each handler.
+
+The built-in plugin-backed languages also share one immutable collection of
+keyboard/action maps, gamepads, named entities and finished timers per pass.
+They no longer clone those collections into every script context. The existing
+per-backend frame encoding cache remains in place. A 1,000-pass regression runs
+two scripts per pass with the same snapshot address and no owned name-map copies;
+wire-format tests compare all shared fields and encoded bytes against owned data.
+Custom engine-side backends retain isolated owned fields unless they explicitly
+opt into `ScriptBackend::supports_shared_frame_inputs` and use
+`ScriptContext::frame_inputs()`. Their ability to mutate their own copies remains
+unchanged. Entity-specific child data and initial pass snapshot construction
+remain separate costs; this is not a claim that all context allocation is gone.
 
 ## Hidden System Profiler
 

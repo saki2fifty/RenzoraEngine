@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::command::ScriptCommand;
 
@@ -121,9 +122,57 @@ pub struct RaycastHit {
     pub distance: f32,
 }
 
+/// Pass-owned inputs shared only with backends that opt into immutable views.
+#[derive(Default)]
+pub(crate) struct ScriptFrameInputs {
+    pub keys_pressed: HashMap<String, bool>,
+    pub keys_just_pressed: HashMap<String, bool>,
+    pub keys_just_released: HashMap<String, bool>,
+    pub action_pressed: HashMap<String, bool>,
+    pub action_just_pressed: HashMap<String, bool>,
+    pub action_just_released: HashMap<String, bool>,
+    pub action_axis_1d: HashMap<String, f32>,
+    pub action_axis_2d: HashMap<String, Vec2>,
+    pub gamepads: Vec<GamepadSnapshot>,
+    pub found_entities: HashMap<String, u64>,
+    pub timers_just_finished: Vec<String>,
+}
+
+/// Borrowed frame inputs for both shared and legacy-owned script contexts.
+///
+/// Backends opting into shared inputs must read these fields through this view,
+/// not the legacy owned fields on `ScriptContext`. Entity-specific inputs and
+/// output commands remain on the context itself.
+#[derive(Clone, Copy)]
+pub struct ScriptFrameInputView<'a> {
+    /// Held keyboard keys.
+    pub keys_pressed: &'a HashMap<String, bool>,
+    /// Keyboard press edges.
+    pub keys_just_pressed: &'a HashMap<String, bool>,
+    /// Keyboard release edges.
+    pub keys_just_released: &'a HashMap<String, bool>,
+    /// Held named actions.
+    pub action_pressed: &'a HashMap<String, bool>,
+    /// Named-action press edges.
+    pub action_just_pressed: &'a HashMap<String, bool>,
+    /// Named-action release edges.
+    pub action_just_released: &'a HashMap<String, bool>,
+    /// Named scalar axes.
+    pub action_axis_1d: &'a HashMap<String, f32>,
+    /// Named two-dimensional axes.
+    pub action_axis_2d: &'a HashMap<String, Vec2>,
+    /// Connected gamepad snapshots.
+    pub gamepads: &'a [GamepadSnapshot],
+    /// Named entities at the start of this pass.
+    pub found_entities: &'a HashMap<String, u64>,
+    /// Timers that finished in this pass.
+    pub timers_just_finished: &'a [String],
+}
+
 /// Language-agnostic context passed to script backends for execution.
 /// Contains all input state and collects all output commands.
 pub struct ScriptContext {
+    shared_frame: Option<Arc<ScriptFrameInputs>>,
     // === Input state ===
     pub time: ScriptTime,
     pub transform: ScriptTransform,
@@ -252,8 +301,53 @@ pub struct ScriptContext {
 }
 
 impl ScriptContext {
+    /// Read immutable frame inputs without depending on their storage policy.
+    pub fn frame_inputs(&self) -> ScriptFrameInputView<'_> {
+        let shared = self.shared_frame.as_deref();
+        ScriptFrameInputView {
+            keys_pressed: shared.map_or(&self.keys_pressed, |frame| &frame.keys_pressed),
+            keys_just_pressed: shared
+                .map_or(&self.keys_just_pressed, |frame| &frame.keys_just_pressed),
+            keys_just_released: shared
+                .map_or(&self.keys_just_released, |frame| &frame.keys_just_released),
+            action_pressed: shared.map_or(&self.action_pressed, |frame| &frame.action_pressed),
+            action_just_pressed: shared.map_or(&self.action_just_pressed, |frame| {
+                &frame.action_just_pressed
+            }),
+            action_just_released: shared.map_or(&self.action_just_released, |frame| {
+                &frame.action_just_released
+            }),
+            action_axis_1d: shared.map_or(&self.action_axis_1d, |frame| &frame.action_axis_1d),
+            action_axis_2d: shared.map_or(&self.action_axis_2d, |frame| &frame.action_axis_2d),
+            gamepads: shared.map_or(&self.gamepads, |frame| &frame.gamepads),
+            found_entities: shared.map_or(&self.found_entities, |frame| &frame.found_entities),
+            timers_just_finished: shared.map_or(&self.timers_just_finished, |frame| {
+                &frame.timers_just_finished
+            }),
+        }
+    }
+
+    pub(crate) fn install_frame_inputs(&mut self, frame: &Arc<ScriptFrameInputs>, shared: bool) {
+        self.shared_frame = shared.then(|| Arc::clone(frame));
+        if !shared {
+            // Existing backends retain independent mutable owned input fields.
+            self.keys_pressed = frame.keys_pressed.clone();
+            self.keys_just_pressed = frame.keys_just_pressed.clone();
+            self.keys_just_released = frame.keys_just_released.clone();
+            self.action_pressed = frame.action_pressed.clone();
+            self.action_just_pressed = frame.action_just_pressed.clone();
+            self.action_just_released = frame.action_just_released.clone();
+            self.action_axis_1d = frame.action_axis_1d.clone();
+            self.action_axis_2d = frame.action_axis_2d.clone();
+            self.gamepads = frame.gamepads.clone();
+            self.found_entities = frame.found_entities.clone();
+            self.timers_just_finished = frame.timers_just_finished.clone();
+        }
+    }
+
     pub fn new(time: ScriptTime, transform: ScriptTransform) -> Self {
         Self {
+            shared_frame: None,
             time,
             transform,
             input_movement: Vec2::ZERO,
