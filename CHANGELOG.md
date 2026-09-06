@@ -6,6 +6,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 
 - Fixed one-shot script timers firing repeatedly and avoided unnecessary updates for settled timers.
 - Removed a duplicate hardware-monitoring dependency and its unused Windows support packages.
+- Updated the built-in AI assistant's guidance for current Rust scripts and the two plugin types.
 
 ## September 6, 2026 — 23:22 UTC
 

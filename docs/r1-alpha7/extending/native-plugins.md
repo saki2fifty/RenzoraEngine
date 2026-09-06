@@ -169,6 +169,12 @@ Mesh drawing is editor-only in `renzora_mesh_draw_editor`. Its three toolbar/sho
 
 AI Chat lives in `renzora_ai_chat_editor`, retaining the `ai_chat` panel, settings and preference IDs. It uses the shared UI framework and HTTP contract, and its native folder-picker dependency is excluded on WebAssembly. It is not linked into exported games.
 
+Its built-in guidance distinguishes Lua/Rust scripts, ordinary C-ABI hot plugins,
+and restart-required Bevy engine extensions. It no longer recommends retired
+Rhai scripts or treats an old hook list as exhaustive. Exact examples must be
+grounded in current retrieved documentation; this guidance is not a guarantee
+that every generated answer is correct.
+
 ## Validation and limitations
 
 Phase 5 acceptance includes full Linux builds from an isolated installed kit, actual runtime/editor scope probes, rendered Rust script execution, startup/restart checks and native runtime export execution. Windows MSVC checks validate compilation; Windows EXE production and Windows/macOS GUI validation have not been performed in this Linux acceptance run.
