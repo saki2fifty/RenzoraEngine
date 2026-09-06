@@ -448,6 +448,7 @@ struct TilemapColliderShape;
 #[derive(Component)]
 struct TileColliderKey(u64);
 
+
 /// Grow merged static 2D colliders under every layer with solid-marked tiles.
 ///
 /// One collider per painted solid tile would hand avian thousands of bodies
@@ -470,7 +471,7 @@ fn rebuild_tile_colliders(
     // Every entity that can OWN tiles: a tilemap root, or one of its paint
     // layers. Colliders hang under whichever entity owns the tiles.
     owners: Query<
-        (Entity, Option<&TileColliderKey>, Option<&ChildOf>),
+        (Entity, Option<&TileColliderKey>, Option<&ChildOf>, Option<&Children>),
         Or<(With<TilemapLayer>, With<TilemapPaintLayer>)>,
     >,
     configs: Query<&TilemapLayer>,
@@ -481,7 +482,7 @@ fn rebuild_tile_colliders(
     if dirty_layers.is_empty() && dirty_tiles.is_empty() && !any_removed {
         return;
     }
-    for (owner, key, owner_parent) in &owners {
+    for (owner, key, owner_parent, children) in &owners {
         // The palette config (tile size + solid set) lives on the tilemap
         // ROOT; a paint layer reads its parent's.
         let Some(layer) = configs
@@ -508,10 +509,12 @@ fn rebuild_tile_colliders(
             sorted.hash(&mut h);
             h.finish()
         };
-        for (tile, sheet, child_of) in &tiles {
-            if child_of.parent() != owner {
+        // Bevy already maintains this owner index through ChildOf/Children.
+        // Do not search every other layer's tiles for each owner.
+        for child in children.into_iter().flat_map(|children| children.iter()) {
+            let Ok((tile, sheet, _)) = tiles.get(child) else {
                 continue;
-            }
+            };
             let idx = sheet.frame % (sheet.hframes.max(1) * sheet.vframes.max(1));
             if !solid.contains(&idx) {
                 continue;
@@ -525,8 +528,8 @@ fn rebuild_tile_colliders(
             continue;
         }
 
-        for (shape, child_of) in &shapes {
-            if child_of.parent() == owner {
+        for child in children.into_iter().flat_map(|children| children.iter()) {
+            if let Ok((shape, _)) = shapes.get(child) {
                 commands.entity(shape).try_despawn();
             }
         }
@@ -1127,5 +1130,74 @@ mod tests {
         let tile = TilemapTile { x: -3, y: 7 };
         assert_eq!((tile.x, tile.y), (-3, 7));
         assert_eq!(TilemapTile::default(), TilemapTile { x: 0, y: 0 });
+    }
+}
+
+#[cfg(test)]
+mod collider_owner_tests {
+    use super::*;
+
+    fn shapes(world: &mut World, owner: Entity) -> Vec<Entity> {
+        let mut query = world.query_filtered::<(Entity, &ChildOf), With<TilemapColliderShape>>();
+        query
+            .iter(world)
+            .filter_map(|(entity, parent)| (parent.parent() == owner).then_some(entity))
+            .collect()
+    }
+
+    #[test]
+    fn owner_children_keep_layers_isolated_through_edits_and_removal() {
+        let mut app = App::new();
+        app.add_systems(Update, rebuild_tile_colliders);
+        let first = app
+            .world_mut()
+            .spawn(TilemapLayer {
+                solid_tiles: vec![0],
+                ..default()
+            })
+            .id();
+        let second = app
+            .world_mut()
+            .spawn(TilemapLayer {
+                solid_tiles: vec![0],
+                ..default()
+            })
+            .id();
+        let mut edited = Entity::PLACEHOLDER;
+        for owner in [first, second] {
+            for x in 0..64 {
+                let tile = app
+                    .world_mut()
+                    .spawn((
+                        TilemapTile { x, y: 0 },
+                        renzora::SpriteSheet::default(),
+                        ChildOf(owner),
+                    ))
+                    .id();
+                if owner == first && x == 0 {
+                    edited = tile;
+                }
+            }
+        }
+        app.update();
+        assert_eq!(shapes(app.world_mut(), first).len(), 1);
+        let untouched = shapes(app.world_mut(), second);
+        assert_eq!(untouched.len(), 1);
+        app.world_mut().get_mut::<TilemapTile>(edited).unwrap().x = 100;
+        app.update();
+        assert_eq!(shapes(app.world_mut(), first).len(), 2);
+        assert_eq!(shapes(app.world_mut(), second), untouched);
+        app.world_mut().despawn(edited);
+        app.update();
+        assert_eq!(shapes(app.world_mut(), first).len(), 1);
+        assert_eq!(shapes(app.world_mut(), second), untouched);
+        app.world_mut()
+            .get_mut::<TilemapLayer>(first)
+            .unwrap()
+            .solid_tiles
+            .clear();
+        app.update();
+        assert!(shapes(app.world_mut(), first).is_empty());
+        assert_eq!(shapes(app.world_mut(), second), untouched);
     }
 }

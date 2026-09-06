@@ -574,3 +574,10 @@ the output components preserves repair after another system edits those outputs.
 A headless test sees no additional eligible entries across 1,000 settled frames
 and verifies edits/movement. Bevy still evaluates change filters; this is not an
 event-only index. Sprite-sheet image-dependent cropping is unchanged.
+
+Tile collider rebuilds also use Bevy's maintained child lists to find each
+owner's tiles and generated shapes. They no longer scan the full tile/shape
+queries once per owner. The existing global dirty gate and per-owner content
+hash remain; this is not a dirty-owner event index. Regression coverage checks
+two 64-tile layers through edits, tile removal and clearing solidity, retaining
+the unaffected layer's collider entities.

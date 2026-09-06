@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 06:49 UTC
 
 - Skipped repeated atlas-region and depth-sorting calculations for settled sprites, while retaining updates after edits and movement.
+- Used each tile layer's existing child list for collider rebuilding, avoiding repeated searches through other layers' tiles.
 
 ## September 6, 2026 — 06:43 UTC
 
