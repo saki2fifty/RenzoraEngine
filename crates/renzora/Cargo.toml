@@ -38,8 +38,8 @@ audio = []
 # Enables the editor CONTRACT (Operation Merge fold): the thin, boundary-
 # crossing editor types — `EditorSelection`, the inspector/spawn/toolbar/
 # shortcut registries, `AppEditorExt`, the field macros, `Inspectable`/
-# `post_process` derives — that the binary AND the editor bundle both need to
-# share one `TypeId` across the dylib boundary. Implies `postprocess` because
+# `post_process` derives — shared by statically linked editor crates.
+# Implies `postprocess` because
 # `AppEditorExt::add_post_process` uses the post-process framework. Runtime /
 # server / mobile builds leave this OFF so they carry no editor surface area.
 editor = ["postprocess", "dep:renzora_macros"]
@@ -64,14 +64,8 @@ render_3d = []
 # Losing the anchors only loosens ordering — the phases still run, and ordering
 # against a system that isn't in the schedule is a no-op anyway.
 antialiasing = ["render_3d"]
-# Note on the `dlopen` mechanism: distribution plugins (cdylib + dlopen)
-# need the FFI exports `plugin_create`, `plugin_scope`, `plugin_bevy_hash`
-# from `renzora::add!`. The macro gates those exports behind
-# `cfg(feature = "dlopen")`. Crucially, `cfg(feature = ...)` in a macro
-# body resolves against the *calling* crate's features at expansion site,
-# not against this crate's. So each distribution plugin must declare its
-# own `dlopen = []` feature (and turn it on by default) — adding `features
-# = ["dlopen"]` to the renzora dep does nothing on its own.
+# `renzora::add!` declares statically wired engine plugins. Standalone C-ABI
+# plugins use the separate `renzora_plugin` SDK and never link this crate.
 
 [dependencies]
 # `renzora` is the king of the engine — every other crate depends on it,

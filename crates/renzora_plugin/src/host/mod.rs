@@ -4,16 +4,10 @@
 //! a plugin's `renzora_plugin_init`, and turns whatever the plugin registers
 //! into real Bevy components and systems.
 //!
-//! ## Why this is a separate path from `dynamic_plugin_loader`
-//!
-//! That crate loads `dylib` plugins which share `bevy_dylib` with the host and
-//! get `&mut App` directly. It requires the plugin to have been compiled in the
-//! same environment as the engine — same rustc, same Bevy feature set, same
-//! `bevy_dylib-<hash>` — which is why third-party prebuilts are so painful.
-//!
-//! This path has no such requirement: the plugin links nothing, exports one
-//! symbol, and receives every capability through a `#[repr(C)]` function table.
-//! The two mechanisms coexist; in-tree engine plugins keep using the old one.
+//! Standalone plugins do not link Bevy. They export an initialization symbol
+//! and negotiate capabilities through a versioned `#[repr(C)]` function table.
+//! Engine plugins are instead statically linked; the former Rust-ABI dynamic
+//! loader is no longer a supported extension path.
 //!
 //! ## The interesting part: dynamic systems that still run in parallel
 //!
@@ -465,9 +459,8 @@ fn retire_slot_registrations(world: &mut World, slot: usize, prior_loaded_at: u3
     }
     let mut kept_materials = Vec::new();
     for (owner, gen, handle) in materials {
-        if owner == slot && gen == prior_loaded_at {
-            drop(handle);
-        } else {
+        // The slot owns a real material handle only in renderer-enabled builds.
+        if owner != slot || gen != prior_loaded_at {
             kept_materials.push((owner, gen, handle));
         }
     }
@@ -1922,7 +1915,7 @@ unsafe extern "C" fn add_material(
         {
             let _ = (host, desc);
             warn!("[plugin] add_material ignored — this build has no 3D renderer");
-            return sys::AssetHandle::INVALID;
+            sys::AssetHandle::INVALID
         }
         #[cfg(feature = "render_3d")]
         {

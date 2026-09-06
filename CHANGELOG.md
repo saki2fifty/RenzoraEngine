@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 14:32 UTC
+
+- Repaired plugin compatibility tests and updated automated checks for the current architecture, including smaller runtime configurations and separate optimized-build caches.
+
 ## September 6, 2026 — 14:22 UTC
 
 - Replacing a font now refreshes world-space text. Custom hierarchy filters and icons follow changes while unchanged frames keep their cached results.

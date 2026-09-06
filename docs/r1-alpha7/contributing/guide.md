@@ -145,30 +145,21 @@ What's worth a test: new data structures (serialize/deserialize round-trips), ne
 
 ## Continuous integration
 
-CI runs on every push and pull request to `main` (`.github/workflows/test.yml`). Both jobs run **inside the shared base image** `ghcr.io/renzora/base:latest`, so the runner needs nothing installed — `rustc 1.95` and the Linux dev libs are baked into the base (the per-platform cross toolchains aren't needed to test first-party crates).
+CI runs on pushes and pull requests to `main` (`.github/workflows/test.yml`). Jobs use the shared `ghcr.io/renzora/base:latest` image; the pinned Rust toolchain and Linux libraries must be available there.
 
-> CI invokes **`cargo test` and `cargo clippy`** inside the image. The `renzora test` / `renzora check` CLI commands wrap those same cargo invocations in the container, so they reproduce CI locally — run those, not a native `cargo`.
+Root workspace tests and lint use **`--profile dist`**. The standalone `xtask` workspace uses **`--profile release`**, since it has no custom dist profile. Separate cache namespaces prevent restoring the older debug artifacts alongside these optimized builds. Disk reports expose actual runner usage; a cache policy is not a guarantee that the full workspace fits every runner.
 
-Each job runs this inside the image (reproduce with `renzora test` / `renzora check`):
+The workflow is the source of truth for the complete vendor exclusions and GPU/plugin jobs. For a focused native check:
 
 ```bash
-# Test job — first-party crates only; the vendored Bevy-ecosystem crates are excluded
-cargo test --workspace \
-  --exclude bevy_gauge --exclude bevy_hanabi --exclude bevy_mod_outline \
-  --exclude bevy_silk --exclude vleue_navigator \
-  --exclude bevy_mod_openxr --exclude bevy_mod_xr --exclude bevy_xr_utils
-
-# Clippy job — warnings are denied
-cargo clippy --workspace --no-deps \
-  --exclude bevy_gauge --exclude bevy_hanabi --exclude bevy_mod_outline \
-  --exclude bevy_silk --exclude vleue_navigator \
-  --exclude bevy_mod_openxr --exclude bevy_mod_xr --exclude bevy_xr_utils \
-  -- -D warnings \
-  -A clippy::too_many_arguments \
-  -A clippy::type_complexity
+cargo test --profile dist -p <crate>
+cargo clippy --profile dist -p <crate> --no-deps -- \
+  -D warnings -A clippy::too_many_arguments -A clippy::type_complexity
 ```
 
-The vendored crates (`bevy_*`, `vleue_navigator`) are third-party code copied into the tree — they still build as dependencies, but their own test suites are skipped to avoid re-testing upstream. `too_many_arguments` and `type_complexity` are allowed because they're inherent to Bevy systems and queries. New first-party crates are covered automatically via `--workspace`.
+Runtime feature checks run separately with no default features, both without scripting and with scripting enabled, so workspace feature unification cannot mask a broken minimal build. Their caches are separate. The plugin ABI integration suite can be exercised with `--features host`; `--features host,anim,render_3d` additionally covers those optional capabilities.
+
+Vendored crates still build as dependencies, but their own tests and lint are excluded. Standalone C-ABI plugin workspaces use their dist profiles; a leftover Rust-ABI dylib is reported as an error instead of silently skipped as a legacy SDK plugin.
 
 ## Pull requests
 

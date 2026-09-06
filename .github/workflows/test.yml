@@ -12,16 +12,16 @@ on:
 # restores a populated target dir and we build on top of it the two together
 # overflow the disk ("No space left on device"). CI never debugs, and tests
 # pass/fail identically without line tables, so drop debuginfo and incremental
-# artifacts workspace-wide — this both fits the disk and speeds the build.
+# artifacts workspace-wide. Use one non-dev profile and a new cache namespace
+# so migrating profiles cannot restore a second, obsolete artifact tree.
 env:
   CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DIST_DEBUG: "0"
   CARGO_TERM_COLOR: always
 
-# Both jobs run INSIDE the shared base toolchain image
+# Jobs run INSIDE the shared base toolchain image
 # (ghcr.io/renzora/base) — native Linux `cargo test`/`clippy` need only
-# rustc 1.93 + the Linux dev libs (alsa/udev/wayland/xkbcommon/vulkan/mold),
+# the pinned Rust toolchain + Linux dev libs (alsa/udev/wayland/xkbcommon/vulkan/mold),
 # which the base carries; the per-platform cross toolchains (osxcross/xwin/NDK)
 # aren't needed to test first-party crates. We pin `:latest` rather than the
 # content-hash tag because this workflow and docker-image.yml are independent —
@@ -46,7 +46,7 @@ jobs:
           submodules: true
 
       - name: Check plugin wiring is regenerated
-        run: cargo run --manifest-path xtask/Cargo.toml -- sync --check
+        run: cargo run --profile release --manifest-path xtask/Cargo.toml -- sync --check
 
   test:
     runs-on: ubuntu-latest
@@ -57,11 +57,10 @@ jobs:
         with:
           submodules: true
 
-      # `prefix-key` bumped to v1 to discard the old debuginfo-heavy caches; the
-      # new debug=0 builds save a much smaller target dir.
+      # Do not restore the prior dev/test profile cache into dist builds.
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-dist
 
       # Tests the engine's own crates only. The vendored Bevy-ecosystem crates
       # (bevy_*, vleue_navigator) are third-party code copied into the tree;
@@ -75,7 +74,7 @@ jobs:
       # rather than members and `--workspace` never reaches them.
       - name: Run tests
         run: |
-          cargo test --workspace \
+          cargo test --profile dist --workspace \
             --exclude bevy_firefly \
             --exclude bevy_gauge \
             --exclude bevy_gaussian_splatting \
@@ -116,7 +115,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-plugins
+          prefix-key: v2-dist-plugins
           workspaces: plugins -> target
 
       - name: Test every standalone plugin
@@ -124,25 +123,15 @@ jobs:
           failed=""
           for manifest in plugins/*/Cargo.toml; do
             dir=$(dirname "$manifest")
-            # NATIVE plugins are skipped, and running cargo on one would be
-            # actively harmful rather than merely wrong. `crate-type = ["dylib"]`
-            # means it links the real Bevy, and `plugins/` is outside the engine
-            # workspace — so cargo resolves it a FRESH Bevy from crates.io, and a
-            # `renzora` without the `editor` feature, which is why this job began
-            # failing with `unresolved import renzora::EditorSelection` the moment
-            # native plugins landed. Even when it compiles, the result has
-            # different `TypeId`s from the engine and would corrupt the World.
-            #
-            # The only sound way to build one is against the staged SDK, which
-            # `xtask/src/native_plugin.rs` does and `docker/build-all.sh` mirrors
-            # with this same test. `"cdylib"` also ends in `dylib`, hence the
-            # quoted match.
+            # Bevy-linked dylibs are retired, not silently skipped as success.
+            # Engine extensions are static crates; this lane tests C-ABI guests.
             if grep -q 'crate-type.*"dylib"' "$manifest"; then
-              echo "skipping $dir (native plugin — built against the SDK, not by cargo)"
+              echo "::error::$dir declares a retired Bevy-linked dylib"
+              failed="$failed $dir"
               continue
             fi
             echo "::group::$dir"
-            if ! (cd "$dir" && cargo test); then
+            if ! (cd "$dir" && cargo test --profile dist); then
               failed="$failed $dir"
             fi
             echo "::endgroup::"
@@ -214,7 +203,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-gpu
+          prefix-key: v2-dist-gpu
 
       # Only the crates that actually have GPU-backed tests. Kept as an explicit
       # list rather than `--workspace`: a software-rasterized `--workspace` run
@@ -222,7 +211,7 @@ jobs:
       # an adapter and already ran in the `test` job.
       - name: Run GPU-backed tests
         run: |
-          cargo test \
+          cargo test --profile dist \
             -p renzora_test_harness \
             -p renzora_postprocess \
             -p renzora_shader \
@@ -245,7 +234,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-dist
 
       # Lints the engine's own crates (same first-party scope as `test`).
       # `--no-deps` keeps clippy off the vendored crates that leak in as
@@ -253,12 +242,14 @@ jobs:
       # they're inherent to Bevy systems and queries (Bevy allows them too).
       - name: Clippy
         run: |
-          cargo clippy --workspace --no-deps \
+          cargo clippy --profile dist --workspace --no-deps \
             --exclude bevy_firefly \
+            --exclude bevy_gauge \
             --exclude bevy_gaussian_splatting \
             --exclude bevy_hanabi \
             --exclude bevy_hui \
             --exclude bevy_mod_outline \
+            --exclude bevy_procedural_tree \
             --exclude bevy_silk \
             --exclude vleue_navigator \
             --exclude polyanya \
@@ -273,11 +264,39 @@ jobs:
       # above does not reach it. Linted separately rather than left uncovered —
       # it owns the plugin-wiring generator.
       - name: Clippy (xtask)
-        run: cargo clippy --manifest-path xtask/Cargo.toml -- -D warnings
+        run: cargo clippy --profile release --manifest-path xtask/Cargo.toml -- -D warnings
 
       # `tools/updater` is its own workspace too (it must share nothing with the
       # tree it replaces), so `--workspace` above doesn't reach it either. Linted
       # here rather than in the `plugins` job that builds it, because this is the
       # job with the clippy component installed.
       - name: Clippy (update sidecar)
-        run: cargo clippy --manifest-path tools/updater/Cargo.toml -- -D warnings
+        run: cargo clippy --profile dist --manifest-path tools/updater/Cargo.toml -- -D warnings
+
+  # Each feature variant gets its own runner/cache. Keep stripped-runtime
+  # coverage independent of workspace feature unification and disk footprint.
+  runtime-features:
+    runs-on: ubuntu-latest
+    container: ghcr.io/renzora/base:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimal
+            features: ""
+          - name: scripting
+            features: scripting
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-dist-runtime-${{ matrix.name }}
+      - name: Check runner disk
+        run: df -h .
+      - name: Test runtime feature boundary
+        run: cargo test --profile dist -p renzora_runtime --no-default-features --features "${{ matrix.features }}" --lib
+      - name: Report artifact disk use
+        if: always()
+        run: du -sh target || true

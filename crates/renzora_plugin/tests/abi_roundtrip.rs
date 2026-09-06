@@ -5,13 +5,33 @@
 //! if it fails, the fault is in registration / query building / dispatch /
 //! marshalling, not in library loading.
 //!
-//! Run with `renzora test`; `cargo test` cannot link natively on Windows
-//! (CLAUDE.md §2).
+//! Run with `cargo test --profile dist -p renzora_plugin --features host,anim
+//! --test abi_roundtrip`. Rendering-specific coverage additionally needs render_3d.
+
+#![cfg(feature = "host")]
 
 use bevy::prelude::*;
 use renzora_plugin::host as abi_host;
 use renzora_plugin::sys;
 use renzora_plugin::ecs;
+
+fn test_identity() -> renzora_identity::CanonicalId {
+    renzora_identity::CanonicalId::parse("engine://abi-roundtrip").unwrap()
+}
+
+fn durable(local: &str) -> String {
+    abi_host::durable_type_path(&test_identity(), local)
+}
+
+fn init_test_plugin(world: &mut World, init: sys::ExtensionInit) -> sys::InitResult {
+    init_test_generation(world, init, abi_host::PluginGeneration::default(), 0, 0)
+}
+
+fn init_test_generation(world: &mut World, init: sys::ExtensionInit, counter: abi_host::PluginGeneration, generation: u32, slot: usize) -> sys::InitResult {
+    // Exercise the current persistable host boundary with one stable fixture
+    // identity, not the retired anonymous initializer that refuses components.
+    abi_host::init_plugin_gen(world, init, counter, generation, slot, test_identity()).as_init_result()
+}
 
 /// A plugin-owned component, defined here rather than borrowed from
 /// `plugins/spinner`: linking that would pull it into the engine's workspace and
@@ -109,7 +129,7 @@ fn a_streamed_response_arrives_in_order_and_ends_once() {
     app.init_resource::<PluginHttpInbox>();
 
     assert_eq!(
-        unsafe { abi_host::init_plugin(app.world_mut(), stream_init) },
+        unsafe { init_test_plugin(app.world_mut(), stream_init) },
         sys::InitResult::Ok,
     );
 
@@ -175,7 +195,7 @@ fn poll_does_not_steal_stream_chunks() {
     app.init_resource::<PluginHttpInbox>();
 
     assert_eq!(
-        unsafe { abi_host::init_plugin(app.world_mut(), stream_init) },
+        unsafe { init_test_plugin(app.world_mut(), stream_init) },
         sys::InitResult::Ok,
     );
 
@@ -240,7 +260,7 @@ fn plugin_registers_and_mutates_host_components() {
     let mut app = test_app();
     let _guard = plugin_lock();
 
-    let result = abi_host::init_plugin(app.world_mut(), spinner_init);
+    let result = init_test_plugin(app.world_mut(), spinner_init);
     assert_eq!(result, sys::InitResult::Ok, "plugin init failed");
 
     // The host learned about a component it has no Rust type for.
@@ -248,7 +268,7 @@ fn plugin_registers_and_mutates_host_components() {
         .world()
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH)
+        .get(&durable(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH))
         .copied()
         .expect("Spinner was not registered");
 
@@ -294,7 +314,7 @@ fn unknown_host_component_fails_loudly() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
 
-    let result = abi_host::init_plugin(app.world_mut(), spinner_init);
+    let result = init_test_plugin(app.world_mut(), spinner_init);
     assert_eq!(result, sys::InitResult::Failed);
 }
 
@@ -379,10 +399,10 @@ unsafe extern "C" fn filter_init(
 fn with_and_without_actually_filter() {
     let mut app = test_app();
     let _guard = plugin_lock();
-    assert_eq!(abi_host::init_plugin(app.world_mut(), filter_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), filter_init), sys::InitResult::Ok);
 
     let ids = app.world().resource::<abi_host::PluginComponents>().0.clone();
-    let (marker, excluded) = (ids[MARKER], ids[EXCLUDED]);
+    let (marker, excluded) = (ids[&durable(MARKER)], ids[&durable(EXCLUDED)]);
 
     let add_zst = |app: &mut App, e: bevy::prelude::Entity, id| unsafe {
         // Zero-sized: any aligned non-null pointer is valid, and nothing is read.
@@ -412,7 +432,7 @@ fn schema_reaches_the_host() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), spinner_init),
+        init_test_plugin(app.world_mut(), spinner_init),
         sys::InitResult::Ok
     );
 
@@ -420,7 +440,7 @@ fn schema_reaches_the_host() {
     let info = schemas
         .0
         .iter()
-        .find(|s| s.type_path == <Spinner as renzora_plugin::ecs::Component>::TYPE_PATH)
+        .find(|s| s.type_path == durable(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH))
         .expect("no schema recorded for Spinner");
 
     assert_eq!(info.display_name, "Spinner");
@@ -463,7 +483,7 @@ fn a_panicking_system_does_not_kill_the_host() {
     // NOTE: this test prints a panic + backtrace on purpose. That output is the
     // guard working, not a failure.
     let mut app = test_app();
-    assert_eq!(abi_host::init_plugin(app.world_mut(), panic_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), panic_init), sys::InitResult::Ok);
 
     let e = app.world_mut().spawn(Transform::IDENTITY).id();
 
@@ -511,7 +531,7 @@ unsafe extern "C" fn multi_init(
 fn multi_field_schema_and_default() {
     let mut app = test_app();
     let _guard = plugin_lock();
-    assert_eq!(abi_host::init_plugin(app.world_mut(), multi_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), multi_init), sys::InitResult::Ok);
 
     let schemas = app.world().resource::<abi_host::PluginComponentSchemas>();
     let info = schemas
@@ -546,7 +566,7 @@ fn multi_field_schema_and_default() {
 fn insert_by_id_writes_the_actual_bytes() {
     let mut app = test_app();
     let _guard = plugin_lock();
-    assert_eq!(abi_host::init_plugin(app.world_mut(), multi_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), multi_init), sys::InitResult::Ok);
 
     let (cid, default_value) = {
         let s = app.world().resource::<abi_host::PluginComponentSchemas>();
@@ -602,7 +622,7 @@ unsafe extern "C" fn spawner_init(
 fn a_plugin_can_spawn_and_insert() {
     let mut app = test_app();
     let _guard = plugin_lock();
-    assert_eq!(abi_host::init_plugin(app.world_mut(), spawner_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), spawner_init), sys::InitResult::Ok);
 
     let cid = {
         let s = app.world().resource::<abi_host::PluginComponentSchemas>();
@@ -639,7 +659,7 @@ fn a_plugin_can_spawn_and_insert() {
 fn reserved_ids_are_not_reused_across_frames() {
     let mut app = test_app();
     let _guard = plugin_lock();
-    assert_eq!(abi_host::init_plugin(app.world_mut(), spawner_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), spawner_init), sys::InitResult::Ok);
     let cid = {
         let s = app.world().resource::<abi_host::PluginComponentSchemas>();
         s.0.iter().find(|s| s.type_path.ends_with("::Multi")).unwrap().id
@@ -750,7 +770,7 @@ fn plugin_id(world: &World, type_path: &str) -> bevy::ecs::component::ComponentI
     *world
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(type_path)
+        .get(&durable(type_path))
         .expect("resource was not registered")
 }
 
@@ -759,7 +779,7 @@ fn a_plugin_owns_a_resource_and_it_survives_registration() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), resource_init),
+        init_test_plugin(app.world_mut(), resource_init),
         sys::InitResult::Ok
     );
 
@@ -795,7 +815,7 @@ fn a_system_writes_through_res_mut() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), resource_init),
+        init_test_plugin(app.world_mut(), resource_init),
         sys::InitResult::Ok
     );
     let id = plugin_id(
@@ -859,7 +879,7 @@ fn optional_data_matches_entities_that_lack_it() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), optional_init),
+        init_test_plugin(app.world_mut(), optional_init),
         sys::InitResult::Ok
     );
     let tag_id = plugin_id(
@@ -936,7 +956,7 @@ fn or_matches_either_branch() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), or_init),
+        init_test_plugin(app.world_mut(), or_init),
         sys::InitResult::Ok
     );
     let tag_id = plugin_id(
@@ -1018,7 +1038,7 @@ fn a_system_reads_a_resource_it_does_not_write() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), read_only_init),
+        init_test_plugin(app.world_mut(), read_only_init),
         sys::InitResult::Ok
     );
     let scaled_id = plugin_id(
@@ -1089,7 +1109,7 @@ fn inserting_a_host_transform_marshals_rather_than_memcpy() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), placer_init),
+        init_test_plugin(app.world_mut(), placer_init),
         sys::InitResult::Ok
     );
     let placer_id = plugin_id(
@@ -1164,7 +1184,7 @@ fn a_nested_or_still_matches_either_inner_branch() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), nested_or_init),
+        init_test_plugin(app.world_mut(), nested_or_init),
         sys::InitResult::Ok
     );
     let tag = plugin_id(app.world(), <Tag as renzora_plugin::ecs::Component>::TYPE_PATH);
@@ -1201,11 +1221,11 @@ fn a_resource_is_listed_once_however_many_systems_take_it() {
     // `resource_init` registers Tally once; two systems both naming it would
     // each drive a registration, and an unguarded push listed it per system.
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), resource_init),
+        init_test_plugin(app.world_mut(), resource_init),
         sys::InitResult::Ok
     );
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), resource_init),
+        init_test_plugin(app.world_mut(), resource_init),
         sys::InitResult::Ok
     );
     let id = plugin_id(
@@ -1256,7 +1276,7 @@ unsafe extern "C" fn droppy_init(
 fn a_component_declaring_a_destructor_is_refused_not_panicked() {
     let mut app = test_app();
     let _guard = plugin_lock();
-    let result = abi_host::init_plugin(app.world_mut(), droppy_init);
+    let result = init_test_plugin(app.world_mut(), droppy_init);
     assert_eq!(
         result,
         sys::InitResult::Failed,
@@ -1270,7 +1290,7 @@ fn a_component_declaring_a_destructor_is_refused_not_panicked() {
     assert!(
         app.world()
             .get_resource::<abi_host::PluginComponents>()
-            .is_none_or(|c| !c.0.contains_key("test::Droppy")),
+            .is_none_or(|c| !c.0.contains_key(&durable("test::Droppy"))),
         "the component was registered despite being refused"
     );
 }
@@ -1325,7 +1345,7 @@ fn a_field_kind_from_a_newer_abi_does_not_poison_the_host() {
     let _guard = plugin_lock();
     let mut app = test_app();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), future_kind_init),
+        init_test_plugin(app.world_mut(), future_kind_init),
         sys::InitResult::Ok,
         "one unrecognised field kind rejected the whole component"
     );
@@ -1334,7 +1354,7 @@ fn a_field_kind_from_a_newer_abi_does_not_poison_the_host() {
     let info = schemas
         .0
         .iter()
-        .find(|i| i.type_path == "test::FutureKind")
+        .find(|i| i.type_path == durable("test::FutureKind"))
         .expect("component was not registered");
 
     // Both fields survive: the schema is data, and forgetting the one it cannot
@@ -1404,7 +1424,7 @@ fn an_access_kind_from_a_newer_abi_refuses_the_system() {
     }
 
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), init),
+        init_test_plugin(app.world_mut(), init),
         sys::InitResult::Ok,
         "`add_system` did not report the unknown access kind — it used to return \
          nothing, so a refusal was indistinguishable from success"
@@ -1477,7 +1497,7 @@ fn two_queries_in_one_system_stay_separate() {
     let _guard = plugin_lock();
     let mut app = test_app();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), pump_init),
+        init_test_plugin(app.world_mut(), pump_init),
         sys::InitResult::Ok
     );
     let source_id = plugin_id(
@@ -1549,7 +1569,7 @@ fn an_unchanged_component_is_not_marked_changed() {
     let _guard = plugin_lock();
     let mut app = test_app();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), passive_init),
+        init_test_plugin(app.world_mut(), passive_init),
         sys::InitResult::Ok
     );
     let spinner_id = plugin_id(
@@ -1723,7 +1743,7 @@ fn spawn_spinner(app: &mut App, speed: f32) -> Entity {
         .world()
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH)
+        .get(&durable(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH))
         .copied()
         .expect("Spinner was not registered");
     let spinner = Spinner { speed };
@@ -1749,7 +1769,7 @@ fn spinner_speed(app: &App, entity: Entity) -> f32 {
         .world()
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH)
+        .get(&durable(<Spinner as renzora_plugin::ecs::Component>::TYPE_PATH))
         .copied()
         .expect("Spinner was not registered");
     let ptr = app
@@ -1768,7 +1788,7 @@ fn a_reload_retires_the_previous_builds_systems() {
     let counter = abi_host::PluginGeneration::default();
 
     assert_eq!(
-        abi_host::init_plugin_gen(app.world_mut(), spinner_init, counter.clone(), 0, 0),
+        init_test_generation(app.world_mut(), spinner_init, counter.clone(), 0, 0),
         sys::InitResult::Ok
     );
     let e = spawn_spinner(&mut app, 1.0);
@@ -1783,7 +1803,7 @@ fn a_reload_retires_the_previous_builds_systems() {
 
     // Reload: register v2, then bump the counter exactly as the loader does.
     assert_eq!(
-        abi_host::init_plugin_gen(app.world_mut(), spinner_init_v2, counter.clone(), 1, 0),
+        init_test_generation(app.world_mut(), spinner_init_v2, counter.clone(), 1, 0),
         sys::InitResult::Ok
     );
     counter.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -1811,10 +1831,10 @@ fn a_reload_keeps_the_component_data_entities_already_have() {
     let _guard = plugin_lock();
     let counter = abi_host::PluginGeneration::default();
 
-    abi_host::init_plugin_gen(app.world_mut(), spinner_init, counter.clone(), 0, 0);
+    init_test_generation(app.world_mut(), spinner_init, counter.clone(), 0, 0);
     let e = spawn_spinner(&mut app, 7.5);
 
-    abi_host::init_plugin_gen(app.world_mut(), spinner_init_v2, counter.clone(), 1, 0);
+    init_test_generation(app.world_mut(), spinner_init_v2, counter.clone(), 1, 0);
     counter.store(1, std::sync::atomic::Ordering::Relaxed);
     app.update();
 
@@ -1833,11 +1853,11 @@ fn a_reload_that_changes_a_layout_is_refused() {
     let _guard = plugin_lock();
     let counter = abi_host::PluginGeneration::default();
 
-    abi_host::init_plugin_gen(app.world_mut(), spinner_init, counter.clone(), 0, 0);
+    init_test_generation(app.world_mut(), spinner_init, counter.clone(), 0, 0);
 
     // Adding a field moves nothing for the plugin but invalidates every live
     // instance, so the host must refuse rather than let it register.
-    let result = abi_host::init_plugin_gen(app.world_mut(), spinner_init_relayout, counter.clone(), 1, 0);
+    let result = init_test_generation(app.world_mut(), spinner_init_relayout, counter.clone(), 1, 0);
     assert_eq!(
         result,
         sys::InitResult::Failed,
@@ -1874,7 +1894,7 @@ fn a_system_with_no_queries_still_runs() {
     let _guard = plugin_lock();
 
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), resource_only_init),
+        init_test_plugin(app.world_mut(), resource_only_init),
         sys::InitResult::Ok
     );
 
@@ -1882,7 +1902,7 @@ fn a_system_with_no_queries_still_runs() {
         .world()
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(<Score as renzora_plugin::ecs::Resource>::TYPE_PATH)
+        .get(&durable(<Score as renzora_plugin::ecs::Resource>::TYPE_PATH))
         .copied()
         .expect("Score was not registered");
 
@@ -1943,14 +1963,14 @@ fn a_resource_that_grew_a_field_is_refused_too() {
     let _guard = plugin_lock();
     let counter = abi_host::PluginGeneration::default();
 
-    abi_host::init_plugin_gen(app.world_mut(), resource_only_init, counter.clone(), 0, 0);
+    init_test_generation(app.world_mut(), resource_only_init, counter.clone(), 0, 0);
 
     // `register_resource` short-circuits on a known name and never reaches
     // `register_component`, so the layout guard living only in the latter covered
     // components and missed every resource. That is the worse half: a resource is
     // one allocation, and a grown struct writes straight off the end of it.
     let result =
-        abi_host::init_plugin_gen(app.world_mut(), score_init_relayout, counter.clone(), 1, 0);
+        init_test_generation(app.world_mut(), score_init_relayout, counter.clone(), 1, 0);
     assert_eq!(
         result,
         sys::InitResult::Failed,
@@ -1973,7 +1993,7 @@ fn a_resource_that_grew_a_field_is_refused_too() {
         .world()
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(<Score as renzora_plugin::ecs::Resource>::TYPE_PATH)
+        .get(&durable(<Score as renzora_plugin::ecs::Resource>::TYPE_PATH))
         .copied()
         .expect("Score was not registered");
     let read = |app: &App| {
@@ -2025,14 +2045,14 @@ fn a_plugin_reads_the_keyboard() {
     app.init_resource::<abi_host::input::PluginInput>();
 
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), input_init),
+        init_test_plugin(app.world_mut(), input_init),
         sys::InitResult::Ok
     );
     let id = app
         .world()
         .resource::<abi_host::PluginComponents>()
         .0
-        .get(<Score as renzora_plugin::ecs::Resource>::TYPE_PATH)
+        .get(&durable(<Score as renzora_plugin::ecs::Resource>::TYPE_PATH))
         .copied()
         .expect("Score was not registered");
     let read = |app: &App| {
@@ -2087,6 +2107,7 @@ fn a_key_from_a_newer_abi_reads_as_up_rather_than_aliasing() {
 /// Plays a clip on every entity it can see, so the test can inspect what the
 /// host parked. `renzora_animation` is not linked here, and that is the point:
 /// the mechanism carries these bytes without knowing what they mean.
+#[cfg(feature = "anim")]
 fn play_something(q: ecs::Query<ecs::Entity, ecs::With<Spinner>>, mut cmds: ecs::Commands) {
     use renzora_plugin::anim::AnimCommands;
     for e in &q {
@@ -2094,6 +2115,7 @@ fn play_something(q: ecs::Query<ecs::Entity, ecs::With<Spinner>>, mut cmds: ecs:
     }
 }
 
+#[cfg(feature = "anim")]
 unsafe extern "C" fn anim_init(
     iface: *const sys::Interface,
     host: *mut sys::Host,
@@ -2105,12 +2127,13 @@ unsafe extern "C" fn anim_init(
 }
 
 #[test]
+#[cfg(feature = "anim")]
 fn a_service_call_reaches_the_host_queue_untouched() {
     use renzora_plugin::anim;
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), anim_init),
+        init_test_plugin(app.world_mut(), anim_init),
         sys::InitResult::Ok
     );
     let entity = spawn_spinner(&mut app, 1.0);
@@ -2174,7 +2197,7 @@ fn set_panel_content_crosses_as_id_and_markup() {
     let mut app = test_app();
     let _guard = plugin_lock();
     assert_eq!(
-        unsafe { abi_host::init_plugin(app.world_mut(), panel_content_init) },
+        init_test_plugin(app.world_mut(), panel_content_init),
         sys::InitResult::Ok
     );
     app.update();
@@ -2248,7 +2271,7 @@ fn a_service_reply_reaches_the_plugin_once() {
     app.init_resource::<PluginServiceReplies>();
 
     assert_eq!(
-        unsafe { abi_host::init_plugin(app.world_mut(), dialog_init) },
+        unsafe { init_test_plugin(app.world_mut(), dialog_init) },
         sys::InitResult::Ok
     );
 
@@ -2306,7 +2329,7 @@ fn a_reply_for_another_service_is_not_delivered() {
     app.init_resource::<PluginServiceReplies>();
 
     assert_eq!(
-        unsafe { abi_host::init_plugin(app.world_mut(), dialog_init) },
+        unsafe { init_test_plugin(app.world_mut(), dialog_init) },
         sys::InitResult::Ok
     );
 
@@ -2352,17 +2375,18 @@ fn panel_service_id_is_its_own() {
 #[test]
 fn taking_one_service_leaves_the_others_alone() {
     use renzora_plugin::host::ServiceCall;
+    let animation = sys::service_id("renzora.animation");
     let other = sys::service_id("renzora.audio");
     // The entity is irrelevant here — what is under test is that `take` splits
     // the queue by service and leaves the rest intact.
     let e = Entity::PLACEHOLDER;
     let mut queue = abi_host::PluginServiceCalls(vec![
-        ServiceCall { entity: e, service: renzora_plugin::anim::SERVICE, op: 0, payload: vec![] },
+        ServiceCall { entity: e, service: animation, op: 0, payload: vec![] },
         ServiceCall { entity: e, service: other, op: 7, payload: vec![9] },
-        ServiceCall { entity: e, service: renzora_plugin::anim::SERVICE, op: 1, payload: vec![] },
+        ServiceCall { entity: e, service: animation, op: 1, payload: vec![] },
     ]);
 
-    let mine = queue.take(renzora_plugin::anim::SERVICE);
+    let mine = queue.take(animation);
     assert_eq!(mine.len(), 2);
     assert_eq!(queue.0.len(), 1, "another service's call was eaten");
     assert_eq!(queue.0[0].service, other);
@@ -2374,6 +2398,7 @@ fn taking_one_service_leaves_the_others_alone() {
 #[test]
 fn service_ids_are_distinct_and_stable() {
     assert_ne!(sys::service_id("renzora.animation"), sys::service_id("renzora.audio"));
+    #[cfg(feature = "anim")]
     assert_eq!(renzora_plugin::anim::SERVICE, sys::service_id("renzora.animation"));
     // FNV-1a offset basis, i.e. the hash of nothing. Pinned so a change to the
     // hash function shows up here rather than as every plugin silently missing.
@@ -2385,6 +2410,7 @@ fn service_ids_are_distinct_and_stable() {
 /// A name over the cap must be dropped, not truncated: a shortened name resolves
 /// to no clip, which presents as "animation is broken" rather than as a limit.
 #[test]
+#[cfg(feature = "anim")]
 fn an_over_long_animation_name_is_refused_rather_than_truncated() {
     use renzora_plugin::anim::{AnimName, NAME_CAP};
     assert!(AnimName::new(&"a".repeat(NAME_CAP + 1)).is_none());
@@ -2395,6 +2421,7 @@ fn an_over_long_animation_name_is_refused_rather_than_truncated() {
 /// A `len` past the buffer must clamp rather than read off the end — the engine
 /// reads this out of plugin memory and cannot trust the length.
 #[test]
+#[cfg(feature = "anim")]
 fn an_animation_name_with_a_bogus_length_is_clamped() {
     use renzora_plugin::anim::{AnimName, NAME_CAP};
     let mut name = AnimName::new("run").unwrap();
@@ -2404,6 +2431,7 @@ fn an_animation_name_with_a_bogus_length_is_clamped() {
 
 /// Non-UTF-8 bytes must read as empty rather than panicking the engine.
 #[test]
+#[cfg(feature = "anim")]
 fn an_animation_name_that_is_not_utf8_reads_as_empty() {
     use renzora_plugin::anim::AnimName;
     let mut name = AnimName::EMPTY;
@@ -2413,6 +2441,7 @@ fn an_animation_name_that_is_not_utf8_reads_as_empty() {
 }
 
 #[test]
+#[cfg(feature = "anim")]
 fn an_animation_op_from_a_newer_build_is_recognisable_as_unknown() {
     use renzora_plugin::anim::AnimOp;
     let future = AnimOp(99);
@@ -2423,6 +2452,7 @@ fn an_animation_op_from_a_newer_build_is_recognisable_as_unknown() {
 /// `is_clip` compares hashes, so it must distinguish names and must not treat
 /// "nothing playing" as a match for the empty string.
 #[test]
+#[cfg(feature = "anim")]
 fn anim_state_name_comparison_distinguishes_clips() {
     use renzora_plugin::anim::{name_hash, AnimState};
     let mut state = AnimState { clip: name_hash("run"), ..Default::default() };
@@ -2439,6 +2469,7 @@ fn anim_state_name_comparison_distinguishes_clips() {
 /// The mirror is read straight out of a query cell and wrapped
 /// `#[repr(transparent)]` engine-side, so its size is part of the contract.
 #[test]
+#[cfg(feature = "anim")]
 fn the_anim_state_mirror_has_a_stable_layout() {
     use renzora_plugin::anim::AnimState;
     assert_eq!(core::mem::size_of::<AnimState>(), 32);
@@ -2497,7 +2528,7 @@ fn run_mesh_case(case: u32) -> (bool, usize) {
     MESH_CASE.store(case, std::sync::atomic::Ordering::Relaxed);
     MESH_RESULT.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), mesh_init),
+        init_test_plugin(app.world_mut(), mesh_init),
         sys::InitResult::Ok
     );
     let handle = sys::AssetHandle(MESH_RESULT.load(std::sync::atomic::Ordering::Relaxed));
@@ -2558,7 +2589,7 @@ fn omitted_normals_and_uvs_are_filled_in_by_the_host() {
     app.init_resource::<Assets<Mesh>>();
     MESH_CASE.store(0, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), mesh_init),
+        init_test_plugin(app.world_mut(), mesh_init),
         sys::InitResult::Ok
     );
     let meshes = app.world().resource::<Assets<Mesh>>();
@@ -2608,7 +2639,7 @@ fn a_system_can_take_meshes_without_conflicting_with_its_queries() {
     let _guard = plugin_lock();
     MESH_READ_RAN.store(false, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), mesh_read_init),
+        init_test_plugin(app.world_mut(), mesh_read_init),
         sys::InitResult::Ok
     );
     spawn_spinner(&mut app, 1.0);
@@ -2628,7 +2659,7 @@ fn reading_an_entity_with_no_mesh_yields_nothing() {
     let _guard = plugin_lock();
     MESH_READ_TRIS.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), mesh_read_init),
+        init_test_plugin(app.world_mut(), mesh_read_init),
         sys::InitResult::Ok
     );
     spawn_spinner(&mut app, 1.0);
@@ -2736,9 +2767,9 @@ fn write_back_lands_on_the_filtered_row_not_the_first_one() {
     let _guard = plugin_lock();
     let mut app = test_app();
     TICK_ACCESS.store(12, std::sync::atomic::Ordering::Relaxed); // Changed
-    assert_eq!(abi_host::init_plugin(app.world_mut(), tick_init), sys::InitResult::Ok);
+    assert_eq!(init_test_plugin(app.world_mut(), tick_init), sys::InitResult::Ok);
 
-    let ticked = app.world().resource::<abi_host::PluginComponents>().0[TICKED];
+    let ticked = app.world().resource::<abi_host::PluginComponents>().0[&durable(TICKED)];
     let ids: Vec<_> = (0..5)
         .map(|_| {
             let e = app.world_mut().spawn(Transform::IDENTITY).id();
@@ -2792,7 +2823,7 @@ fn a_tick_filter_inside_an_or_refuses_the_system() {
     let _guard = plugin_lock();
     let mut app = test_app();
     assert_eq!(
-        abi_host::init_plugin(app.world_mut(), or_tick_init),
+        init_test_plugin(app.world_mut(), or_tick_init),
         sys::InitResult::Failed,
         "a change-tick term inside `Or` must refuse the system"
     );
