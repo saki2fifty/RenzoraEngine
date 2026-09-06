@@ -440,9 +440,7 @@ pub fn build_lean(
     if !static_plugins.is_empty() {
         features.push_str(",static_plugins");
     }
-    // Only when there is something to link. Turning it on with an empty table
-    // would compile the aggregator and the `renzora/static_scripts` variant of
-    // `script!` for nothing.
+    // An empty script table needs no aggregator dependency.
     if has_scripts {
         features.push_str(",static_scripts");
     }
@@ -1155,51 +1153,8 @@ fn stage_static_plugins(
     Ok(())
 }
 
-/// Write only when the content differs, so an unchanged plugin selection does
-/// not touch the mtime and force cargo to rebuild the aggregator (and relink the
-/// whole binary) on every export.
-/// Generate the crate that compiles the project's `.rs` scripts into the binary.
-///
-/// A lean binary links Bevy statically, so there is no shared image for a script
-/// dylib to bind to — `RustScriptPlugin` refuses to register a backend and the
-/// exported game reports `No backend for Some("rs")`. Compiling the sources in
-/// removes the boundary rather than trying to make it safe: no library, no symbol
-/// lookup, no second `World` type, because the script is part of the same
-/// compilation as everything it touches.
-///
-/// Each script becomes a `#[path]` module of `renzora_static_scripts`, which is
-/// what keeps fifty of them from colliding. Two things would otherwise collide:
-///
-/// - `renzora::script!` emits `#[unsafe(no_mangle)] fn renzora_script_update`,
-///   and fifty of those do not link. The `renzora/static_scripts` feature that
-///   the generated manifest turns on drops the attribute; the aggregator then
-///   names each entry point by path instead of by symbol.
-/// - a script's own items (`#[derive(Component)] struct Spin`) would clash with
-///   another script's. Modules namespace them, so two scripts may both define a
-///   `Spin` and neither knows.
-///
-/// Returns whether anything was generated, so the caller only adds the feature
-/// when there is something to link.
-/// Ship the plugin SDK so the exported game can compile plugins of its own.
-///
-/// This is what "enable modding" buys. Without it a game loads only the
-/// prebuilt libraries the export staged; with it, a player can drop a native
-/// plugin's SOURCE into `plugins/` and the game builds it on next launch,
-/// exactly as the editor does — same compiler driver, same SDK, same loading.
-///
-/// Copied rather than repacked. A release ships `sdk.tar.zst` and unpacks it on
-/// first run, deleting the archive, so an editor that has been started once has
-/// only the extracted tree — and repacking 1.5 GB at `zstd -19` would add
-/// minutes to every export to save space in a directory the player never
-/// downloads over a network. Whichever form is present is what ships: the
-/// archive if the editor has not unpacked it yet, the tree otherwise, and the
-/// game's own first-run step handles the archive case.
-///
-/// Host platform only. An SDK is only correct on the platform it was built for —
-/// its proc-macro dylibs belong to whatever ran the compiler — so shipping this
-/// editor's SDK inside a game for another OS would hand a player a compiler that
-/// cannot run. That is the same rule that makes a cross-built editor unable to
-/// compile scripts.
+/// Stage the small source SDK for games with runtime modding enabled.
+/// Returns false with a warning when the source package is absent.
 pub fn stage_modding_sdk(
     editor_dir: &Path,
     output_dir: &Path,
@@ -1225,55 +1180,10 @@ pub fn stage_modding_sdk(
         return Ok(true);
     }
 
-    // The archive first: smaller, and the game unpacks it on first launch behind
-    // the same progress window the editor uses.
-    let archive = editor_dir.join("sdk.tar.zst");
-    if archive.is_file() {
-        std::fs::copy(&archive, output_dir.join("sdk.tar.zst"))
-            .map_err(|e| format!("copy sdk.tar.zst: {e}"))?;
-        progress("Shipped the plugin SDK (compressed) for modding".to_string());
-        return Ok(true);
-    }
-
-    let sdk = editor_dir.join("sdk");
-    if !sdk.join("manifest.json").is_file() {
-        progress(
-            "WARN: modding is on but this editor has no plugin SDK — the game will ship \
-             without one and can load only prebuilt plugins."
-                .to_string(),
-        );
-        return Ok(false);
-    }
-
-    progress("Copying the plugin SDK for modding (this is ~1.5 GB)…".to_string());
-    let copied = copy_dir(&sdk, &output_dir.join("sdk"))?;
-    progress(format!(
-        "Shipped the plugin SDK for modding ({copied} files)"
-    ));
-    Ok(true)
+    progress("WARN: modding is on but the small Rust source SDK is missing; only prebuilt plugins can load.".into());
+    Ok(false)
 }
 
-/// Recursive copy, returning how many files landed.
-fn copy_dir(from: &Path, to: &Path) -> Result<usize, String> {
-    std::fs::create_dir_all(to).map_err(|e| format!("create {}: {e}", to.display()))?;
-    let mut count = 0;
-    let entries = std::fs::read_dir(from).map_err(|e| format!("read {}: {e}", from.display()))?;
-    for entry in entries.flatten() {
-        let src = entry.path();
-        let Some(name) = src.file_name() else {
-            continue;
-        };
-        let dst = to.join(name);
-        if src.is_dir() {
-            count += copy_dir(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst)
-                .map_err(|e| format!("copy {} → {}: {e}", src.display(), dst.display()))?;
-            count += 1;
-        }
-    }
-    Ok(count)
-}
 
 
 /// Ship the loose Tier-1 plugin cdylibs the editor already built, beside
@@ -1733,6 +1643,22 @@ mod tests {
         assert!(!obsolete.exists());
         assert!(!output.path().join("sdk").exists());
         assert!(!output.path().join("sdk.tar.zst").exists());
+    }
+
+    #[test]
+    fn absent_source_sdk_does_not_ship_retired_sdk() {
+        let installation = tempfile::tempdir().expect("installation");
+        let output = tempfile::tempdir().expect("output");
+        std::fs::create_dir(installation.path().join("sdk")).expect("legacy directory");
+        std::fs::write(installation.path().join("sdk/manifest.json"), "{}").expect("manifest");
+        std::fs::write(installation.path().join("sdk.tar.zst"), "legacy").expect("archive");
+        let mut messages = Vec::new();
+        assert!(!stage_modding_sdk(installation.path(), output.path(), &mut |m| messages.push(m)).expect("stage"));
+        assert!(messages.iter().any(|m| m.contains("source SDK is missing")));
+        assert!(!output.path().join("sdk").exists());
+        assert!(!output.path().join("sdk.tar.zst").exists());
+        assert!(installation.path().join("sdk/manifest.json").exists());
+        assert!(installation.path().join("sdk.tar.zst").exists());
     }
 
     #[test]

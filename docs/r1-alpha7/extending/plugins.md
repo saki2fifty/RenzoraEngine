@@ -11,7 +11,7 @@ Renzora groups engine features into Bevy plugins. Ordinary third-party plugins c
 | Standalone C-ABI plugin | Guest `renzora_plugin` API; no Bevy types cross the boundary | Load/live replacement according to the host contract |
 | Loose Rust plugin | A single `.rs` file compiled against that guest API | Background compilation and live replacement |
 
-See [Native Plugins](native-plugins.md) for full engine access, [Standalone Plugins](standalone-plugins.md) for the C ABI, and [Architecture](../setup/architecture.md) for the native editor/runtime split and retained legacy launch path.
+See [Native Plugins](native-plugins.md) for full engine access, [Standalone Plugins](standalone-plugins.md) for the C ABI, and [Architecture](../setup/architecture.md) for the native editor/runtime split.
 
 ## A minimal engine plugin
 
@@ -80,7 +80,11 @@ For a project's restart-required extension, use the different manifest and stage
 
 Standalone libraries use `renzora_plugin`, not the full Bevy contract. Their version and interface-prefix negotiation define the C-ABI boundary. Bevy `TypeId` equality is not a stable ABI or a safety guarantee for arbitrary engine DLLs.
 
-The older shared-image `renzora::plugin!` loader remains in source pending cleanup but is disabled in the normal static build. It is not the declaration for new Tier 2 extensions.
+The older shared-image loader and `renzora::plugin!` declaration have been removed.
+Use `renzora::add!` for statically built engine extensions and the small guest
+SDK for live plugins. The retired `renzora::script!`/`ScriptCtx` API is also gone;
+scripts use `renzora_plugin::rust_script!`. Old script source is still recognized
+so the editor can explain that it needs migration.
 
 ## What a plugin can do
 

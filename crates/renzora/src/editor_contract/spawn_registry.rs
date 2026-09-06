@@ -52,7 +52,7 @@ impl SpawnCategoryScope {
     pub fn allows(&self, category: &str) -> bool {
         match &self.0 {
             None => true,
-            Some(list) => list.iter().any(|c| *c == category),
+            Some(list) => list.contains(&category),
         }
     }
 }

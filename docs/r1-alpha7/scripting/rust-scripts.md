@@ -272,3 +272,8 @@ New Rust scripts created from the hierarchy use the current small SDK in both
 boilerplate settings. The minimal template has an empty update function; the
 illustrated template rotates its attached entity around the vertical axis.
 Neither template requires Bevy imports or the retired `renzora::script!` macro.
+
+The retired macro and `renzora::ScriptCtx` are no longer exported by the engine
+contract. This does not remove the current live-script or lean-export paths.
+Modding exports require the small `rust-sdk/` source package; if it is missing,
+export warns that only prebuilt plugins can load instead of copying an old SDK.
