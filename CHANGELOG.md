@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 14:07 UTC
+
+- Physics impulses now add to existing motion according to body mass, respect locked axes, and leave static/kinematic bodies unchanged in both 2D and 3D.
+
 ## September 6, 2026 — 13:58 UTC
 
 - Audio follows plugin replacements and clears obsolete playback handles. Machines without usable audio retry gradually; dedicated servers no longer try to open speakers.

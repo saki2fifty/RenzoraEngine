@@ -94,7 +94,7 @@ Physics script helpers don't poke Avian directly — they push `ScriptAction`/`S
 | Function | Effect |
 |---|---|
 | `apply_force(x, y, z)` | Applies a force for the current frame (cleared every frame — call it each `on_update` for a sustained push). |
-| `apply_impulse(x, y, z)` | Sets the body's linear velocity to this value (a simplified impulse in the current Avian backend). |
+| `apply_impulse(x, y, z)` | Adds a world-space impulse at a dynamic body's center of mass. Velocity changes by impulse divided by mass; locked axes are respected. Static and kinematic bodies are unchanged. |
 | `set_velocity(x, y, z)` | Directly sets the linear velocity. |
 | `set_linear_velocity(x, y, z)` | Alias for `set_velocity` (registered by the physics extension). |
 | `set_gravity_scale(scale)` | Adjusts this body's gravity scale at runtime. |
@@ -108,7 +108,7 @@ function on_update()
         apply_force(0.0, 50.0, 0.0)
     end
 
-    -- instantaneous velocity change (a "jump kick")
+    -- instantaneous impulse (a heavier body receives a smaller velocity change)
     if is_key_just_pressed("E") then
         apply_impulse(0.0, 10.0, 0.0)
     end

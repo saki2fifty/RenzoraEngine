@@ -9,6 +9,8 @@ pub mod data;
 pub mod properties;
 pub mod plugin_bridge;
 pub mod read_state;
+#[cfg(all(test, any(feature = "avian3d", feature = "avian2d")))]
+mod impulse_tests;
 #[cfg(feature = "scripting")]
 pub mod script_extension;
 
@@ -337,18 +339,33 @@ fn handle_physics_script_actions(
             }
         }
         "apply_impulse" => {
-            // Legacy behavior replaces velocity here, just like set_velocity.
-            // Additive, mass-aware impulse semantics need a separate correction.
+            if !vec.is_finite() {
+                warn!("[physics] ignored non-finite impulse for {target:?}");
+                return;
+            }
+            // Queue with other structural commands so set_velocity followed by
+            // impulses preserves command order. Avian owns inverse mass, locked
+            // axes and waking; duplicating that math would drift from simulation.
             if is_2d {
                 #[cfg(feature = "avian2d")]
-                commands
-                    .entity(target)
-                    .insert(avian2d::prelude::LinearVelocity(vec.truncate()));
+                commands.queue(move |world: &mut World| {
+                    use avian2d::prelude::*;
+                    if let Ok((body, mut forces)) = world.query::<(&RigidBody, Forces)>().get_mut(world, target) {
+                        if *body == RigidBody::Dynamic {
+                            forces.apply_linear_impulse(vec.truncate());
+                        }
+                    }
+                });
             } else {
                 #[cfg(feature = "avian3d")]
-                commands
-                    .entity(target)
-                    .insert(avian3d::prelude::LinearVelocity(vec));
+                commands.queue(move |world: &mut World| {
+                    use avian3d::prelude::*;
+                    if let Ok((body, mut forces)) = world.query::<(&RigidBody, Forces)>().get_mut(world, target) {
+                        if *body == RigidBody::Dynamic {
+                            forces.apply_linear_impulse(vec);
+                        }
+                    }
+                });
             }
         }
         "set_velocity" => {
