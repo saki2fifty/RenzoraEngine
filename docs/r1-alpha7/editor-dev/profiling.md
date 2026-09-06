@@ -616,3 +616,12 @@ checks all three path buffers, path replacement/removal and an advancing clock.
 Entity counting, state transitions and snapshot publication still run each frame.
 `done` remains a persistent state and elapsed time continues after completion;
 this change does not turn completion into a one-frame event or freeze the clock.
+
+## UI sibling ordering
+
+Z-index synchronization retains a parent work set populated from changed child
+lists, added UI markers, changed parent/Z-index components, and removed UI or
+Z-index components. Settled sibling groups are not traversed. Root-canvas global
+ordering still receives the existing compare-first check. A 1,000-frame test
+finds no additional parent work after settling; reordering, reparenting, marker
+changes, output repair, despawn and root sort-order edits remain covered.

@@ -547,6 +547,50 @@ fn rehydrate_ui_images(
 
 // ── Z-index sync ────────────────────────────────────────────────────────────
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct UiOrderChanges<'w, 's> {
+    children: Query<'w, 's, Entity, Changed<Children>>,
+    items: Query<
+        'w,
+        's,
+        Entity,
+        (
+            Or<(With<UiCanvas>, With<UiWidget>)>,
+            Or<(
+                Added<UiCanvas>,
+                Added<UiWidget>,
+                Changed<ChildOf>,
+                Changed<ZIndex>,
+            )>,
+        ),
+    >,
+    removed_canvases: RemovedComponents<'w, 's, UiCanvas>,
+    removed_widgets: RemovedComponents<'w, 's, UiWidget>,
+    removed_zindex: RemovedComponents<'w, 's, ZIndex>,
+}
+
+impl UiOrderChanges<'_, '_> {
+    fn collect_parents(
+        &mut self,
+        hierarchy: &Query<&ChildOf>,
+        parents: &mut std::collections::HashSet<Entity>,
+    ) {
+        parents.clear();
+        parents.extend(self.children.iter());
+        for entity in self
+            .items
+            .iter()
+            .chain(self.removed_canvases.read())
+            .chain(self.removed_widgets.read())
+            .chain(self.removed_zindex.read())
+        {
+            if let Ok(parent) = hierarchy.get(entity) {
+                parents.insert(parent.parent());
+            }
+        }
+    }
+}
+
 /// Syncs `ZIndex` on UI canvas and widget entities so that items higher in the
 /// hierarchy (top of the list) render on top — matching the layer order convention
 /// used by most editors (Photoshop, Unity, etc.).
@@ -558,19 +602,13 @@ fn sync_ui_zindex(
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
     mut commands: Commands,
+    mut changes: UiOrderChanges,
+    mut processed_parents: Local<std::collections::HashSet<Entity>>,
 ) {
-    let mut processed_parents = std::collections::HashSet::new();
-
-    for entity in canvas_entities.iter().chain(widgets.iter()) {
-        let parent = match child_of_query.get(entity) {
-            Ok(c) => c.parent(),
-            Err(_) => continue,
-        };
-
-        if !processed_parents.insert(parent) {
-            continue;
-        }
-
+    // Relationships already tell us which sibling groups changed. Marker and
+    // output changes cover edits that do not alter the parent's child list.
+    changes.collect_parents(&child_of_query, &mut processed_parents);
+    for &parent in processed_parents.iter() {
         let Ok(children) = children_query.get(parent) else {
             continue;
         };
@@ -757,6 +795,106 @@ mod invariant_tests {
             world.get::<ChildOf>(widget).map(|c| c.parent()),
             Some(root_canvas),
             "the widget must keep its own canvas parent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct ParentWork {
+        parents: std::collections::HashSet<Entity>,
+        total: usize,
+    }
+
+    fn count_parents(
+        mut changes: UiOrderChanges,
+        hierarchy: Query<&ChildOf>,
+        mut work: ResMut<ParentWork>,
+    ) {
+        changes.collect_parents(&hierarchy, &mut work.parents);
+        work.total += work.parents.len();
+    }
+
+    #[test]
+    fn settled_order_skips_sibling_work_and_lifecycle_changes_reorder() {
+        let mut app = App::new();
+        app.init_resource::<ParentWork>()
+            .add_systems(Update, (count_parents, sync_ui_zindex).chain());
+        let first = app
+            .world_mut()
+            .spawn(UiCanvas {
+                sort_order: 7,
+                ..default()
+            })
+            .id();
+        let second = app.world_mut().spawn(UiCanvas::default()).id();
+        let a = app
+            .world_mut()
+            .spawn((UiWidget::default(), ChildOf(first)))
+            .id();
+        let decoration = app.world_mut().spawn(ChildOf(first)).id();
+        let b = app
+            .world_mut()
+            .spawn((UiWidget::default(), ChildOf(first)))
+            .id();
+        let c = app
+            .world_mut()
+            .spawn((UiWidget::default(), ChildOf(second)))
+            .id();
+        for _ in 0..3 {
+            app.update();
+        }
+        let initial = app.world().resource::<ParentWork>().total;
+        for _ in 0..1_000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<ParentWork>().total, initial);
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(1)));
+        assert_eq!(app.world().get::<ZIndex>(b), Some(&ZIndex(0)));
+        assert_eq!(
+            app.world().get::<GlobalZIndex>(first),
+            Some(&GlobalZIndex(7))
+        );
+        app.world_mut()
+            .get_mut::<Children>(first)
+            .unwrap()
+            .swap(0, 2);
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(0)));
+        assert_eq!(app.world().get::<ZIndex>(b), Some(&ZIndex(1)));
+        app.world_mut().entity_mut(b).insert(ChildOf(second));
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(0)));
+        assert_eq!(app.world().get::<ZIndex>(c), Some(&ZIndex(1)));
+        assert_eq!(app.world().get::<ZIndex>(b), Some(&ZIndex(0)));
+        app.world_mut()
+            .entity_mut(decoration)
+            .insert(UiWidget::default());
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(decoration), Some(&ZIndex(1)));
+        app.world_mut().entity_mut(b).remove::<UiWidget>();
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(c), Some(&ZIndex(0)));
+        app.world_mut().entity_mut(a).insert(ZIndex(99));
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(0)));
+        app.world_mut().entity_mut(a).remove::<ZIndex>();
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(a), Some(&ZIndex(0)));
+        app.world_mut().despawn(a);
+        app.update();
+        assert_eq!(app.world().get::<ZIndex>(decoration), Some(&ZIndex(0)));
+        app.world_mut()
+            .get_mut::<UiCanvas>(first)
+            .unwrap()
+            .sort_order = 8;
+        app.update();
+        assert_eq!(
+            app.world().get::<GlobalZIndex>(first),
+            Some(&GlobalZIndex(8))
         );
     }
 }
