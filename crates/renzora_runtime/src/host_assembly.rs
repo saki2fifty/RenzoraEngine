@@ -47,7 +47,8 @@
 //! call. The harness flavor — `install_extension_host_headless` —
 //! skips Bevy plugins the headless `MinimalPlugins` stack cannot
 //! support, but the compiler and plugin resources it installs are
-//! identical to the editor's.
+//! identical to the editor's. Script-installing headless helpers require the
+//! runtime's `scripting` Cargo feature; compiler/loose-host assembly does not.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -454,6 +455,9 @@ pub fn assemble_extension_host(
 /// (which requires editor-only resources); it does add
 /// `ScriptingPlugin` and `RustScriptPlugin` so the registered
 /// schedules can flow.
+///
+/// Available with the `scripting` feature (enabled by default).
+#[cfg(feature = "scripting")]
 pub fn install_extension_host_headless<F: ServiceFactory>(
     app: &mut App,
     config: &ExtensionHostConfig,
@@ -478,6 +482,9 @@ pub fn install_extension_host_headless<F: ServiceFactory>(
 /// deterministic test entry point for the same host boundary used by
 /// production; it differs only in the Bevy plugins needed by a
 /// `MinimalPlugins` application.
+///
+/// Available with the `scripting` feature (enabled by default).
+#[cfg(feature = "scripting")]
 pub fn assemble_extension_host_headless(
     app: &mut App,
     config: &ExtensionHostConfig,

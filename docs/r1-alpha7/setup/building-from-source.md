@@ -8,6 +8,20 @@ Use the Rust version pinned in `rust-toolchain.toml`. Keep it in lockstep with `
 
 Build and test with non-debug profiles. For this fork, ordinary validation uses `--profile dist`. The standalone `xtask` helper uses `--profile release`.
 
+### Runtime scripting feature
+
+Normal runtime/editor builds enable `renzora_runtime/scripting` by default.
+The two script-installing headless helpers in `host_assembly`
+(`install_extension_host_headless` and `assemble_extension_host_headless`)
+require that feature too. When validating a minimal runtime configuration, enable
+`scripting` explicitly if your tooling calls those helpers. Compiler-service and
+loose-plugin host assembly remain available without that feature.
+
+The runtime library can be checked with `--no-default-features`; this does not
+mean every transitive scripting dependency is removed, nor that a bare runtime
+library check validates a complete staged game. Normal editor script behavior
+and default feature selection are unchanged.
+
 ## Local build and staging
 
 From the repository root:

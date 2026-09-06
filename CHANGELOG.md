@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 13:27 UTC
+
+- Fixed minimal runtime builds failing on optional scripting helpers, without changing normal editor scripting.
+
 ## September 6, 2026 — 09:14 UTC
 
 - Completed and validated this performance-improvement batch across scripts, audio, UI, sprites, tilemaps and other editor/runtime systems.
