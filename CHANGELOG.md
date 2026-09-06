@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 23:48 UTC
 
 - Fixed one-shot script timers firing repeatedly and avoided unnecessary updates for settled timers.
+- Removed a duplicate hardware-monitoring dependency and its unused Windows support packages.
 
 ## September 6, 2026 — 23:22 UTC
 

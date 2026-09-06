@@ -138,3 +138,8 @@ Full editor ZIPs also exclude retired host-level engine libraries from older
 staging directories. This does not remove standalone plugin libraries or delete
 the input files. An existing AppImage is packaged as supplied; refresh it through
 the current build/staging workflow before publishing.
+
+The native system monitor shares Bevy's `sysinfo` 0.38 dependency for memory
+information. This removes the older duplicate and its unused Windows support
+package versions from the resolved engine graph. Polling cadence, displayed
+units and browser behavior are unchanged; no FPS improvement is claimed.

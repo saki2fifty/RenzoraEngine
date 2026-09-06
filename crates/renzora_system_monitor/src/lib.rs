@@ -252,3 +252,23 @@ fn monitor_status_segments(world: &World) -> Vec<ShellStatusSegment> {
 }
 
 renzora::add!(SystemMonitorPlugin, Editor);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod hardware_tests {
+    use super::*;
+
+    #[test]
+    fn native_memory_probe_remains_available_across_updates() {
+        let mut app = App::new();
+        app.init_resource::<SystemMonitorState>();
+        app.add_systems(Startup, init_hardware_info);
+        app.add_systems(Update, update_memory_info);
+        for _ in 0..3 {
+            app.update();
+            let state = app.world().resource::<SystemMonitorState>();
+            assert!(!state.cpu_name.is_empty());
+            assert!(state.total_ram_gb.is_finite() && state.total_ram_gb >= 0.0);
+            assert!(state.used_ram_gb.is_finite() && state.used_ram_gb >= 0.0);
+        }
+    }
+}
