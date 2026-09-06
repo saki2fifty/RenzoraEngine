@@ -537,3 +537,13 @@ buffers always receive the data. Camera culling, world transforms, sample order
 and the 200,000-sample cap remain unchanged. Disabling injection clears the active
 count but retains storage for reuse. CPU transformation still runs on active
 frames; this is not per-mesh dirty-region caching or a measured FPS improvement.
+
+## World-space UI meshes
+
+Mesh-mode canvases share retained traversal, rectangle and text-entry scratch
+buffers. Label strings are borrowed, and font sources are cloned only when a
+mesh rebuild is needed. Font choice and text alpha participate in the content
+hash. The full layout walk and hash still run; this is allocation reduction,
+not a dirty-canvas scheduler. Headless tests retain all five rectangle buffers
+through 1,000 fills and keep the actual canvas mesh handle across 1,000 stable
+updates before checking a layout edit.

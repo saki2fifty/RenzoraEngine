@@ -25,7 +25,7 @@
 //!
 //! Milestone: rects + SDF text. Images, borders and rounded corners follow.
 
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
@@ -73,6 +73,14 @@ struct Buf {
 }
 
 impl Buf {
+    fn clear(&mut self) {
+        self.positions.clear();
+        self.colors.clear();
+        self.normals.clear();
+        self.uvs.clear();
+        self.indices.clear();
+    }
+
     /// Quad centred at `(cx, cy, z)`, half-extents `(hw, hh)`, colour `col`.
     fn quad(&mut self, cx: f32, cy: f32, z: f32, hw: f32, hh: f32, col: [f32; 4]) {
         let base = self.positions.len() as u32;
@@ -108,10 +116,46 @@ impl Buf {
 struct TextNode {
     /// Panel-local centre of the node (world units, pre-child-scale).
     center: Vec2,
-    text: String,
-    font: bevy::text::FontSource,
+    entity: Entity,
     size_px: f32,
     color: LinearRgba,
+}
+
+#[derive(Default)]
+struct WorldUiMeshScratch {
+    rects: Buf,
+    texts: Vec<TextNode>,
+    queue: std::collections::VecDeque<Entity>,
+}
+
+fn hash_font(h: &mut impl Hasher, font: &bevy::text::FontSource) {
+    std::mem::discriminant(font).hash(h);
+    match font {
+        bevy::text::FontSource::Handle(handle) => handle.id().hash(h),
+        bevy::text::FontSource::Family(name) => name.hash(h),
+        _ => {}
+    }
+}
+
+fn hash_text_style(
+    h: &mut impl Hasher,
+    center: Vec2,
+    size: f32,
+    color: LinearRgba,
+    font: &bevy::text::FontSource,
+) {
+    hash_font(h, font);
+    for value in [
+        center.x,
+        center.y,
+        size,
+        color.red,
+        color.green,
+        color.blue,
+        color.alpha,
+    ] {
+        hash_f32(h, value);
+    }
 }
 
 /// Fold a float into the running content hash by its exact bit pattern.
@@ -158,6 +202,7 @@ fn emit_world_ui_meshes(
         Option<&TextColor>,
     )>,
     mut rect_mat: Local<Option<Handle<StandardMaterial>>>,
+    mut scratch: Local<WorldUiMeshScratch>,
 ) {
     for (entity, canvas, live, built) in &panels {
         if !canvas.is_world() || !canvas.is_mesh_mode() {
@@ -190,8 +235,11 @@ fn emit_world_ui_meshes(
         let to_local =
             |px: Vec2| Vec2::new((px.x - res.x * 0.5) * scale.x, -(px.y - res.y * 0.5) * scale.y);
 
-        let mut rects = Buf::default();
-        let mut texts: Vec<TextNode> = Vec::new();
+        // One shared high-water allocation, not another buffer per canvas.
+        let WorldUiMeshScratch { rects, texts, queue } = &mut *scratch;
+        rects.clear();
+        texts.clear();
+        queue.clear();
 
         // Content hash accumulated over the DETERMINISTIC breadth-first walk, so
         // an unchanged layout hashes identically frame to frame.
@@ -202,7 +250,6 @@ fn emit_world_ui_meshes(
         hash_f32(&mut hasher, res.y);
 
         // Breadth-first from the panel root: parents before children.
-        let mut queue: std::collections::VecDeque<Entity> = std::collections::VecDeque::new();
         queue.push_back(live.ui_root);
         let mut order = 0u32;
         while let Some(n) = queue.pop_front() {
@@ -244,13 +291,10 @@ fn emit_world_ui_meshes(
                             for b in s.as_bytes() {
                                 hasher.write_u8(*b);
                             }
-                            for v in [c.x, c.y, size_px, color.red, color.green, color.blue] {
-                                hash_f32(&mut hasher, v);
-                            }
+                            hash_text_style(&mut hasher, c, size_px, color, &tf.font);
                             texts.push(TextNode {
                                 center: c,
-                                text: s.to_string(),
-                                font: tf.font.clone(),
+                                entity: n,
                                 size_px,
                                 color,
                             });
@@ -289,7 +333,7 @@ fn emit_world_ui_meshes(
                     ..default()
                 }));
             }
-            let h = meshes.add(rects.into_mesh());
+            let h = meshes.add(std::mem::take(rects).into_mesh());
             commands
                 .entity(entity)
                 .insert((Mesh3d(h), MeshMaterial3d(rect_mat.as_ref().unwrap().clone())));
@@ -318,6 +362,12 @@ fn emit_world_ui_meshes(
         // front of a shallow node's label and make it vanish at some angles.
         let text_base_z = (order as f32 + 2.0) * 0.0005;
         for (i, t) in texts.iter().enumerate() {
+            // These queries cannot change during this system. Resolve borrowed
+            // text only on rebuild instead of cloning every label every frame.
+            let Ok((_, _, _, Some(text), Some(font), _)) = nodes.get(t.entity) else {
+                all_ready = false;
+                continue;
+            };
             let built = build_text_mesh(
                 &mut tcx.pipeline,
                 &tcx.fonts,
@@ -327,8 +377,8 @@ fn emit_world_ui_meshes(
                 &mut tcx.layout_cx,
                 &mut tcx.scale_cx,
                 tcx.rem.0,
-                t.font.clone(),
-                &t.text,
+                font.font.clone(),
+                text.0.trim(),
                 t.size_px,
             );
             let Some((mesh, strip)) = built else {
@@ -367,5 +417,119 @@ fn emit_world_ui_meshes(
             // A font wasn't ready — force a rebuild next frame.
             commands.entity(entity).remove::<WorldUiMeshBuilt>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_rectangles_retain_all_five_allocations() {
+        let mut buf = Buf::default();
+        buf.quad(1.0, 2.0, 3.0, 4.0, 5.0, [1.0; 4]);
+        let storage = (
+            buf.positions.as_ptr(),
+            buf.colors.as_ptr(),
+            buf.normals.as_ptr(),
+            buf.uvs.as_ptr(),
+            buf.indices.as_ptr(),
+        );
+        for _ in 0..1_000 {
+            buf.clear();
+            assert!(buf.is_empty());
+            buf.quad(1.0, 2.0, 3.0, 4.0, 5.0, [1.0; 4]);
+            assert_eq!(
+                storage,
+                (
+                    buf.positions.as_ptr(),
+                    buf.colors.as_ptr(),
+                    buf.normals.as_ptr(),
+                    buf.uvs.as_ptr(),
+                    buf.indices.as_ptr()
+                )
+            );
+            assert_eq!(buf.positions.len(), 4);
+            assert_eq!(buf.indices, [0, 1, 2, 0, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn font_and_alpha_participate_in_text_hash() {
+        let hash = |font: bevy::text::FontSource, alpha| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            hash_text_style(
+                &mut h,
+                Vec2::ZERO,
+                24.0,
+                LinearRgba::new(1.0, 1.0, 1.0, alpha),
+                &font,
+            );
+            h.finish()
+        };
+        let initial = hash(bevy::text::FontSource::Serif, 1.0);
+        assert_eq!(initial, hash(bevy::text::FontSource::Serif, 1.0));
+        assert_ne!(initial, hash(bevy::text::FontSource::SansSerif, 1.0));
+        assert_ne!(initial, hash(bevy::text::FontSource::Serif, 0.5));
+        assert_ne!(
+            hash(bevy::text::FontSource::Family("first".into()), 1.0),
+            hash(bevy::text::FontSource::Family("second".into()), 1.0)
+        );
+    }
+
+    #[test]
+    fn settled_canvas_keeps_mesh_and_layout_edit_rebuilds() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<SdfTextMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<Font>>()
+            .init_resource::<TextPipeline>()
+            .init_resource::<FontAtlasSet>()
+            .init_resource::<FontCx>()
+            .init_resource::<LayoutCx>()
+            .init_resource::<ScaleCx>()
+            .init_resource::<RemSize>()
+            .add_systems(Update, emit_world_ui_meshes);
+        let root = app
+            .world_mut()
+            .spawn((
+                ComputedNode {
+                    size: Vec2::splat(100.0),
+                    ..default()
+                },
+                UiGlobalTransform::default(),
+                BackgroundColor(Color::WHITE),
+            ))
+            .id();
+        let canvas = app
+            .world_mut()
+            .spawn((
+                UiCanvas {
+                    render_space: "world".into(),
+                    render_mode: "mesh".into(),
+                    ..default()
+                },
+                WorldUiPanelLive {
+                    camera: Entity::PLACEHOLDER,
+                    ui_root: root,
+                    image: Handle::default(),
+                },
+            ))
+            .id();
+        app.update();
+        let first = app.world().get::<Mesh3d>(canvas).unwrap().0.clone();
+        for _ in 0..1_000 {
+            app.update();
+            assert_eq!(app.world().get::<Mesh3d>(canvas).unwrap().0, first);
+        }
+        app.world_mut()
+            .get_mut::<ComputedNode>(root)
+            .unwrap()
+            .size
+            .x = 200.0;
+        app.update();
+        assert_ne!(app.world().get::<Mesh3d>(canvas).unwrap().0, first);
     }
 }

@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 06:38 UTC
+
+- Reused world-space UI working buffers and avoided copying unchanged labels. Font and text-opacity edits now participate in its rebuild check.
+
 ## September 6, 2026 — 06:31 UTC
 
 - Reused global-illumination geometry sample storage and skipped unchanged uploads, while continuing to check moving objects, camera coverage, and shading edits.
