@@ -36,39 +36,6 @@ crash_dialog = ["renzora_engine/crash_dialog"]
 # own default `xr` feature, so wasm/mobile lanes and the lean exporter never
 # pull the OpenXR stack unless explicitly asked.
 xr = ["dep:renzora_xr"]
-# Link the shared contract image. Forwarded from `renzora_app`'s
-# `dynamic_linking` (in ITS default set) and landing here rather than there
-# because both binaries depend on this crate and only one of them has a feature
-# table — see the root manifest.
-#
-# NOT in this crate's `default`: the lean exporter builds with
-# `--no-default-features --features runtime`, and a static single binary must not
-# import a dylib. Leaving it out here means "static" needs no extra step — the
-# feature simply never arrives.
-#
-# It also arms the native-plugin loader. Those link the shared images, so loading
-# one into a statically linked host is memory corruption with no diagnostic —
-# gating both on one switch is what makes that combination unreachable rather
-# than merely discouraged. It is also why the C-ABI mechanism stays: a lean
-# export has no shared images for a native plugin to link against.
-dynamic_linking = [
-    "dep:renzora_dylib",
-    # The UI half of the same idea. A native plugin that draws a panel links
-    # `renzora_ember`, and ember keeps the theme palette, the stylesheet, the UI
-    # font scale and the viewport-toolbar lists in process-global statics — so a
-    # privately linked copy gives the plugin its own theme and its own toolbar
-    # nobody reads. See `crates/renzora_ember_dylib/src/lib.rs`.
-    #
-    # Pulled here rather than from `ui` (which is what makes `renzora_ember`
-    # optional) because cargo cannot express "this dep, only when two features
-    # are both on". That is harmless in practice: `dynamic_linking` is only ever
-    # enabled for a full editor/dev build, where `ui` is on via `default`. The
-    # `extern crate` in `src/lib.rs` still requires both, so a hand-built
-    # `--no-default-features --features runtime,dynamic_linking` compiles rather
-    # than failing to resolve.
-    "dep:renzora_ember_dylib",
-    "renzora_rust_script/dynamic_linking",
-]
 # The static counterpart: Rust scripts compiled into the binary rather than
 # loaded as dylibs. Set only by the lean exporter — see `static_scripts` in the
 # root manifest. Forwarded, because the crate that consumes the generated table
@@ -179,12 +146,7 @@ blueprint = ["scripting", "dep:renzora_blueprint", "renzora_scripting?/blueprint
 # Pulls `scripting`: ember's markup runtime binds `.html` fields to script
 # values, so game UI without the scripting layer wouldn't compile. Pulls `ui` for
 # the obvious reason — markup renders through bevy_ui.
-#
-# Forwarded to the shared image as well as the rlib. Both edges are needed: they
-# are two dependency entries on the same crate, and enabling the feature on only
-# one would leave cargo resolving ember with a union that does not match what the
-# dylib was built from.
-game_ui = ["ui", "scripting", "renzora_ember/game_ui", "renzora_ember_dylib?/game_ui"]
+game_ui = ["ui", "scripting", "renzora_ember/game_ui"]
 # The UI layer: `renzora_ember` (the widget/theme framework) and, through the
 # exporter, bevy_ui + bevy_text + bevy_ui_render + bevy_ui_widgets. Dropping it
 # takes the whole text-shaping stack (parley, swash, harfrust, fontique, skrifa,
@@ -258,22 +220,6 @@ wgpu = { version = "29", default-features = false }
 # `animation` features below forward to it. Normal builds keep them via `default`.
 renzora_engine = { path = "../renzora_engine", default-features = false }
 renzora = { path = "../renzora", default-features = false }
-# The same contract crate again, as one shared dylib. Nothing calls into it —
-# `renzora_dylib` re-exports `renzora` and is linked purely so the compiled code
-# lives in ONE image. Without it every plugin embeds a private copy of the four
-# process-global statics in the contract crate (the translation table, the
-# Problems and Console buffers, the asset loader), and each one then fails
-# silently: `t()` returns raw keys, logs and warnings land in buffers nobody
-# drains, asset reads find no loader. See `crates/renzora_dylib/src/lib.rs`.
-renzora_dylib = { path = "../renzora_dylib", optional = true }
-# And ember as one shared dylib, for the same reason one layer up: a native
-# plugin that registers a panel links ember, and ember's theme palette,
-# stylesheet, UI font scale and viewport-toolbar lists are process-global
-# statics. A privately linked copy leaves the plugin's panel painted in the
-# default palette while the editor around it is on the user's theme, and its
-# toolbar contributions pushed into a list nothing reads — silently, in both
-# cases. See `crates/renzora_ember_dylib/src/lib.rs`.
-renzora_ember_dylib = { path = "../renzora_ember_dylib", default-features = false, optional = true }
 # `default-features = false`: the backends + blueprint + script_http are switched
 # on via this crate's matching features (above), so the lean export can drop them.
 renzora_scripting = { path = "../renzora_scripting", default-features = false, optional = true }

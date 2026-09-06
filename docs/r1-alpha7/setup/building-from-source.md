@@ -92,3 +92,11 @@ Loose Rust plugins and in-editor Rust scripts use the shared cached compiler ser
 - [Building Plugins](../extending/plugins.md)
 - [Native Plugins](../extending/native-plugins.md)
 - [Rust Scripts](../scripting/rust-scripts.md)
+
+## Retired shared-engine build option
+
+The old `dynamic_linking` feature is no longer available. The editor and runtime
+link engine code directly; normal staging does not copy shared Bevy, Renzora, or
+Rust-standard-library images. Live Rust plugins and scripts still use their
+standalone C-ABI libraries and small source SDK. Engine extensions use a generated
+static build and require a restart. Existing stale build files are not deleted.

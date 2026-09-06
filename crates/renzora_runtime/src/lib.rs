@@ -15,31 +15,6 @@
 
 use bevy::prelude::*;
 
-// The shared contract image. Linked for its side effect ONLY — nothing here
-// calls into it, and `renzora` is still imported normally everywhere. Its
-// presence in the link graph is what makes rustc resolve `renzora`'s code to one
-// dylib rather than embedding a private copy in each binary and each plugin,
-// which is what keeps the contract crate's process-global statics (translations,
-// the Problems and Console buffers, the asset loader) singular. See
-// `crates/renzora_dylib/src/lib.rs` for why a second copy fails silently.
-//
-// It lives here rather than in either `main.rs` because both binaries depend on
-// this crate and only one of them has a feature table to gate on.
-#[cfg(feature = "dynamic_linking")]
-extern crate renzora_dylib;
-
-// The same, for the UI framework. Linked for its side effect only: its presence
-// is what makes rustc resolve `renzora_ember` to one dylib, so a native plugin
-// drawing a panel shares the editor's theme palette, stylesheet, UI font scale
-// and viewport-toolbar lists instead of getting a private set that fails
-// silently. See `crates/renzora_ember_dylib/src/lib.rs`.
-//
-// Gated on `ui` as well because that is what makes `renzora_ember` present at
-// all; the `dynamic_linking` feature pulls the dependency, and this line is what
-// keeps a hand-built combination without `ui` compiling rather than failing to
-// resolve the crate.
-#[cfg(all(feature = "dynamic_linking", feature = "ui"))]
-extern crate renzora_ember_dylib;
 
 pub use renzora;
 /// Capabilities of this runtime build, not of the editor's dependency graph.

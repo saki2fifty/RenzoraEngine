@@ -7,6 +7,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Removed the obsolete compiled-engine SDK exporter. Live Rust plugins and scripts keep their small source package; engine extensions keep their separate build kit.
 - Removed the retired Rust plugin loader and its duplicate setup windows. Export no longer lists old plugin libraries that the current runtime cannot use.
 - Stopped release packaging from including the retired SDK archive and corrected the release setup instructions. Existing input files are left intact.
+- Removed the old shared-engine build option and its libraries. Normal staging no longer searches for or copies those retired engine files.
 
 ## September 6, 2026 — 00:00 UTC
 

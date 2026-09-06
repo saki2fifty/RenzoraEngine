@@ -663,7 +663,6 @@ version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bfadbebfc6599aa59289b754ac30023959854304f3d393da2cf62bb3cd5df8f"
 dependencies = [
- "bevy_dylib",
  "bevy_internal",
  "tracing",
 ]
@@ -1016,15 +1015,6 @@ dependencies = [
  "log",
  "serde",
  "sysinfo 0.38.4",
-]
-
-[[package]]
-name = "bevy_dylib"
-version = "0.19.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3c03a128bac8b59a8699b81038b574e3cfa33dfae18e375d46be028d3d13c0e"
-dependencies = [
- "bevy_internal",
 ]
 
 [[package]]
@@ -7647,13 +7637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "renzora_dylib"
-version = "0.1.0"
-dependencies = [
- "renzora",
-]
-
-[[package]]
 name = "renzora_editor"
 version = "0.1.0"
 dependencies = [
@@ -7814,14 +7797,6 @@ dependencies = [
  "tempfile",
  "toml 0.8.23",
  "uuid",
-]
-
-[[package]]
-name = "renzora_ember_dylib"
-version = "0.1.0"
-dependencies = [
- "renzora_dylib",
- "renzora_ember",
 ]
 
 [[package]]
@@ -8676,9 +8651,7 @@ dependencies = [
  "renzora_compiler_cache",
  "renzora_distance_fog",
  "renzora_dof",
- "renzora_dylib",
  "renzora_ember",
- "renzora_ember_dylib",
  "renzora_engine",
  "renzora_environment_map",
  "renzora_forward_decal",

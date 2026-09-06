@@ -63,26 +63,12 @@ exclude = ["plugins"]
 [workspace.lints.rust]
 
 [workspace.dependencies]
-# `dynamic_linking` is intentionally NOT in workspace defaults — it pulls
-# in `bevy_dylib` (dylib-only), which can't link into iOS staticlib or
-# Android cdylib builds. The desktop binary (`renzora_app`) opts in via
-# its own `[dependencies]` entry; cargo's feature unification under
-# `--workspace` propagates it to plugin crates so they end up with the
-# same bevy compilation as the host (and the same `bevy::World` TypeId,
-# which `plugin_bevy_hash()` checks at dlopen time). Mobile/wasm builds
-# under `cargo build -p <mobile_crate>` only see their own dep tree
-# (resolver = "2") and stay clean of dynamic_linking.
-# Bevy feature policy — ABI-stability driven (read before touching this list).
-# Plugins dlopen against ONE shared `bevy_dylib`; its compiled feature set IS
-# the API surface every plugin can reach AND an input to the ABI hash. So we
-# enable a deliberately MAXIMAL-but-valid set here, once: "everything a plugin
-# could practically want" minus the three things that physically cannot be
-# blanket-enabled — (1) mutually-exclusive backends, (2) platform-specific
-# features, (3) dev/CI/trace features. Per-target backend choices live in the
-# `wasm` feature below and the mobile crates, not here. Widening this set later
-# costs an intra-version ABI bump, so we front-load it.
+# Engine code is statically linked in each host. Standalone C-ABI extensions
+# use the small SDK; their compatibility does not depend on Bevy's feature set.
+# Preserve the existing engine feature set here; platform-specific choices live
+# in the wasm/mobile targets. Feature reduction is a separate performance audit.
 #
-# Deliberately OMITTED (each would be an ABI bump to add — do it with eyes open):
+# Feature policy notes:
 #   meshlet, meshlet_processor                    ENABLED below (experimental
 #                                                   virtual geometry)
 #   (bevy_solari IS enabled below — it backs the renzora_solari plugin.)
@@ -317,9 +303,6 @@ default = ["runtime", "xr"]
 # This binary runs games, dedicated servers (`--server`) and listen servers
 # (`--host`). It cannot become the editor based on neighboring files.
 runtime = ["dep:renzora_runtime"]
-# Retained legacy feature pending Phase 9 removal; not a shipping extension ABI
-# and not selected by the supported desktop, mobile or wasm build paths.
-dynamic_linking = ["bevy/dynamic_linking", "renzora_runtime?/dynamic_linking"]
 # OpenXR/VR boot mode: launching with `--vr` renders the game into a headset
 # (see `renzora_runtime::add_xr_rendering` / `renzora_xr`). In `default` so
 # every desktop build can be a VR runtime; the wasm/mobile lanes never enable
@@ -396,13 +379,6 @@ wasm = [
 ]
 
 [dependencies]
-# `dynamic_linking` is pulled by the `dynamic_linking` feature (in `default`),
-# NOT pinned here — so it can be dropped for a static lean build via
-# `--no-default-features`. Feature unification under `--workspace` still
-# propagates the default-on feature to every plugin crate's bevy dep, so they
-# share one `bevy_dylib` instance and matching TypeIds. Mobile builds
-# (`-p renzora-ios` / `-p renzora-android`) don't see this dep and compile bevy
-# without dynamic_linking — bevy_dylib stays out of their staticlib/cdylib link.
 bevy = { workspace = true }
 
 # Single shared library — `editor` feature on this crate adds editor extras.
