@@ -98,6 +98,12 @@ On the website, click any asset card to open its page, where you can see images,
 
 ## Updating and removing
 
+If an installation offers **Restart Editor**, save your work before using it.
+If the replacement process cannot be launched, the current editor stays open
+and a **Restart Failed** notice explains the error. A successful launch is not
+a guarantee that the replacement finishes starting; this same-editor shortcut
+is separate from the acknowledged restart used for engine-plugin generations.
+
 - **Update** — click **Install** again to re-download the latest version into your project.
 - **Remove** — delete the installed files from your project folder.
 

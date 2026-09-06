@@ -595,27 +595,6 @@ impl ShellActionInvoked {
 /// other to agree on a string.
 pub const ACTION_MARKETPLACE: &str = "marketplace.open";
 
-/// Relaunch this executable with the same arguments and exit.
-///
-/// Here in the contract crate because more than one thing needs it and none of
-/// them should own it: first-run setup restarts after building plugins, and
-/// installing a plugin from the marketplace has to restart to load it — plugins
-/// are opened once, during `App` assembly, so a new one on disk is not a new one
-/// in the process.
-///
-/// The replacement is spawned **detached** rather than waited on. This process
-/// is finished, and holding it open to parent the new one would leave a
-/// redundant entry in the task list for the whole of the next session. It also
-/// matters on Windows, where a plugin file cannot be replaced while a process
-/// holds it open: the successor starts as this one is leaving.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn restart_process() -> ! {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = spawn_replacement_process(&exe, std::env::args_os().skip(1));
-    }
-    std::process::exit(0)
-}
-
 /// Overrides the status bar's left-hand **"Ready"** label. The host owns the
 /// status bar, so a plugin can't replace that label by registering a status item
 /// (those only *append*). Instead it writes here: `label = Some(text)` swaps the

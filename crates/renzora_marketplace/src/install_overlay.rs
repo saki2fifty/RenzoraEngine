@@ -399,9 +399,19 @@ fn poll_install_result(
 }
 
 /// "Restart Editor" on the install notice.
-fn restart_button(q: Query<&Interaction, (With<InstallRestartBtn>, Changed<Interaction>)>) {
+fn restart_button(
+    q: Query<&Interaction, (With<InstallRestartBtn>, Changed<Interaction>)>,
+    mut commands: Commands,
+    fonts: Option<Res<EmberFonts>>,
+) {
     if q.iter().any(|i| *i == Interaction::Pressed) {
-        renzora::restart_process();
+        if let Err(error) = renzora::restart_process() {
+            let message = format!("Could not restart the editor: {error}. Your current session remains open.");
+            renzora::core::console_log::console_error("Marketplace", message.clone());
+            if let Some(fonts) = fonts {
+                spawn_notice(&mut commands, &fonts, "Restart Failed", &message, false);
+            }
+        }
     }
 }
 

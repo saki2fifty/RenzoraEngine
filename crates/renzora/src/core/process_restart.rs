@@ -5,6 +5,33 @@ use std::io;
 use std::path::Path;
 use std::process::{Child, Command};
 
+/// Relaunch this executable with its arguments, exiting only if spawning succeeds.
+///
+/// A launch error returns to the caller so the current editor and unsaved work
+/// remain available. This legacy same-image restart does not wait for startup
+/// acknowledgement; engine-generation replacement uses its separate handshake.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn restart_process() -> io::Result<()> {
+    restart_after_launch(
+        || {
+            let executable = std::env::current_exe()?;
+            spawn_replacement_process(&executable, std::env::args_os().skip(1))?;
+            Ok(())
+        },
+        || std::process::exit(0),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn restart_after_launch(
+    launch: impl FnOnce() -> io::Result<()>,
+    exit: impl FnOnce(),
+) -> io::Result<()> {
+    launch()?;
+    exit();
+    Ok(())
+}
+
 /// Launch an explicitly selected executable without exiting the current process.
 ///
 /// Arguments are passed directly to the program, never through a shell. The
@@ -41,6 +68,20 @@ where
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn restart_does_not_exit_after_a_launch_error() {
+        let error = restart_after_launch(
+            || Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            || panic!("must preserve the current process"),
+        )
+        .expect_err("launch failure");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let exited = std::cell::Cell::new(false);
+        restart_after_launch(|| Ok(()), || exited.set(true)).expect("successful launch");
+        assert!(exited.get());
+    }
 
     #[test]
     fn rejects_path_lookup_and_relative_executables() {
