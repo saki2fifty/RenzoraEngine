@@ -345,12 +345,27 @@ pub fn find_path(navmesh: &NavMesh, from: Vec3, to: Vec3) -> Option<Vec<Vec3>> {
     navmesh.transformed_path(from, to).map(|p| p.path)
 }
 
+#[derive(Resource, Default)]
+struct NavTargetCache(EntityHashMap<Option<Vec3>>);
+
 fn update_agent_paths(
     mut agents: Query<(Entity, &NavAgent, &GlobalTransform, &mut NavPath)>,
     navmesh_q: Query<&ManagedNavMesh>,
     navmeshes: Res<Assets<NavMesh>>,
-    mut last_target: Local<EntityHashMap<Option<Vec3>>>,
+    mut last_target: ResMut<NavTargetCache>,
+    mut removed_agents: RemovedComponents<NavAgent>,
+    mut removed_paths: RemovedComponents<NavPath>,
+    mut removed_transforms: RemovedComponents<GlobalTransform>,
 ) {
+    // Drain before looking for a mesh: scene teardown must release keys even
+    // when it removed the navigation mesh before the agents.
+    for entity in removed_agents
+        .read()
+        .chain(removed_paths.read())
+        .chain(removed_transforms.read())
+    {
+        last_target.0.remove(&entity);
+    }
     let Some(managed) = navmesh_q.iter().next() else {
         return;
     };
@@ -359,11 +374,11 @@ fn update_agent_paths(
     };
 
     for (entity, agent, gt, mut path) in &mut agents {
-        let prev = last_target.get(&entity).copied().flatten();
+        let prev = last_target.0.get(&entity).copied().flatten();
         if prev == agent.target {
             continue;
         }
-        last_target.insert(entity, agent.target);
+        last_target.0.insert(entity, agent.target);
 
         match agent.target {
             Some(dest) => {
@@ -594,6 +609,7 @@ impl Plugin for NavMeshPlugin {
         info!("[runtime] NavMeshPlugin");
         renzora::clog_info!("NavMesh", "NavMeshPlugin loaded");
         app.register_type::<NavMeshVolume>()
+            .init_resource::<NavTargetCache>()
             .register_type::<NavMeshObstacle>()
             .register_type::<NavAgent>()
             .register_type::<NavPath>()
@@ -985,5 +1001,75 @@ mod tests {
         assert!(a.turn_speed > 0.0);
         assert!(a.stopping_distance > 0.0);
         assert!(a.target.is_none());
+    }
+
+    #[test]
+    fn removed_agents_release_targets_even_without_a_navigation_mesh() {
+        let mut app = App::new();
+        app.init_resource::<NavTargetCache>()
+            .init_resource::<Assets<NavMesh>>()
+            .add_systems(Update, update_agent_paths);
+        let keeper = app
+            .world_mut()
+            .spawn((
+                NavAgent::default(),
+                NavPath::default(),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<NavTargetCache>()
+            .0
+            .insert(keeper, Some(Vec3::Y));
+        for _ in 0..1_000 {
+            let entity = app
+                .world_mut()
+                .spawn((
+                    NavAgent::default(),
+                    NavPath::default(),
+                    GlobalTransform::IDENTITY,
+                ))
+                .id();
+            // Represents a target cached while the mesh was still installed.
+            app.world_mut()
+                .resource_mut::<NavTargetCache>()
+                .0
+                .insert(entity, Some(Vec3::X));
+            app.world_mut().despawn(entity);
+            app.update();
+            let cache = &app.world().resource::<NavTargetCache>().0;
+            assert_eq!(cache.len(), 1);
+            assert_eq!(cache[&keeper], Some(Vec3::Y));
+        }
+        app.world_mut().entity_mut(keeper).remove::<NavAgent>();
+        app.update();
+        assert!(app.world().resource::<NavTargetCache>().0.is_empty());
+        let entity = app
+            .world_mut()
+            .spawn((
+                NavAgent::default(),
+                NavPath::default(),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<NavTargetCache>()
+            .0
+            .insert(entity, Some(Vec3::X));
+        app.world_mut().entity_mut(entity).remove::<NavPath>();
+        app.update();
+        assert!(app.world().resource::<NavTargetCache>().0.is_empty());
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(NavPath::default());
+        app.world_mut()
+            .resource_mut::<NavTargetCache>()
+            .0
+            .insert(entity, Some(Vec3::X));
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<GlobalTransform>();
+        app.update();
+        assert!(app.world().resource::<NavTargetCache>().0.is_empty());
     }
 }

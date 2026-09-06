@@ -590,3 +590,11 @@ the first build; after that only invalidation requests another. The existing
 checks 1,000 unchanged empty updates without rebuilding, then entity addition,
 removal and another stable empty interval. Filtering editor-chrome invalidation
 remains separate work.
+
+## Navigation target cleanup
+
+The navigation target cache consumes agent/path/global-transform removals before
+checking for an available navigation mesh. Scene teardown therefore releases
+obsolete entries even after the mesh is gone, without adding a full-world scan.
+A headless test removes 1,000 agents while retaining a live agent's target, and
+checks individual component removal. Repath and movement polling remain unchanged.
