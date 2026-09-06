@@ -556,3 +556,12 @@ the full duration map or builds a temporary stale-clip list each active frame.
 Scheduling still walks the timeline; seek tolerance, clip windows and backend
 requests are unchanged. Headless coverage checks 1,000 stable playback updates,
 muted/missing/future clips, finite-duration trimming, seeking and stopping.
+
+## Wind-driven water
+
+World-wind synchronization compares the current cascades directly with their
+baseline, reuses baseline arrays on edits, and only writes changed wind values.
+The existing quantization and authored-pattern scaling remain in place. A
+1,000-frame stable regression retains baseline storage and emits no additional
+water-component notifications; wind changes, authored edits and cascade removal
+still update. The system still checks surfaces each frame.

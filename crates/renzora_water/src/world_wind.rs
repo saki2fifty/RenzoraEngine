@@ -76,24 +76,40 @@ pub fn apply_world_wind(
             continue;
         }
 
-        let current: Vec<(f32, f32)> = surface
-            .cascades
-            .iter()
-            .map(|c| (c.wind_speed, c.wind_direction))
-            .collect();
-
         let mut baseline = match baseline {
             // Re-capture when what's on the cascades isn't what we last wrote:
             // either the author edited them in the inspector, or a cascade was
             // added/removed. Either way the authored sea has changed and the
             // old baseline describes an ocean that no longer exists.
-            Some(b) if b.last_written == current => b,
+            Some(b)
+                if b.last_written.iter().copied().eq(surface
+                    .cascades
+                    .iter()
+                    .map(|c| (c.wind_speed, c.wind_direction))) =>
+            {
+                b
+            }
             Some(mut b) => {
-                b.cascades = current.clone();
-                b.last_written = current;
+                let WaterWindBaseline {
+                    cascades,
+                    last_written,
+                } = &mut *b;
+                cascades.clear();
+                cascades.extend(
+                    surface
+                        .cascades
+                        .iter()
+                        .map(|c| (c.wind_speed, c.wind_direction)),
+                );
+                last_written.clone_from(cascades);
                 b
             }
             None => {
+                let current: Vec<_> = surface
+                    .cascades
+                    .iter()
+                    .map(|c| (c.wind_speed, c.wind_direction))
+                    .collect();
                 commands.entity(entity).insert(WaterWindBaseline {
                     cascades: current.clone(),
                     last_written: current,
@@ -109,10 +125,9 @@ pub fn apply_world_wind(
         );
         let bearing = quantize(wind.direction_degrees(), BEARING_STEP);
 
-        let mut written = Vec::with_capacity(baseline.cascades.len());
-        for (cascade, &(base_speed, base_dir)) in
-            surface.cascades.iter_mut().zip(baseline.cascades.iter())
-        {
+        let count = surface.cascades.len().min(baseline.cascades.len());
+        for index in 0..count {
+            let (base_speed, base_dir) = baseline.cascades[index];
             // Floored, not clamped to zero: a JONSWAP spectrum at literally
             // zero wind speed divides by it (see `jonswap_peak_frequency`), and
             // a dead-flat ocean should be flat because the waves are tiny, not
@@ -122,11 +137,26 @@ pub fn apply_world_wind(
             // reference direction, so a cross-swell stays a cross-swell as the
             // wind veers.
             let direction = base_dir + bearing;
-            cascade.wind_speed = speed;
-            cascade.wind_direction = direction;
-            written.push((speed, direction));
+            let cascade = &surface.cascades[index];
+            // Do not acquire a mutable component reference for settled wind:
+            // its change tick drives other water maintenance systems.
+            if cascade.wind_speed.to_bits() != speed.to_bits()
+                || cascade.wind_direction.to_bits() != direction.to_bits()
+            {
+                let cascade = &mut surface.cascades[index];
+                cascade.wind_speed = speed;
+                cascade.wind_direction = direction;
+            }
+            let previous = baseline.last_written[index];
+            if previous.0.to_bits() != speed.to_bits()
+                || previous.1.to_bits() != direction.to_bits()
+            {
+                baseline.last_written[index] = (speed, direction);
+            }
         }
-        baseline.last_written = written;
+        if baseline.last_written.len() != count {
+            baseline.last_written.truncate(count);
+        }
     }
 }
 
@@ -142,6 +172,70 @@ fn restore(surface: &mut WaterSurface, baseline: &WaterWindBaseline) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Resource, Default)]
+    struct Notifications(usize);
+
+    fn count_changes(changed: Query<(), Changed<WaterSurface>>, mut count: ResMut<Notifications>) {
+        count.0 += changed.iter().count();
+    }
+
+    #[test]
+    fn settled_wind_keeps_component_ticks_and_baseline_storage_stable() {
+        let (mut app, entity) = app_with_surface(WaterSurface::default());
+        app.init_resource::<Notifications>();
+        app.add_systems(Update, count_changes.after(apply_world_wind));
+        app.update();
+        app.update();
+        let before = app.world().resource::<Notifications>().0;
+        let baseline = app.world().get::<WaterWindBaseline>(entity).unwrap();
+        let pointers = (baseline.cascades.as_ptr(), baseline.last_written.as_ptr());
+        for _ in 0..1_000 {
+            app.update();
+            assert_eq!(app.world().resource::<Notifications>().0, before);
+            let baseline = app.world().get::<WaterWindBaseline>(entity).unwrap();
+            assert_eq!(
+                pointers,
+                (baseline.cascades.as_ptr(), baseline.last_written.as_ptr())
+            );
+        }
+        app.world_mut().resource_mut::<WindState>().sea_state_speed = REFERENCE_WIND_SPEED * 2.0;
+        app.update();
+        assert_eq!(app.world().resource::<Notifications>().0, before + 1);
+        app.world_mut()
+            .get_mut::<WaterSurface>(entity)
+            .unwrap()
+            .cascades[0]
+            .wind_speed = 3.0;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<WaterWindBaseline>(entity)
+                .unwrap()
+                .cascades[0]
+                .0,
+            3.0
+        );
+        assert_eq!(
+            app.world().get::<WaterSurface>(entity).unwrap().cascades[0].wind_speed,
+            6.0
+        );
+        app.world_mut()
+            .get_mut::<WaterSurface>(entity)
+            .unwrap()
+            .cascades
+            .pop();
+        app.update();
+        let baseline = app.world().get::<WaterWindBaseline>(entity).unwrap();
+        assert_eq!(
+            baseline.cascades.len(),
+            app.world()
+                .get::<WaterSurface>(entity)
+                .unwrap()
+                .cascades
+                .len()
+        );
+    }
 
     fn app_with_surface(surface: WaterSurface) -> (App, Entity) {
         let mut app = App::new();
