@@ -793,6 +793,14 @@ semantics are checked against the previous owned-board equality.
 An actual link-boundary test checks one send across 1,000 settled updates,
 same-address re-adoption, failed-send retries and release/re-adoption.
 
+## Script timer maintenance
+
+Completed one-shot timers no longer report completion repeatedly. A paused timer
+clears its previous completion pulse without advancing. Empty stores and stores
+containing only settled completed/paused timers do not publish resource changes;
+the eligibility check still scans their entries. This does not change whether
+timers advance while editor script execution is inactive.
+
 ## Optional pointer-motion capture
 
 Launch with `RENZORA_POINTER_DIAGNOSTICS=1` to log ten-second summaries tagged

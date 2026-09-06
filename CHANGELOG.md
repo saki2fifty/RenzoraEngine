@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 23:48 UTC
+
+- Fixed one-shot script timers firing repeatedly and avoided unnecessary updates for settled timers.
+
 ## September 6, 2026 — 23:22 UTC
 
 - Kept the editor open and showed an error when a Marketplace restart cannot launch.

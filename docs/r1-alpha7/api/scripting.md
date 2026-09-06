@@ -389,7 +389,7 @@ Provided by `renzora_navmesh`.
 
 | Function | Description |
 |----------|-------------|
-| `start_timer(name, duration [, repeat])` | Start a timer; finished names appear in `timers_finished` |
+| `start_timer(name, duration [, repeat])` | Start or replace a timer; a one-shot appears in `timers_finished` once, then remains completed until restarted. Repeating timers emit a new completion pulse on subsequent intervals. |
 | `stop_timer(name)` | Cancel a timer |
 
 ## Networking
