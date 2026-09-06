@@ -58,10 +58,9 @@ pub fn update_physics_read_state(
         Without<RuntimePhysics2d>,
     >,
 ) {
-    for (mut rs, lv) in &mut q {
+    for (rs, lv) in &mut q {
         let v = lv.map(|lv| lv.0).unwrap_or(Vec3::ZERO);
-        rs.velocity = v;
-        rs.speed = v.length();
+        mirror_velocity(rs, v);
         // `grounded` + `ground_normal` are written by the `kinematic_slide`
         // drain system each time a slide runs.
     }
@@ -79,10 +78,23 @@ pub fn update_physics_read_state_2d(
         With<RuntimePhysics2d>,
     >,
 ) {
-    for (mut rs, lv) in &mut q {
+    for (rs, lv) in &mut q {
         let v = lv.map(|lv| lv.0.extend(0.0)).unwrap_or(Vec3::ZERO);
-        rs.velocity = v;
-        rs.speed = v.length();
+        mirror_velocity(rs, v);
+    }
+}
+
+#[cfg(any(feature = "avian3d", feature = "avian2d"))]
+fn mirror_velocity(mut state: Mut<PhysicsReadState>, velocity: Vec3) {
+    let speed = velocity.length();
+    // Compare the mirror, not the backend's change tick: removed velocities and
+    // externally edited readings must still be corrected. Bit equality retains
+    // signed-zero changes without repeatedly invalidating an identical NaN.
+    if state.velocity.to_array().map(f32::to_bits) != velocity.to_array().map(f32::to_bits)
+        || state.speed.to_bits() != speed.to_bits()
+    {
+        state.velocity = velocity;
+        state.speed = speed;
     }
 }
 
@@ -199,6 +211,129 @@ mod tests {
     use super::*;
     use bevy::ecs::system::SystemState;
     use std::collections::HashSet;
+
+    #[test]
+    fn velocity_mirror_preserves_float_bits() {
+        #[derive(Resource)]
+        struct Input(Vec3);
+        fn update(mut query: Query<&mut PhysicsReadState>, input: Res<Input>) {
+            for state in &mut query {
+                mirror_velocity(state, input.0);
+            }
+        }
+        let mut app = App::new();
+        app.insert_resource(Input(Vec3::ZERO))
+            .add_systems(Update, update);
+        let entity = app.world_mut().spawn(PhysicsReadState::default()).id();
+        for velocity in [
+            Vec3::new(-0.0, 0.0, 0.0),
+            Vec3::new(f32::INFINITY, 0.0, 0.0),
+            Vec3::new(f32::from_bits(0x7fc0_0123), 0.0, 0.0),
+            Vec3::ZERO,
+        ] {
+            app.world_mut().resource_mut::<Input>().0 = velocity;
+            app.update();
+            let state = app.world().get::<PhysicsReadState>(entity).expect("mirror");
+            assert_eq!(
+                state.velocity.to_array().map(f32::to_bits),
+                velocity.to_array().map(f32::to_bits)
+            );
+            assert_eq!(state.speed.to_bits(), velocity.length().to_bits());
+        }
+    }
+
+    #[cfg(all(feature = "avian3d", feature = "avian2d"))]
+    #[test]
+    fn velocity_mirrors_stay_quiet_and_follow_backend_changes() {
+        #[derive(Resource, Default)]
+        struct Changes(usize);
+        fn observe(q: Query<(), Changed<PhysicsReadState>>, mut count: ResMut<Changes>) {
+            count.0 += q.iter().count();
+        }
+        let mut app = App::new();
+        app.init_resource::<Changes>().add_systems(
+            Update,
+            (
+                update_physics_read_state,
+                update_physics_read_state_2d,
+                observe,
+            )
+                .chain(),
+        );
+        let body = app
+            .world_mut()
+            .spawn((
+                PhysicsReadState {
+                    grounded: true,
+                    ground_normal: Vec3::X,
+                    ..default()
+                },
+                avian3d::prelude::LinearVelocity(Vec3::new(3.0, 4.0, 0.0)),
+                avian2d::prelude::LinearVelocity(Vec2::new(0.0, 12.0)),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PhysicsReadState>(body)
+                .expect("mirror")
+                .speed,
+            5.0
+        );
+        let initial = app.world().resource::<Changes>().0;
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Changes>().0, initial);
+        app.world_mut().entity_mut(body).insert(RuntimePhysics2d);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PhysicsReadState>(body)
+                .expect("mirror")
+                .speed,
+            12.0
+        );
+        let switched = app.world().resource::<Changes>().0;
+        assert_eq!(switched, initial + 1);
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Changes>().0, switched);
+        app.world_mut()
+            .entity_mut(body)
+            .remove::<avian2d::prelude::LinearVelocity>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PhysicsReadState>(body)
+                .expect("mirror")
+                .velocity,
+            Vec3::ZERO
+        );
+        // Repair a stale reading even when the backend has not changed.
+        app.world_mut()
+            .get_mut::<PhysicsReadState>(body)
+            .expect("mirror")
+            .speed = 123.0;
+        app.update();
+        let state = app.world().get::<PhysicsReadState>(body).expect("mirror");
+        assert_eq!(state.speed, 0.0);
+        assert!(state.grounded);
+        assert_eq!(state.ground_normal, Vec3::X);
+        app.world_mut()
+            .entity_mut(body)
+            .remove::<RuntimePhysics2d>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<PhysicsReadState>(body)
+                .expect("mirror")
+                .speed,
+            5.0
+        );
+        eprintln!("velocity mirrors: 1000 stable 3D frames and 1000 stable 2D frames produced zero extra change notifications");
+    }
 
     #[test]
     fn collision_snapshot_matches_full_diff_through_contact_lifecycle() {

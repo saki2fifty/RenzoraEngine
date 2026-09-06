@@ -459,6 +459,13 @@ The contact sets are still checked every frame; this is not an event-driven
 physics rewrite or a measured FPS improvement. Contact ordering remains
 unspecified, as before.
 
+Velocity mirrors still read the current backend every frame, but only mark
+`PhysicsReadState` changed when the velocity or speed bits differ. Missing
+velocities still reset the reading to zero, and switching between 2D and 3D
+still selects the correct backend. Grounded state is untouched. A headless
+regression observes zero extra change notifications across 1,000 stable frames
+per backend; this does not measure FPS or eliminate the velocity calculation.
+
 ## Plugin material settings
 
 Plugin materials cache the entity groups that contain their settings instead
