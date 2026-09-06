@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 05:21 UTC
+
+- Stopped unused plugin materials from searching the entire scene for settings, and reused temporary working memory while preserving material updates.
+
 ## September 6, 2026 — 04:54 UTC
 
 - Stopped unchanged runtime UI scale values from repeatedly marking layout inputs as changed, while preserving resize and canvas updates.

@@ -31,11 +31,14 @@
 //! systems — instead of duplicated into a GPU-only struct.
 
 use bevy::ecs::component::ComponentId;
+use bevy::ecs::entity_disabling::DefaultQueryFilters;
+use bevy::ecs::query::{FilteredAccess, QueryBuilder};
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroupError, BindGroupLayout, BindGroupLayoutEntry, BindingResources,
-    OwnedBindingResource, RenderPipelineDescriptor, ShaderStages,
-    SpecializedMeshPipelineError, UnpreparedBindGroup,
+    OwnedBindingResource, RenderPipelineDescriptor, ShaderStages, SpecializedMeshPipelineError,
+    UnpreparedBindGroup,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::shader::{Shader, ShaderRef};
@@ -348,53 +351,81 @@ fn apply_custom_material(world: &mut World, entity: Entity, slot: usize) {
 /// global look, not a per-entity one, so one source is the right model — the
 /// same assumption the effect path already makes.
 pub fn collect_material_settings(world: &mut World) {
-    let wanted: Vec<(AssetId<PluginMaterial>, ComponentId, usize)> = {
-        let Some(materials) = world.get_resource::<Assets<PluginMaterial>>() else {
-            return;
-        };
-        materials
-            .iter()
-            .map(|(id, m)| (id, m.settings, m.settings_size))
-            .collect()
-    };
-    if wanted.is_empty() {
+    if !world.contains_resource::<Assets<PluginMaterial>>() {
         return;
     }
-
-    let mut updates = Vec::new();
-    for (id, component, size) in wanted {
-        if size == 0 {
-            continue;
-        }
-        let found = world.iter_entities().find_map(|e| {
-            e.get_by_id(component).ok().map(|p| unsafe {
-                // SAFETY: `size` is the size the plugin registered this
-                // component with, clamped to the uniform cap. Reading the full
-                // cap instead would run past the end of any smaller component —
-                // a heap over-read, and the bytes past it would land in the
-                // uniform as garbage.
-                std::slice::from_raw_parts(p.as_ptr(), size).to_vec()
-            })
-        });
-        if let Some(bytes) = found {
-            updates.push((id, bytes));
-        }
-    }
-
-    let Some(mut materials) = world.get_resource_mut::<Assets<PluginMaterial>>() else {
-        return;
-    };
-    for (id, bytes) in updates {
-        if let Some(mut m) = materials.get_mut(id) {
-            let n = bytes.len().min(m.uniform.len());
-            // Only touch the asset when the bytes actually differ — every write
-            // marks the material changed, which re-prepares its bind group on
-            // the render side.
-            if m.uniform[..n] != bytes[..n] {
-                m.uniform[..n].copy_from_slice(&bytes[..n]);
+    world.init_resource::<MaterialSettingQueries>();
+    world.resource_scope(|world, mut cache: Mut<MaterialSettingQueries>| {
+        world.resource_scope(|world, mut materials: Mut<Assets<PluginMaterial>>| {
+            let cache = &mut *cache;
+            cache.wanted.clear();
+            cache.wanted.extend(materials.ids());
+            cache.used.clear();
+            for id in &cache.wanted {
+                let Some(mut material) = materials.get_mut(*id) else {
+                    continue;
+                };
+                let component = material.settings;
+                let size = material.settings_size;
+                // Material fields are public; do not trust a manually supplied
+                // size to read beyond either the component or the uniform.
+                if size == 0
+                    || size > material.uniform.len()
+                    || world
+                        .components()
+                        .get_info(component)
+                        .is_none_or(|info| size > info.layout().size())
+                {
+                    continue;
+                }
+                cache.used.insert(component);
+                let query = cache.queries.entry(component).or_insert_with(|| {
+                    // Match the dynamic equivalent of Allow<T> for all default
+                    // exclusions: the old world scan includes disabled entities.
+                    let mut allowed = FilteredAccess::default();
+                    if let Some(filters) = world.get_resource::<DefaultQueryFilters>() {
+                        for id in filters.disabling_ids() {
+                            allowed.access_mut().add_archetypal(id);
+                        }
+                    }
+                    let mut builder = QueryBuilder::<Entity>::new(world);
+                    builder.with_id(component);
+                    builder.extend_access(allowed);
+                    builder.build()
+                });
+                query.update_archetypes(world);
+                // World::iter_entities visits archetypes, then their rows.
+                // Query iteration may instead merge tables (notably for sparse
+                // components), changing which global settings entity wins.
+                let entity = query
+                    .matched_archetypes()
+                    .find_map(|id| world.archetypes()[id].entities().first().map(|e| e.id()));
+                let Some(pointer) = entity
+                    .and_then(|entity| world.get_entity(entity).ok()?.get_by_id(component).ok())
+                else {
+                    continue;
+                };
+                // SAFETY: the component exists, its registered layout covers
+                // size, and world is immutably borrowed while the bytes are
+                // read. The separately scoped asset cannot alias this storage.
+                let bytes = unsafe { std::slice::from_raw_parts(pointer.as_ptr(), size) };
+                // AssetMut only emits Modified on a mutable dereference.
+                if material.uniform[..size] != *bytes {
+                    material.uniform[..size].copy_from_slice(bytes);
+                }
             }
-        }
-    }
+            cache
+                .queries
+                .retain(|component, _| cache.used.contains(component));
+        });
+    });
+}
+
+#[derive(Resource, Default)]
+struct MaterialSettingQueries {
+    queries: HashMap<ComponentId, QueryState<Entity>>,
+    wanted: Vec<AssetId<PluginMaterial>>,
+    used: HashSet<ComponentId>,
 }
 
 /// Installs the material type and its per-frame uniform refresh.
@@ -408,5 +439,240 @@ impl Plugin for PluginMaterialPlugin {
 
     fn finish(&self, app: &mut App) {
         build_plugin_materials(app);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Component)]
+    #[repr(transparent)]
+    struct Settings(u32);
+
+    #[derive(Component)]
+    #[component(storage = "SparseSet")]
+    struct SparseMarker;
+
+    fn material(component: ComponentId) -> PluginMaterial {
+        PluginMaterial {
+            shader: Handle::default(),
+            settings_size: 4,
+            uniform: [0; MATERIAL_UNIFORM_CAP as usize],
+            alpha_mode: AlphaMode::Opaque,
+            settings: component,
+            textures: Vec::new(),
+        }
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<PluginMaterial>()
+            .add_systems(Update, collect_material_settings);
+        app
+    }
+
+    #[test]
+    fn unused_material_skips_unrelated_entities_and_cache_tracks_lifecycle() {
+        let mut app = app();
+        let component = app.world_mut().register_component::<Settings>();
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<PluginMaterial>>()
+            .add(material(component));
+        for _ in 0..10_000 {
+            app.world_mut().spawn_empty();
+        }
+        let mut old_visits = 0;
+        let found = app.world().iter_entities().find_map(|entity| {
+            old_visits += 1;
+            entity.get::<Settings>()
+        });
+        assert!(found.is_none());
+        assert!(old_visits >= 10_000);
+        app.update();
+        let cache = app.world().resource::<MaterialSettingQueries>();
+        assert_eq!(cache.queries[&component].matched_archetypes().count(), 0);
+        let capacity = cache.wanted.capacity();
+        for _ in 0..100 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .resource::<MaterialSettingQueries>()
+                .wanted
+                .capacity(),
+            capacity
+        );
+        // Create a matching archetype only after the empty query is cached.
+        let entity = app.world_mut().spawn(Settings(23)).id();
+        app.update();
+        assert_eq!(
+            &app.world()
+                .resource::<Assets<PluginMaterial>>()
+                .get(&handle)
+                .expect("material exists")
+                .uniform[..4],
+            &23u32.to_ne_bytes()
+        );
+        app.world_mut().despawn(entity);
+        app.update();
+        // No source keeps the last uniform, as the previous collector did.
+        assert_eq!(
+            &app.world()
+                .resource::<Assets<PluginMaterial>>()
+                .get(&handle)
+                .expect("material exists")
+                .uniform[..4],
+            &23u32.to_ne_bytes()
+        );
+        app.world_mut()
+            .resource_mut::<Assets<PluginMaterial>>()
+            .remove(handle.id());
+        app.update();
+        assert!(app
+            .world()
+            .resource::<MaterialSettingQueries>()
+            .queries
+            .is_empty());
+        eprintln!("unused material: old scan visited {old_visits} entities; cached query matched zero archetypes across 100 stable updates");
+    }
+
+    #[test]
+    fn source_order_matches_world_scan_and_unchanged_assets_stay_quiet() {
+        let mut app = app();
+        let component = app.world_mut().register_component::<Settings>();
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<PluginMaterial>>()
+            .add(material(component));
+        let first = app.world_mut().spawn((Settings(11), SparseMarker)).id();
+        let second = app.world_mut().spawn(Settings(22)).id();
+        for step in 0..4 {
+            match step {
+                1 => {
+                    app.world_mut().entity_mut(first).remove::<SparseMarker>();
+                }
+                2 => {
+                    app.world_mut().entity_mut(second).insert(SparseMarker);
+                }
+                3 => {
+                    app.world_mut().despawn(first);
+                }
+                _ => {}
+            }
+            let expected = app
+                .world()
+                .iter_entities()
+                .find_map(|e| e.get::<Settings>().map(|s| s.0))
+                .expect("settings source");
+            app.update();
+            assert_eq!(
+                &app.world()
+                    .resource::<Assets<PluginMaterial>>()
+                    .get(&handle)
+                    .expect("material exists")
+                    .uniform[..4],
+                &expected.to_ne_bytes()
+            );
+        }
+        app.world_mut()
+            .resource_mut::<Messages<AssetEvent<PluginMaterial>>>()
+            .clear();
+        app.update();
+        let changes = app
+            .world_mut()
+            .resource_mut::<Messages<AssetEvent<PluginMaterial>>>()
+            .drain()
+            .filter(|event| matches!(event, AssetEvent::Modified { .. }))
+            .count();
+        assert_eq!(changes, 0);
+        app.world_mut()
+            .entity_mut(second)
+            .get_mut::<Settings>()
+            .expect("surviving source")
+            .0 = 99;
+        app.update();
+        assert_eq!(
+            &app.world()
+                .resource::<Assets<PluginMaterial>>()
+                .get(&handle)
+                .expect("material exists")
+                .uniform[..4],
+            &99u32.to_ne_bytes()
+        );
+        let changes = app
+            .world_mut()
+            .resource_mut::<Messages<AssetEvent<PluginMaterial>>>()
+            .drain()
+            .filter(|event| matches!(event, AssetEvent::Modified { .. }))
+            .count();
+        assert_eq!(changes, 1);
+    }
+
+    #[test]
+    fn disabled_settings_keep_the_world_scan_behavior() {
+        use bevy::ecs::entity_disabling::Disabled;
+        let mut app = app();
+        let component = app.world_mut().register_component::<Settings>();
+        let custom = app.world_mut().register_component::<SparseMarker>();
+        app.world_mut()
+            .resource_mut::<DefaultQueryFilters>()
+            .register_disabling_component(custom);
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<PluginMaterial>>()
+            .add(material(component));
+        app.world_mut()
+            .spawn((Settings(77), Disabled, SparseMarker));
+        app.update();
+        assert_eq!(
+            &app.world()
+                .resource::<Assets<PluginMaterial>>()
+                .get(&handle)
+                .expect("material exists")
+                .uniform[..4],
+            &77u32.to_ne_bytes()
+        );
+    }
+
+    #[test]
+    fn shared_sources_update_all_materials_and_invalid_sizes_are_skipped() {
+        let mut app = app();
+        let component = app.world_mut().register_component::<Settings>();
+        app.world_mut().spawn(Settings(42));
+        let mut assets = app.world_mut().resource_mut::<Assets<PluginMaterial>>();
+        let first = assets.add(material(component));
+        let second = assets.add(material(component));
+        let mut invalid = material(component);
+        invalid.settings_size = 5;
+        let invalid = assets.add(invalid);
+        let mut empty = material(component);
+        empty.settings_size = 0;
+        let empty = assets.add(empty);
+        app.update();
+        let assets = app.world().resource::<Assets<PluginMaterial>>();
+        for handle in [&first, &second] {
+            assert_eq!(
+                &assets.get(handle).expect("material exists").uniform[..4],
+                &42u32.to_ne_bytes()
+            );
+        }
+        for handle in [&invalid, &empty] {
+            assert!(assets
+                .get(handle)
+                .expect("material exists")
+                .uniform
+                .iter()
+                .all(|byte| *byte == 0));
+        }
+        assert_eq!(
+            app.world()
+                .resource::<MaterialSettingQueries>()
+                .queries
+                .len(),
+            1
+        );
     }
 }

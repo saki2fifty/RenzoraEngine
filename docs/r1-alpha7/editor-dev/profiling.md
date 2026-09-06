@@ -458,3 +458,17 @@ iterator at that first contact, avoiding temporary lists of unused contacts.
 The contact sets are still checked every frame; this is not an event-driven
 physics rewrite or a measured FPS improvement. Contact ordering remains
 unspecified, as before.
+
+## Plugin material settings
+
+Plugin materials cache the entity groups that contain their settings instead
+of searching every entity for each material. New groups are included as the
+scene changes. The collector preserves the previous first-source ordering,
+including disabled sources, and keeps the last uniform when no source exists.
+It reuses its working lists and copies directly into uniforms only when bytes
+change; unused materials no longer walk unrelated entities. Removed materials
+release their unused cached queries.
+
+The headless regression compares a scan of over 10,000 unrelated entities with
+zero matching groups in the cached path, and checks 100 stable updates. This
+measures avoided search work, not editor FPS or GPU timing.
