@@ -9,6 +9,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 - Improved reuse of unchanged engine-build files across build-kit updates and cleaned up a Windows build warning.
 - Corrected outdated Solari and profiling instructions that still described the removed engine DLL architecture.
 - Made multiplayer servers honor their configured listening address and report failed startup accurately.
+- Added optional mouse-motion performance logs to help investigate viewport slowdowns without changing mouse controls.
 
 ## September 6, 2026 — 23:08 UTC
 

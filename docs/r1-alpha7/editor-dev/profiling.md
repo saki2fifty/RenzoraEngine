@@ -793,6 +793,19 @@ semantics are checked against the previous owned-board equality.
 An actual link-boundary test checks one send across 1,000 settled updates,
 same-address re-adoption, failed-send retries and release/re-adoption.
 
+## Optional pointer-motion capture
+
+Launch with `RENZORA_POINTER_DIAGNOSTICS=1` to log ten-second summaries tagged
+`[pointer-perf]`. Frames are grouped as stationary, viewport motion, other UI
+motion, or mouse-button held. Independent message readers count cursor and raw
+motion without consuming input for other systems. No diagnostic systems are
+installed when the option is off.
+
+`interval_ms` includes rendering and event-loop waits. `main_ms` is an approximate
+wall-clock span between hooks in First and Last, not exclusive CPU time or GPU
+time. Compare groups from the same scene; these numbers help narrow a slowdown,
+but do not identify its cause or establish an FPS improvement.
+
 ## Startup GPU capability probe
 
 Ray-tracing availability and the integrated-GPU hint share one cached temporary

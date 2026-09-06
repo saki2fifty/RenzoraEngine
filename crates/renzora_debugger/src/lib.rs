@@ -10,6 +10,7 @@
 pub mod native;
 pub mod panels;
 pub mod state;
+mod pointer_diagnostics;
 
 use bevy::diagnostic::{
     EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin, SystemInformationDiagnosticsPlugin,
@@ -72,6 +73,7 @@ pub struct DebuggerPlugin;
 impl Plugin for DebuggerPlugin {
     fn build(&self, app: &mut App) {
         info!("[editor] DebuggerPlugin");
+        pointer_diagnostics::install(app);
         // Add Bevy diagnostic plugins
         app.add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
