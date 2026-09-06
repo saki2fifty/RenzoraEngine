@@ -10,9 +10,9 @@
 //! V1 limitations (deferred to follow-ups):
 //!   - StandardMaterial.base_color only; no albedo texture sampling.
 //!   - Static meshes only; skinned/morphed meshes ignore deformation.
-//!   - CPU samples re-flattened into a fresh GPU buffer every frame.
-//!     Fine up to ~1M total samples; needs per-mesh persistent buffers
-//!     + indirect dispatch for serious scenes.
+//!   - CPU samples are still transformed every active frame. Storage is
+//!     retained and unchanged uploads are skipped; per-mesh persistent
+//!     buffers would be needed to avoid the transform work itself.
 //!   - No occlusion bit yet — voxels just get color contributions, so
 //!     inside-mesh "solid air" isn't represented. Phase 5's ray tracer
 //!     will need an additional alpha/density signal.
@@ -369,13 +369,9 @@ impl FromWorld for GeometryInjectPipeline {
     }
 }
 
-/// Extract — flatten all (transform × samples) into a single flat
-/// vector each frame, transformed into world space. Then upload to a
-/// (re)allocated GPU buffer. Per-frame CPU + transfer cost is roughly
-/// O(total samples × 8 floats); ~1M samples = 32 MB/frame, well
-/// within budget for V1.
+/// Refresh retained world-space samples, notifying preparation only when bytes change.
 pub fn extract_geometry_samples(
-    mut commands: Commands,
+    mut extracted: ResMut<ExtractedGeometrySamples>,
     query: Extract<Query<(&MeshVoxelSamples, &GlobalTransform)>>,
     cameras: Extract<Query<(&GlobalTransform, &VoxelCacheView), With<Camera3d>>>,
 ) {
@@ -394,22 +390,36 @@ pub fn extract_geometry_samples(
     // skip the flatten + upload entirely. Baked `MeshVoxelSamples` persist
     // on entities, so without this gate the editor kept re-uploading up to
     // 6.4 MB of samples every frame even when nothing consumed them.
-    let Some(camera_pos) = cameras
+    let camera_pos = cameras
         .iter()
         .find(|(_, v)| v.inject_active)
-        .map(|(t, _)| t.translation())
-    else {
-        commands.insert_resource(ExtractedGeometrySamples(Vec::new()));
-        return;
+        .map(|(t, _)| t.translation());
+    // Preserve the change tick when the exact upload payload is unchanged.
+    let changed = refresh_geometry_samples(
+        &mut extracted.bypass_change_detection().0,
+        query.iter(),
+        camera_pos,
+    );
+    if changed {
+        extracted.set_changed();
+    }
+}
+
+fn refresh_geometry_samples<'a>(
+    samples: &mut Vec<GpuSample>,
+    query: impl IntoIterator<Item = (&'a MeshVoxelSamples, &'a GlobalTransform)>,
+    camera_pos: Option<Vec3>,
+) -> bool {
+    let Some(camera_pos) = camera_pos else {
+        let changed = !samples.is_empty();
+        samples.clear();
+        return changed;
     };
     let cull_sq = CULL_RADIUS * CULL_RADIUS;
-
-    // Preallocate so push doesn't reallocate. Worst case it's a bit
-    // oversized; we shrink-to-fit only if memory matters (it doesn't).
-    let mut samples: Vec<GpuSample> = Vec::with_capacity(MAX_SAMPLES_PER_FRAME);
-
-    for (mesh_samples, transform) in query.iter() {
-        if samples.len() >= MAX_SAMPLES_PER_FRAME {
+    let mut count = 0;
+    let mut changed = false;
+    for (mesh_samples, transform) in query {
+        if count >= MAX_SAMPLES_PER_FRAME {
             break;
         }
         if mesh_samples.local_positions.is_empty() {
@@ -431,20 +441,33 @@ pub fn extract_geometry_samples(
             0.0,
         ];
         let model = transform.to_matrix();
-        let budget = MAX_SAMPLES_PER_FRAME - samples.len();
-        let count = mesh_samples.local_positions.len().min(budget);
-        for &local in &mesh_samples.local_positions[..count] {
+        let budget = MAX_SAMPLES_PER_FRAME - count;
+        let mesh_count = mesh_samples.local_positions.len().min(budget);
+        for &local in &mesh_samples.local_positions[..mesh_count] {
             let world = model.transform_point3(local);
-            samples.push(GpuSample {
+            let sample = GpuSample {
                 world_pos: [world.x, world.y, world.z, 0.0],
                 albedo,
-            });
+            };
+            if let Some(previous) = samples.get_mut(count) {
+                // Byte equality preserves signed zero and stable NaN payloads.
+                if bytemuck::bytes_of(previous) != bytemuck::bytes_of(&sample) {
+                    *previous = sample;
+                    changed = true;
+                }
+            } else {
+                samples.push(sample);
+                changed = true;
+            }
+            count += 1;
         }
     }
-    commands.insert_resource(ExtractedGeometrySamples(samples));
+    changed |= samples.len() != count;
+    samples.truncate(count);
+    changed
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct ExtractedGeometrySamples(pub Vec<GpuSample>);
 
 pub fn prepare_geometry_sample_buffer(
@@ -482,8 +505,10 @@ pub fn prepare_geometry_sample_buffer(
         }));
         buffer.capacity_bytes = cap;
     }
-    if let Some(buf) = buffer.buffer.as_ref() {
-        render_queue.write_buffer(buf, 0, bytes);
+    if needs_alloc || extracted.is_changed() {
+        if let Some(buf) = buffer.buffer.as_ref() {
+            render_queue.write_buffer(buf, 0, bytes);
+        }
     }
     buffer.count = extracted.0.len() as u32;
 }
@@ -553,6 +578,7 @@ impl Plugin for GeometryVoxelizePlugin {
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<GeometrySampleBuffer>();
+            render_app.init_resource::<ExtractedGeometrySamples>();
             render_app.add_systems(bevy::render::ExtractSchedule, extract_geometry_samples);
             render_app.add_systems(
                 Render,
@@ -571,5 +597,181 @@ impl Plugin for GeometryVoxelizePlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<GeometryInjectPipeline>();
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_sample_tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct UploadNotifications(usize);
+
+    fn observe_payload(
+        samples: Res<ExtractedGeometrySamples>,
+        mut count: ResMut<UploadNotifications>,
+    ) {
+        if samples.is_changed() {
+            count.0 += 1;
+        }
+    }
+
+    #[test]
+    fn extraction_notifies_only_for_payload_changes() {
+        let mut main = bevy::render::MainWorld::default();
+        let camera = main
+            .spawn((
+                Camera3d::default(),
+                GlobalTransform::IDENTITY,
+                VoxelCacheView {
+                    inject_active: true,
+                    debug_active: false,
+                },
+            ))
+            .id();
+        let mesh = main
+            .spawn((
+                MeshVoxelSamples {
+                    local_positions: vec![Vec3::X],
+                    albedo: LinearRgba::WHITE,
+                },
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+        let mut app = App::new();
+        app.insert_resource(main)
+            .init_resource::<ExtractedGeometrySamples>()
+            .init_resource::<UploadNotifications>()
+            .add_systems(Update, (extract_geometry_samples, observe_payload).chain());
+        app.update();
+        assert_eq!(app.world().resource::<UploadNotifications>().0, 1);
+        for _ in 0..1_000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<UploadNotifications>().0, 1);
+        app.world_mut()
+            .resource_mut::<bevy::render::MainWorld>()
+            .entity_mut(mesh)
+            .insert(GlobalTransform::from_translation(Vec3::Y));
+        app.update();
+        assert_eq!(app.world().resource::<UploadNotifications>().0, 2);
+        app.world_mut()
+            .resource_mut::<bevy::render::MainWorld>()
+            .get_mut::<VoxelCacheView>(camera)
+            .unwrap()
+            .inject_active = false;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<ExtractedGeometrySamples>()
+            .0
+            .is_empty());
+        assert_eq!(app.world().resource::<UploadNotifications>().0, 3);
+        app.update();
+        assert_eq!(app.world().resource::<UploadNotifications>().0, 3);
+        app.world_mut()
+            .resource_mut::<bevy::render::MainWorld>()
+            .get_mut::<VoxelCacheView>(camera)
+            .unwrap()
+            .inject_active = true;
+        app.update();
+        assert_eq!(app.world().resource::<UploadNotifications>().0, 4);
+    }
+
+    #[test]
+    fn stable_samples_reuse_storage_and_edits_refresh_payload() {
+        let mut mesh = MeshVoxelSamples {
+            local_positions: vec![Vec3::ZERO, Vec3::X],
+            albedo: LinearRgba::WHITE,
+        };
+        let mut transform = GlobalTransform::IDENTITY;
+        let mut samples = Vec::new();
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        let storage = samples.as_ptr();
+        for _ in 0..1_000 {
+            assert!(!refresh_geometry_samples(
+                &mut samples,
+                [(&mesh, &transform)],
+                Some(Vec3::ZERO)
+            ));
+            assert_eq!(samples.as_ptr(), storage);
+        }
+        transform = GlobalTransform::from_translation(Vec3::Y);
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert_eq!(samples[0].world_pos, [0.0, 1.0, 0.0, 0.0]);
+        mesh.albedo.red = 0.25;
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert_eq!(samples[0].albedo[0], 0.25);
+        mesh.local_positions.pop();
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert_eq!(samples.len(), 1);
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::splat(100.0))
+        ));
+        assert!(samples.is_empty());
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            None
+        ));
+        assert!(!refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            None
+        ));
+        assert_eq!(samples.as_ptr(), storage);
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert!(refresh_geometry_samples(&mut samples, [], Some(Vec3::ZERO)));
+    }
+
+    #[test]
+    fn sample_budget_and_order_are_preserved() {
+        let mesh = MeshVoxelSamples {
+            local_positions: vec![Vec3::X; MAX_SAMPLES_PER_FRAME + 1],
+            albedo: LinearRgba::WHITE,
+        };
+        let transform = GlobalTransform::IDENTITY;
+        let mut samples = Vec::new();
+        assert!(refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert_eq!(samples.len(), MAX_SAMPLES_PER_FRAME);
+        assert!(!refresh_geometry_samples(
+            &mut samples,
+            [(&mesh, &transform)],
+            Some(Vec3::ZERO)
+        ));
+        assert!(samples
+            .iter()
+            .all(|sample| sample.world_pos == [1.0, 0.0, 0.0, 0.0]));
     }
 }

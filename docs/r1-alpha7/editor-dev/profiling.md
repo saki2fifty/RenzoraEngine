@@ -528,3 +528,12 @@ Water shading builds a complete candidate uniform off-asset and assigns it only
 when values differ. Sun and recreated simulation texture handles still update;
 the simulation itself is not paused. A headless 1,000-frame regression observes
 zero stable material-change events, then verifies shading, sun and texture edits.
+
+## Lumen geometry samples
+
+Geometry extraction retains its sample vector and compares the exact resulting
+bytes. Unchanged samples do not trigger another GPU upload; newly allocated GPU
+buffers always receive the data. Camera culling, world transforms, sample order
+and the 200,000-sample cap remain unchanged. Disabling injection clears the active
+count but retains storage for reuse. CPU transformation still runs on active
+frames; this is not per-mesh dirty-region caching or a measured FPS improvement.

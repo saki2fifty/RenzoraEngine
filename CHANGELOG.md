@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 06:31 UTC
+
+- Reused global-illumination geometry sample storage and skipped unchanged uploads, while continuing to check moving objects, camera coverage, and shading edits.
+
 ## September 6, 2026 — 06:22 UTC
 
 - Stopped settled tile objects from repeating bake checks, while retaining retries for late atlas loads and keeping tileset sampling crisp after image changes.
