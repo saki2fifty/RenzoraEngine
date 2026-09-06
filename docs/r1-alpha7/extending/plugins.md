@@ -463,3 +463,14 @@ directories for two canonical ids sharing a leaf.
 
 See [native-plugins.md](native-plugins.md) for the directory-based
 flow this complements.
+
+### Engine-plugin hierarchy icons
+
+`ComponentIconRegistry::register` retains support for callbacks that read any
+world state. When a callback reads **only components on the entity passed to
+it**, engine plugins may instead call `register_entity_local` on the registry.
+This lets hierarchy invalidation ignore unrelated editor chrome. Do not use
+that method for callbacks reading resources or other entities. Existing icon
+entry fields and the normal registration method remain compatible. This
+declaration narrows invalidation scope; it does not automatically subscribe to
+changes in arbitrary component types read by the callback.

@@ -70,6 +70,7 @@ impl Plugin for HierarchyPanelPlugin {
         app.init_resource::<RenameRequest>();
         app.init_resource::<HierarchyTreeCache>();
         app.init_resource::<HierarchyDirty>();
+        app.init_resource::<cache::HierarchyDependencies>();
         app.init_resource::<state::HierarchySpawnSeq>();
         // These ran on bare `Update` with no condition at all — not even
         // `in_state(Editor)` — so the full-world tree rebuild happened in the

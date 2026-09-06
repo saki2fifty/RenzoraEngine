@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 08:52 UTC
+
+- Kept unrelated editor rows and tooltips from repeatedly rebuilding the scene hierarchy, while preserving scene-parent and visibility-in-the-tree changes.
+
 ## September 6, 2026 — 08:43 UTC
 
 - Shared loading-status snapshots between scripts, avoiding repeated path copies for scripts that never request them.

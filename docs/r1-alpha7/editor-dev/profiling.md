@@ -608,6 +608,20 @@ hash remain; this is not a dirty-owner event index. Regression coverage checks
 two 64-tile layers through edits, tile removal and clearing solidity, retaining
 the unaffected layer's collider entities.
 
+## Hierarchy invalidation scope
+
+The hierarchy retains its scene candidates and their ancestor dependencies when
+building a tree. Changes to unrelated editor chrome no longer dirty that cache;
+new candidates and changes to unnamed ancestors still do. Eligibility marker
+and standard Disabled transitions are included. The existing 100 ms rebuild
+debounce remains for genuine scene churn.
+
+Unrestricted dynamic icon callbacks retain conservative invalidation because
+they can read unrelated world state. The built-in widget icon callback declares
+its entity-local dependency. Arbitrary custom filter/icon component change
+tracking remains a separate limitation; this does not claim complete automatic
+dependency discovery.
+
 ## Empty hierarchy caching
 
 An empty hierarchy is a valid cached result. The initial dirty flag requests

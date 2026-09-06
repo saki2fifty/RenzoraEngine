@@ -136,15 +136,31 @@ pub struct ComponentIconEntry {
 #[derive(Resource, Default)]
 pub struct ComponentIconRegistry {
     entries: Vec<ComponentIconEntry>,
+    world_dependent_icons: bool,
 }
 
 impl ComponentIconRegistry {
     /// Register a component icon mapping.
     pub fn register(&mut self, entry: ComponentIconEntry) {
+        self.world_dependent_icons |= entry.dynamic_icon_fn.is_some();
+        self.register_entity_local(entry);
+    }
+
+    /// Register an icon whose callback reads only components on its argument entity.
+    ///
+    /// Unlike `register`, this promises that unrelated entities and resources
+    /// cannot influence the callback. Hierarchy invalidation can then ignore
+    /// changes outside scene candidates and their ancestors.
+    pub fn register_entity_local(&mut self, entry: ComponentIconEntry) {
         self.entries.push(entry);
         // Keep sorted by priority (descending) so higher-priority icons win
         self.entries
             .sort_by_key(|e| std::cmp::Reverse(e.priority));
+    }
+
+    /// Whether any registered callback may depend on unrelated world state.
+    pub fn has_world_dependent_icons(&self) -> bool {
+        self.world_dependent_icons
     }
 
     /// Look up the icon for an entity by checking its archetype against

@@ -601,18 +601,20 @@ pub fn register_game_ui_editor(app: &mut App) {
         priority: 70,
         dynamic_icon_fn: None,
     });
-    app.register_component_icon(renzora::ComponentIconEntry {
-        type_id: std::any::TypeId::of::<components::UiWidget>(),
-        name: "UI Widget",
-        icon: "squares-four",
-        color: [130, 200, 255],
-        priority: 60,
-        dynamic_icon_fn: Some(|world, entity| {
-            world
-                .get::<components::UiWidget>(entity)
-                .map(|w| (widget_icon(&w.widget_type), [130u8, 200, 255]))
-        }),
-    });
+    app.world_mut()
+        .resource_mut::<renzora::ComponentIconRegistry>()
+        .register_entity_local(renzora::ComponentIconEntry {
+            type_id: std::any::TypeId::of::<components::UiWidget>(),
+            name: "UI Widget",
+            icon: "squares-four",
+            color: [130, 200, 255],
+            priority: 60,
+            dynamic_icon_fn: Some(|world, entity| {
+                world
+                    .get::<components::UiWidget>(entity)
+                    .map(|w| (widget_icon(&w.widget_type), [130u8, 200, 255]))
+            }),
+        });
 
     // Editor's dedicated bevy_ui render target — what the UI
     // viewport mode displays for the *real* bevy_ui render

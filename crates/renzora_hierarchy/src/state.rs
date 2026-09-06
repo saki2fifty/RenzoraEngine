@@ -111,7 +111,7 @@ impl HierarchySpawnSeq {
 /// entity.
 ///
 /// `HideInHierarchy` and `Gamepad` fold in for free for the same reason.
-type HierarchyCandidate = (
+pub(crate) type HierarchyCandidate = (
     Without<HideInHierarchy>,
     Without<bevy::input::gamepad::Gamepad>,
     Or<(

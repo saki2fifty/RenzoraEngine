@@ -18,16 +18,7 @@ use bevy::prelude::*;
 ///
 /// Default reset from `EditorSettings::ui_preview_by_default` whenever the
 /// UI workspace is entered.
-#[derive(Resource)]
+// Off. Without a viewport the backdrop is a 64×64 render; enabling it by
+// default made the UI workspace's common case a blurry smear behind canvases.
+#[derive(Resource, Default)]
 pub struct UiCanvasPreviewEnabled(pub bool);
-
-impl Default for UiCanvasPreviewEnabled {
-    // Off. The backdrop is only meaningful with a viewport panel on screen —
-    // without one the scene renders at 64×64 (see the note on the backdrop's
-    // `bind_display` in `viewport.rs`) — and the UI workspace ships without a
-    // viewport, so on-by-default meant the common case was a blurry smear
-    // behind every canvas.
-    fn default() -> Self {
-        Self(false)
-    }
-}
