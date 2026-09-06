@@ -299,36 +299,91 @@ pub fn mark_emitting_entities(
 pub fn adopt_backend(
     registered: Option<Res<PluginAudioBackend>>,
     mut link: ResMut<AudioLink>,
+    server: Option<Res<renzora::DedicatedServer>>,
+    time: Res<Time<Real>>,
+    mut adoption: Local<BackendAdoption>,
 ) {
-    let Some(registered) = registered else { return };
-
-    match (&registered.0, link.is_active()) {
-        // A backend appeared.
-        (Some(entry), false) => {
-            link.adopt(entry.name.clone(), entry.state, entry.entry);
-            match link.init() {
-                Ok(Some(info)) => {
-                    info!(
-                        "[audio] backend `{}` on `{}` at {} Hz",
-                        entry.name, info.device, info.sample_rate
-                    );
-                    // The link generation makes board publication refresh;
-                    // adoption does not change the authored mixer settings.
-                }
-                Ok(None) => warn!("[audio] backend `{}` did not answer init", entry.name),
-                Err(e) => {
-                    error!("[audio] {e}");
-                    link.release();
-                }
-            }
-        }
-        // Its plugin was unloaded — `entry` and `state` point into an image that
-        // is about to be unmapped, so this is not merely tidy.
-        (None, true) => {
-            info!("[audio] backend released");
+    let entry = registered
+        .as_ref()
+        .and_then(|r| r.0.as_ref())
+        .filter(|_| server.is_none());
+    let key = entry.map(|e| (e.owner, e.owner_generation, e.state, e.entry as usize));
+    if key != adoption.key {
+        // The loader retains old images: shut down their device before opening
+        // the replacement, so two backends never compete for the same output.
+        if link.name().is_some() {
+            link.shutdown();
             link.release();
         }
-        _ => {}
+        adoption.key = key;
+        adoption.failures = 0;
+        adoption.next_attempt = std::time::Duration::ZERO;
+    }
+    let Some(entry) = entry else { return };
+    if link.is_active() || time.elapsed() < adoption.next_attempt {
+        return;
+    }
+    link.adopt(entry.name.clone(), entry.state, entry.entry);
+    let failure = match link.init() {
+        Ok(Some(info)) => {
+            info!(
+                "[audio] backend `{}` on `{}` at {} Hz",
+                entry.name, info.device, info.sample_rate
+            );
+            adoption.failures = 0;
+            return;
+        }
+        Ok(None) => "backend did not answer init".to_string(),
+        Err(error) => error,
+    };
+    link.shutdown();
+    link.release();
+    if adoption.failures == 0 {
+        warn!("[audio] {failure}; retrying with bounded backoff");
+    }
+    let delay = 1u64 << adoption.failures.min(5);
+    adoption.failures = adoption.failures.saturating_add(1);
+    adoption.next_attempt = time.elapsed() + std::time::Duration::from_secs(delay.min(30));
+}
+
+/// Local backend identity and real-time retry state for device adoption.
+#[derive(Default)]
+pub struct BackendAdoption {
+    key: Option<(usize, u32, usize, usize)>,
+    failures: u32,
+    next_attempt: std::time::Duration,
+}
+
+/// Retire backend-owned handles before new commands or autoplay can use them.
+pub fn reset_backend_handles(
+    link: Res<AudioLink>,
+    mut generation: Local<Option<u64>>,
+    mut cache: ResMut<SoundCache>,
+    mut voices: ResMut<ActiveVoices>,
+    mut updates: ResMut<AudioFrameUpdates>,
+    mut clips: ResMut<crate::timeline_scheduler::ActiveClips>,
+    mut music: ResMut<crate::systems::MusicVoice>,
+    mut preview: ResMut<crate::preview::AudioPreviewState>,
+    mut commands: Commands,
+    started: Query<Entity, With<crate::autoplay::AudioAutoplayed>>,
+) {
+    if *generation == Some(link.generation()) {
+        return;
+    }
+    *generation = Some(link.generation());
+    cache.by_path.clear();
+    cache.failed.clear();
+    voices.by_entity.clear();
+    voices.owner.clear();
+    updates.clear();
+    updates.sent_positions.clear();
+    clips.by_clip.clear();
+    music.0 = None;
+    preview.clear();
+    for entity in &started {
+        commands
+            .entity(entity)
+            .remove::<crate::autoplay::AudioAutoplayed>();
     }
 }
 
@@ -555,6 +610,118 @@ pub fn audio_update(
 mod tests {
     use super::*;
     use crate::mixer::ChannelStrip;
+
+    #[test]
+    fn backend_generation_retires_handles_without_erasing_authored_state() {
+        let mut app = App::new();
+        app.init_resource::<AudioLink>()
+            .init_resource::<SoundCache>()
+            .init_resource::<ActiveVoices>()
+            .init_resource::<AudioFrameUpdates>()
+            .init_resource::<crate::timeline_scheduler::ActiveClips>()
+            .init_resource::<crate::systems::MusicVoice>()
+            .init_resource::<crate::preview::AudioPreviewState>()
+            .add_systems(Update, reset_backend_handles);
+        app.update();
+        let entity = app.world_mut().spawn(crate::autoplay::AudioAutoplayed).id();
+        app.world_mut().resource_mut::<SoundCache>().by_path.insert("clip".into(), Loaded { sound: SoundId(42), duration: 2.0 });
+        app.world_mut().resource_mut::<ActiveVoices>().insert(entity, VoiceId(9));
+        app.world_mut().resource_mut::<crate::systems::MusicVoice>().0 = Some(VoiceId(9));
+        app.world_mut().resource_mut::<crate::preview::AudioPreviewState>().voice = Some(VoiceId(9));
+        app.world_mut().resource_mut::<AudioFrameUpdates>().request.gains.push((9, 0.5));
+        app.world_mut().resource_mut::<crate::timeline_scheduler::ActiveClips>().durations.insert("clip".into(), 2.0);
+        app.update();
+        assert_eq!(app.world().resource::<ActiveVoices>().len(), 1);
+        assert!(app.world().get::<crate::autoplay::AudioAutoplayed>(entity).is_some());
+        app.world_mut().resource_mut::<AudioLink>().release();
+        app.update();
+        assert!(app.world().resource::<SoundCache>().by_path.is_empty());
+        assert!(app.world().resource::<ActiveVoices>().is_empty());
+        assert!(app.world().resource::<crate::systems::MusicVoice>().0.is_none());
+        assert!(app.world().resource::<crate::preview::AudioPreviewState>().voice.is_none());
+        assert!(app.world().resource::<AudioFrameUpdates>().request.gains.is_empty());
+        assert!(app.world().get::<crate::autoplay::AudioAutoplayed>(entity).is_none());
+        assert_eq!(app.world().resource::<crate::timeline_scheduler::ActiveClips>().durations.len(), 1);
+    }
+
+    #[test]
+    fn backend_replacement_retries_and_server_policy_use_real_adoption() {
+        use renzora_plugin::host::PluginAudioBackendEntry;
+        use renzora_plugin::sys::{AudioCall, AudioOp, AudioStatus};
+        #[derive(Default)]
+        struct Backend { attempts: usize, shutdowns: usize, fail: bool }
+        unsafe extern "C" fn entry(call: *const AudioCall) -> AudioStatus {
+            // SAFETY: the link owns the call and the boxed backend outlives app.
+            let call = unsafe { &*call };
+            // SAFETY: updates and test observations are sequential.
+            let backend = unsafe { &mut *(call.state as *mut Backend) };
+            if call.op == AudioOp::Shutdown {
+                backend.shutdowns += 1;
+                return AudioStatus::Ok;
+            }
+            if call.op != AudioOp::Init { return AudioStatus::UnknownOp; }
+            backend.attempts += 1;
+            if backend.fail { return AudioStatus::Error; }
+            let info = renzora_plugin::audio::BackendInfo {
+                sample_rate: 48_000, caps: renzora_plugin::audio::Caps::default(), device: "test".into(),
+            };
+            let mut w = renzora_plugin::wire::Writer::new();
+            info.encode(&mut w);
+            // SAFETY: AudioLink supplies a synchronous live output sink.
+            unsafe {
+                let out = &*call.out;
+                (out.write)(out.ctx, w.bytes().as_ptr(), w.bytes().len());
+            }
+            AudioStatus::Ok
+        }
+        let mut backend = Box::<Backend>::default();
+        let state = backend.as_mut() as *mut Backend as usize;
+        let descriptor = |generation| PluginAudioBackend(Some(PluginAudioBackendEntry {
+            name: "test".into(), state, entry, owner: 1, owner_generation: generation,
+        }));
+        let mut app = App::new();
+        app.init_resource::<AudioLink>().init_resource::<Time<Real>>()
+            .insert_resource(descriptor(1)).add_systems(Update, adopt_backend);
+        app.update();
+        assert_eq!(backend.attempts, 1);
+        let first = app.world().resource::<AudioLink>().generation();
+        for _ in 0..1_000 { app.update(); }
+        assert_eq!(backend.attempts, 1);
+        app.insert_resource(descriptor(2));
+        app.update();
+        assert_eq!(backend.attempts, 2);
+        assert_eq!(backend.shutdowns, 1);
+        assert_ne!(app.world().resource::<AudioLink>().generation(), first);
+        backend.fail = true;
+        app.insert_resource(descriptor(3));
+        app.update();
+        assert!(!app.world().resource::<AudioLink>().is_active());
+        assert_eq!(backend.attempts, 3);
+        for _ in 0..1_000 { app.update(); }
+        assert_eq!(backend.attempts, 3);
+        app.world_mut().resource_mut::<Time<Real>>().advance_by(std::time::Duration::from_secs(1));
+        app.update();
+        assert_eq!(backend.attempts, 4);
+        backend.fail = false;
+        app.world_mut().resource_mut::<Time<Real>>().advance_by(std::time::Duration::from_secs(2));
+        app.update();
+        assert_eq!(backend.attempts, 5);
+        assert!(app.world().resource::<AudioLink>().is_active());
+        app.insert_resource(renzora::DedicatedServer);
+        app.update();
+        assert!(!app.world().resource::<AudioLink>().is_active());
+        for _ in 0..1_000 {
+            app.world_mut().resource_mut::<Time<Real>>().advance_by(std::time::Duration::from_secs(60));
+            app.update();
+        }
+        assert_eq!(backend.attempts, 5);
+        app.world_mut().remove_resource::<renzora::DedicatedServer>();
+        app.update();
+        assert_eq!(backend.attempts, 6);
+        app.world_mut().remove_resource::<PluginAudioBackend>();
+        app.update();
+        assert!(!app.world().resource::<AudioLink>().is_active());
+    }
 
     #[test]
     fn frame_updates_have_one_reply_owner_and_reuse_spatial_storage() {

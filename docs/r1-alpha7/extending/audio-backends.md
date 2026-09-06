@@ -26,6 +26,18 @@ the binary contains no device layer, no decoders and no DSP.
 
 ## What each side owns
 
+Native hosts track the registered backend's owner and generation, so replacing
+an active plugin shuts down the old device before initializing its replacement.
+Backend-owned sound and voice handles are discarded; mixer settings remain,
+autoplay can restart, and timeline playback can rebuild its current voices.
+A preview is cleared rather than falsely shown as still playing.
+
+Dedicated servers do not initialize audio output. Other native hosts retry
+failed initialization after 1, 2, 4, 8, 16 and then at most once every 30 seconds
+using real time, so pausing gameplay does not prevent device recovery. Replacing
+the backend resets that delay. The first failure is logged; stable retry
+failures do not generate an error every frame.
+
 | | |
 |---|---|
 | **The engine** (`renzora_audio`) | the bus graph, the components scenes serialize, the command queue, the timeline, emitter bookkeeping, **and all file I/O** |
