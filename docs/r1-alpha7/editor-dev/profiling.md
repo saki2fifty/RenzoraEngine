@@ -581,3 +581,12 @@ queries once per owner. The existing global dirty gate and per-owner content
 hash remain; this is not a dirty-owner event index. Regression coverage checks
 two 64-tile layers through edits, tile removal and clearing solidity, retaining
 the unaffected layer's collider entities.
+
+## Empty hierarchy caching
+
+An empty hierarchy is a valid cached result. The initial dirty flag requests
+the first build; after that only invalidation requests another. The existing
+100 ms debounce also applies to empty scenes. A headless lifecycle regression
+checks 1,000 unchanged empty updates without rebuilding, then entity addition,
+removal and another stable empty interval. Filtering editor-chrome invalidation
+remains separate work.

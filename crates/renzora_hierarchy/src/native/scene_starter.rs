@@ -41,7 +41,7 @@ pub(crate) fn scene_is_empty(world: &Rx) -> bool {
 /// something different when a filter is producing it.
 fn is_scoped(world: &Rx) -> bool {
     matches!(
-        world.get_resource::<HierarchyFilter>().as_deref(),
+        world.get_resource::<HierarchyFilter>(),
         Some(HierarchyFilter::OnlyWithComponents(_))
     )
 }

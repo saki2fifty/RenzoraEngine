@@ -134,10 +134,11 @@ impl AssetBadgeChanges<'_, '_> {
 
 /// Exclusive system: rebuilds `HierarchyTreeCache` when dirty. Runs in
 /// `Update` so the cache is populated before the panel reads it.
-pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<f32>) {
+pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<Option<f32>>) {
     let dirty = world.resource::<HierarchyDirty>().0;
-    let empty = world.resource::<HierarchyTreeCache>().nodes.is_empty();
-    if !dirty && !empty {
+    // An empty tree is a valid cached scene, not a request to rebuild forever.
+    // HierarchyDirty starts true, so the first build needs no size-based gate.
+    if !dirty {
         return;
     }
 
@@ -150,10 +151,10 @@ pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<f32>) {
     // once a tree exists, rebuild at most ~10x/sec and leave the dirty flag set
     // until a rebuild actually lands (a real scene edit still shows within 100ms).
     let now = world.resource::<Time>().elapsed_secs();
-    if !empty && now - *last_build < 0.1 {
+    if last_build.is_some_and(|last| now - last < 0.1) {
         return;
     }
-    *last_build = now;
+    *last_build = Some(now);
 
     let nodes = world.resource_scope(|world, mut seq: Mut<HierarchySpawnSeq>| {
         build_entity_tree(world, &mut seq)
@@ -162,4 +163,52 @@ pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<f32>) {
     cache.nodes = nodes;
     cache.version = cache.version.wrapping_add(1);
     world.resource_mut::<HierarchyDirty>().0 = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_scene_is_cached_and_later_edits_still_rebuild() {
+        let mut app = App::new();
+        app.init_resource::<HierarchyTreeCache>()
+            .init_resource::<HierarchyDirty>()
+            .init_resource::<HierarchySpawnSeq>()
+            .init_resource::<Time>()
+            .add_systems(
+                Update,
+                (mark_hierarchy_dirty, update_hierarchy_cache).chain(),
+            );
+        app.update();
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, 1);
+        for _ in 0..1_000 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(20));
+            app.update();
+        }
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, 1);
+        let entity = app.world_mut().spawn(Name::new("scene entity")).id();
+        app.update();
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().nodes.len(), 1);
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, 2);
+        app.world_mut().despawn(entity);
+        app.update();
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, 2);
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(101));
+        app.update();
+        assert!(app
+            .world()
+            .resource::<HierarchyTreeCache>()
+            .nodes
+            .is_empty());
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, 3);
+        for _ in 0..1_000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, 3);
+    }
 }
