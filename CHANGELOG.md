@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 09:14 UTC
+
+- Completed and validated this performance-improvement batch across scripts, audio, UI, sprites, tilemaps and other editor/runtime systems.
+- Documented the measured reductions in repeated work and the larger improvements still remaining; Windows frame-rate testing has not been performed.
+
 ## September 6, 2026 — 09:01 UTC
 
 - Limited tile-collider maintenance to affected layers, including tile moves, sheet removal and disable/reenable changes.

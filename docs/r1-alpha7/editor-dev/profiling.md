@@ -612,6 +612,22 @@ work, a one-owner tile edit, moves, removals and inherited palette changes.
 Changing generated collider children can cause one extra hash check while the
 relationships settle; this does not repeatedly rebuild unchanged colliders.
 
+## September 6 performance batch validation
+
+The batch passed 484 tests across 17 affected libraries, with four existing
+ignored tests, plus 16 Rust-script unit tests and all 19 compiled-script
+acceptance cases. Combined strict affected-library lint and the native editor
+compile check passed. The acceptance cases exercise real compilation, activation,
+failed reload preservation, supersession, project/identity changes, panic
+containment and library retirement.
+
+The measurements below count work avoided and storage retained; they are not FPS
+benchmarks. No Windows build or graphical/hardware performance test was run for
+this batch. Larger follow-ons remain: shared shader clock ownership, bounded
+reliable-network flow control, vendor dependency migration and fully incremental
+render/input/navigation/physics processing. Completing this batch does not mean
+every audit finding or all repeated traversal has been eliminated.
+
 ## Hierarchy invalidation scope
 
 The hierarchy retains its scene candidates and their ancestor dependencies when
