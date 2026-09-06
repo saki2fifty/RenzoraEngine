@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 20:31 UTC
+
+- Delayed the splash screen's optional GitHub lookup until networking is ready, avoiding an unnecessary timeout during slow startup.
+
 ## September 6, 2026 — 15:16 UTC
 
 - Removed unused older FBX import code while retaining the current importer. Lean scripting builds no longer request a JSON dependency used only by blueprints.

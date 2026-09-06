@@ -10,6 +10,15 @@ marketplace. Delete it and the same binary runs offline: nothing panics, no
 request hangs, every call reports "no network backend is loaded" and the UI
 carries on.
 
+## Optional startup requests
+
+The splash screen waits until the HTTP backend is available before starting its
+background GitHub star-count request. Constructing the splash plugin does not
+start network work. With no backend the counter remains unavailable; startup
+continues normally. Once started, the request is attempted only once and its
+result is polled without blocking the editor. This avoids racing the HTTP
+watchdog while the editor is still assembling its first frame.
+
 ## Why HTTP is a plugin and not part of the engine
 
 **It was twenty packages every build paid for.** `ureq` plus the TLS stack under

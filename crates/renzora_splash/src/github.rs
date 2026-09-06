@@ -4,9 +4,10 @@
 //! UI can show "— stars" while it's loading and the real number once it
 //! arrives.
 
+use std::sync::{mpsc, Mutex};
+
 use bevy::prelude::*;
 use serde::Deserialize;
-use std::sync::{mpsc, Mutex};
 
 const REPO_API: &str = "https://api.github.com/repos/renzora/engine";
 
@@ -19,42 +20,96 @@ struct RepoResponse {
 pub struct GithubStats {
     pub stars: Option<u64>,
     receiver: Option<Mutex<mpsc::Receiver<u64>>>,
+    attempted: bool,
 }
 
 impl GithubStats {
     pub fn new() -> Self {
-        let mut stats = Self::default();
-        stats.kick_off();
-        stats
+        // Plugin construction can outlast the HTTP watchdog. Only the frame
+        // poll may launch this optional request, after backend adoption.
+        Self::default()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn kick_off(&mut self) {
+    fn kick_off() -> Option<mpsc::Receiver<u64>> {
         let (tx, rx) = mpsc::channel();
-        self.receiver = Some(Mutex::new(rx));
-        std::thread::spawn(move || {
-            if let Some(count) = fetch_stars() {
-                let _ = tx.send(count);
+        match std::thread::Builder::new()
+            .name("renzora-splash-stars".into())
+            .spawn(move || {
+                if let Some(count) = fetch_stars() {
+                    let _ = tx.send(count);
+                }
+            }) {
+            Ok(_) => Some(rx),
+            Err(error) => {
+                warn!("[splash] could not start GitHub stats worker: {error}");
+                None
             }
-        });
+        }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn kick_off(&mut self) {}
-
     pub fn poll(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_with(renzora_net::is_available(), Self::kick_off);
+        #[cfg(target_arch = "wasm32")]
+        self.poll_with(false, || None);
+    }
+
+    fn poll_with(&mut self, ready: bool, start: impl FnOnce() -> Option<mpsc::Receiver<u64>>) {
         if self.stars.is_some() {
             return;
         }
-        let msg = self
-            .receiver
-            .as_ref()
-            .and_then(|rx| rx.lock().ok())
-            .and_then(|rx| rx.try_recv().ok());
-        if let Some(count) = msg {
-            self.stars = Some(count);
-            self.receiver = None;
+        if !self.attempted && ready {
+            self.attempted = true;
+            self.receiver = start().map(Mutex::new);
         }
+        let result = self.receiver.as_ref().map(|rx| {
+            rx.lock()
+                .map_err(|_| mpsc::TryRecvError::Disconnected)
+                .and_then(|rx| rx.try_recv())
+        });
+        match result {
+            Some(Ok(count)) => {
+                self.stars = Some(count);
+                self.receiver = None;
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => self.receiver = None,
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waits_for_backend_then_starts_once_and_polls_without_blocking() {
+        let mut stats = GithubStats::new();
+        assert!(!stats.attempted);
+        for _ in 0..1_000 {
+            stats.poll_with(false, || panic!("worker before backend readiness"));
+        }
+        let (tx, rx) = mpsc::channel();
+        stats.poll_with(true, || Some(rx));
+        assert!(stats.attempted);
+        assert!(stats.stars.is_none());
+        stats.poll_with(true, || panic!("duplicate worker"));
+        tx.send(1234).unwrap();
+        stats.poll_with(false, || panic!("duplicate worker"));
+        assert_eq!(stats.stars, Some(1234));
+        assert!(stats.receiver.is_none());
+    }
+
+    #[test]
+    fn failed_worker_is_retired_without_a_retry_storm() {
+        let mut stats = GithubStats::new();
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        stats.poll_with(true, || Some(rx));
+        assert!(stats.receiver.is_none());
+        stats.poll_with(true, || panic!("failed request retried every frame"));
+        assert!(stats.stars.is_none());
     }
 }
 
