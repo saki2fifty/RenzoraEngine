@@ -126,6 +126,7 @@ impl Plugin for AudioPlugin {
                 .register_type::<systems::AudioListener>();
 
             _app.init_resource::<runtime::SoundCache>()
+                .init_resource::<runtime::AudioFrameUpdates>()
                 .init_resource::<runtime::ActiveVoices>()
                 .init_resource::<timeline_scheduler::ActiveClips>()
                 .init_resource::<systems::MusicVoice>()

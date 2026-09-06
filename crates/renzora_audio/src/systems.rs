@@ -6,13 +6,13 @@
 
 use bevy::prelude::*;
 
-use renzora_plugin::audio::{EmitterState, PlayRequest, StopRequest, StopTarget, UpdateRequest};
+use renzora_plugin::audio::{EmitterState, PlayRequest, StopRequest, StopTarget};
 
 use crate::commands::{AudioCommand, AudioCommandQueue};
 use crate::components::{AudioPlayer, RolloffType};
 use crate::link::{AudioLink, VoiceId};
 use crate::preview::AudioPreviewState;
-use crate::runtime::{ActiveVoices, SoundCache};
+use crate::runtime::{ActiveVoices, AudioFrameUpdates, SoundCache};
 
 /// The "ears" in 3D space — an **override**, not a requirement.
 ///
@@ -124,6 +124,7 @@ fn emitter_of(player: &AudioPlayer, position: Vec3) -> EmitterState {
 #[allow(clippy::too_many_arguments)]
 pub fn process_audio_commands(
     mut queue: ResMut<AudioCommandQueue>,
+    mut updates: ResMut<AudioFrameUpdates>,
     mut link: ResMut<AudioLink>,
     mut cache: ResMut<SoundCache>,
     mut voices: ResMut<ActiveVoices>,
@@ -135,9 +136,8 @@ pub fn process_audio_commands(
         return;
     }
     let project = project.as_deref();
-    // Parameter changes are batched and sent once at the end: they all ride the
-    // same call, and a command issued this frame should be heard this frame.
-    let mut batch = UpdateRequest::default();
+    // Cleanup sends these with the listener/position data and consumes the reply.
+    let batch = &mut updates.request;
     let master_volume = master.0;
 
     // Load, start, and record. Takes its resources as arguments rather than
@@ -371,11 +371,6 @@ pub fn process_audio_commands(
         }
     }
 
-    if !batch.gains.is_empty() || !batch.pitches.is_empty() || !batch.paused.is_empty() {
-        if let Err(e) = link.update(&batch) {
-            warn!("[audio] {e}");
-        }
-    }
 }
 
 /// Which voices a pause or resume applies to. `None` means everything, music
@@ -391,32 +386,24 @@ fn targets(voices: &ActiveVoices, music: &MusicVoice, entity: Option<Entity>) ->
     }
 }
 
-/// Push moved emitters to the backend each frame.
+/// Stage emitter positions for the single per-frame backend update.
 pub fn sync_spatial_audio(
-    mut link: ResMut<AudioLink>,
+    link: Res<AudioLink>,
+    mut updates: ResMut<AudioFrameUpdates>,
     voices: Res<ActiveVoices>,
     transforms: Query<&GlobalTransform>,
 ) {
+    let moved = &mut updates.request.moved;
+    moved.clear();
     if !link.is_active() || voices.is_empty() {
         return;
     }
-    let mut moved = Vec::new();
     for (entity, ids) in voices.iter() {
         let Ok(transform) = transforms.get(entity) else {
             continue;
         };
         let position = transform.translation().to_array();
         moved.extend(ids.iter().map(|id| (id.0, position)));
-    }
-    if moved.is_empty() {
-        return;
-    }
-    let request = UpdateRequest {
-        moved,
-        ..Default::default()
-    };
-    if let Err(e) = link.update(&request) {
-        warn!("[audio] {e}");
     }
 }
 
@@ -474,6 +461,7 @@ pub fn preview_audio_system(
 /// put one — turning spatial on has to build the voice again.
 pub fn apply_audio_player_edits(
     mut link: ResMut<AudioLink>,
+    mut updates: ResMut<AudioFrameUpdates>,
     mut voices: ResMut<ActiveVoices>,
     mut queue: ResMut<AudioCommandQueue>,
     master: Res<MasterVolume>,
@@ -483,7 +471,7 @@ pub fn apply_audio_player_edits(
     if changed.is_empty() {
         return;
     }
-    let mut batch = UpdateRequest::default();
+    let batch = &mut updates.request;
     let mut restart: Vec<(Entity, AudioPlayer, Vec3)> = Vec::new();
 
     for (entity, player, transform) in &changed {
@@ -517,12 +505,6 @@ pub fn apply_audio_player_edits(
                     .emitters
                     .push((voice.0, emitter_of(player, transform.translation())));
             }
-        }
-    }
-
-    if !batch.gains.is_empty() {
-        if let Err(e) = link.update(&batch) {
-            warn!("[audio] {e}");
         }
     }
 

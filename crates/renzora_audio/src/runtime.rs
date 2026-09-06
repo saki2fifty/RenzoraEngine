@@ -142,6 +142,25 @@ pub struct ActiveVoices {
     owner: HashMap<VoiceId, Entity>,
 }
 
+/// Reusable per-frame audio updates, consumed once by `audio_update`.
+#[derive(Resource, Default)]
+pub struct AudioFrameUpdates {
+    pub(crate) request: UpdateRequest,
+}
+
+impl AudioFrameUpdates {
+    fn clear(&mut self) {
+        self.request.listener = None;
+        self.request.moved.clear();
+        self.request.gains.clear();
+        self.request.pitches.clear();
+        self.request.buses.clear();
+        self.request.pans.clear();
+        self.request.emitters.clear();
+        self.request.paused.clear();
+    }
+}
+
 impl ActiveVoices {
     pub fn insert(&mut self, entity: Entity, voice: VoiceId) {
         self.by_entity.entry(entity).or_default().push(voice);
@@ -390,6 +409,7 @@ fn pick_game_camera<'a>(
 /// hundred of them a frame to move things a few centimetres.
 pub fn audio_update(
     mut link: ResMut<AudioLink>,
+    mut updates: ResMut<AudioFrameUpdates>,
     mut mixer: ResMut<MixerState>,
     mut voices: ResMut<ActiveVoices>,
     listener: Query<(&GlobalTransform, &crate::systems::AudioListener)>,
@@ -401,6 +421,7 @@ pub fn audio_update(
     play_mode: Option<Res<renzora::PlayModeState>>,
 ) {
     if !link.is_active() {
+        updates.clear();
         return;
     }
 
@@ -451,15 +472,14 @@ pub fn audio_update(
         from_component().or_else(from_game_camera)
     };
 
-    let request = UpdateRequest {
-        listener: listener_state,
-        // Emitter moves, gains, pitches and pause flags are pushed by the
-        // systems that own the queries knowing about them; this call carries the
-        // listener and collects the answers.
-        ..Default::default()
-    };
-
-    let reply = match link.update(&request) {
+    updates.request.listener = listener_state;
+    // Only this owner consumes Update replies. Earlier producers must not drain
+    // finished-voice notifications into a reply that nobody examines.
+    let result = link.update(&updates.request);
+    // Preserve the existing one-frame command policy on failure; positions are
+    // prepared again next frame. Retain capacity, not stale commands.
+    updates.clear();
+    let reply = match result {
         Ok(reply) => reply,
         Err(e) => {
             warn!("[audio] {e}");
@@ -498,6 +518,160 @@ pub fn audio_update(
 mod tests {
     use super::*;
     use crate::mixer::ChannelStrip;
+
+    #[test]
+    fn frame_updates_have_one_reply_owner_and_reuse_spatial_storage() {
+        use crate::commands::{AudioCommand, AudioCommandQueue};
+        use crate::systems::{self, AudioListener, MasterVolume, MusicVoice};
+        use renzora_plugin::audio::UpdateReply;
+        use renzora_plugin::sys::{AudioCall, AudioOp, AudioStatus};
+        use renzora_plugin::wire::{Reader, Writer};
+        #[derive(Default)]
+        struct Backend {
+            calls: usize,
+            last: UpdateRequest,
+            finished: Vec<u64>,
+            fail: bool,
+        }
+        unsafe extern "C" fn entry(call: *const AudioCall) -> AudioStatus {
+            // SAFETY: the link supplies a live call; its payload and sink live
+            // until return, and the boxed test backend outlives the app.
+            let call = unsafe { &*call };
+            // SAFETY: app updates and assertions run sequentially; only this
+            // callback accesses the installed Backend while an update runs.
+            let backend = unsafe { &mut *(call.state as *mut Backend) };
+            if call.op != AudioOp::Update {
+                return AudioStatus::UnknownOp;
+            }
+            // SAFETY: AudioLink retains these bytes through this callback.
+            let bytes = unsafe { call.payload.as_slice() };
+            let Ok(request) = UpdateRequest::decode(&mut Reader::new(bytes)) else {
+                return AudioStatus::Error;
+            };
+            backend.calls += 1;
+            backend.last = request;
+            if backend.fail {
+                return AudioStatus::Error;
+            }
+            let reply = UpdateReply {
+                peaks: vec![0.5],
+                finished: std::mem::take(&mut backend.finished),
+            };
+            let mut writer = Writer::new();
+            reply.encode(&mut writer);
+            // SAFETY: the link supplies a live sink; it copies the reply bytes
+            // synchronously before writer is dropped.
+            unsafe {
+                if let Some(sink) = call.out.as_ref() {
+                    (sink.write)(sink.ctx, writer.bytes().as_ptr(), writer.bytes().len());
+                }
+            }
+            AudioStatus::Ok
+        }
+        let mut backend = Box::<Backend>::default();
+        let mut app = App::new();
+        app.init_resource::<AudioLink>()
+            .init_resource::<AudioFrameUpdates>()
+            .init_resource::<MixerState>()
+            .init_resource::<ActiveVoices>()
+            .init_resource::<AudioCommandQueue>()
+            .init_resource::<SoundCache>()
+            .init_resource::<MusicVoice>()
+            .init_resource::<MasterVolume>()
+            .add_systems(
+                Update,
+                (
+                    systems::process_audio_commands,
+                    systems::sync_spatial_audio,
+                    systems::apply_audio_player_edits,
+                    audio_update,
+                )
+                    .chain(),
+            );
+        app.world_mut().resource_mut::<AudioLink>().adopt(
+            "frame".into(),
+            backend.as_mut() as *mut Backend as usize,
+            entry,
+        );
+        let emitter = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_xyz(1.0, 2.0, 3.0),
+                crate::components::AudioPlayer {
+                    volume: 0.75,
+                    ..default()
+                },
+            ))
+            .id();
+        app.world_mut()
+            .spawn((GlobalTransform::default(), AudioListener::default()));
+        app.world_mut()
+            .resource_mut::<ActiveVoices>()
+            .insert(emitter, VoiceId(1));
+        app.world_mut()
+            .resource_mut::<ActiveVoices>()
+            .insert(emitter, VoiceId(2));
+        backend.finished.push(2);
+        app.world_mut()
+            .resource_mut::<AudioCommandQueue>()
+            .push(AudioCommand::SetSoundVolume {
+                entity: emitter,
+                volume: 0.25,
+                fade: 0.0,
+            });
+        app.update();
+        assert_eq!(backend.calls, 1);
+        assert_eq!(backend.last.moved.len(), 2);
+        assert_eq!(backend.last.gains.first(), Some(&(1, 0.25)));
+        assert_eq!(backend.last.gains.last(), Some(&(2, 0.75)));
+        assert!(backend.last.listener.is_some());
+        assert!(!app.world().resource::<ActiveVoices>().contains(VoiceId(2)));
+        assert_eq!(app.world().resource::<MixerState>().master.peak_level, 0.5);
+        let storage = app
+            .world()
+            .resource::<AudioFrameUpdates>()
+            .request
+            .moved
+            .as_ptr();
+        for _ in 0..1000 {
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<AudioFrameUpdates>()
+                    .request
+                    .moved
+                    .as_ptr(),
+                storage
+            );
+        }
+        assert_eq!(backend.calls, 1001);
+        assert_eq!(backend.last.moved, [(1, [1.0, 2.0, 3.0])]);
+        backend.fail = true;
+        app.world_mut()
+            .resource_mut::<AudioCommandQueue>()
+            .push(AudioCommand::PauseSound {
+                entity: Some(emitter),
+            });
+        app.update();
+        assert_eq!(backend.last.paused, [(1, true)]);
+        assert!(app
+            .world()
+            .resource::<AudioFrameUpdates>()
+            .request
+            .paused
+            .is_empty());
+        backend.fail = false;
+        app.update();
+        assert!(backend.last.paused.is_empty());
+        app.world_mut().resource_mut::<AudioLink>().release();
+        app.update();
+        assert!(app
+            .world()
+            .resource::<AudioFrameUpdates>()
+            .request
+            .moved
+            .is_empty());
+    }
 
     #[test]
     fn mixer_resends_on_backend_adoption_and_retries_failed_sends() {

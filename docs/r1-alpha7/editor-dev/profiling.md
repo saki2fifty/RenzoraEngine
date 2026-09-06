@@ -656,6 +656,18 @@ custom query-disabling components are registered, ordering retains its original
 eligibility scan as a compatibility fallback; the zero-parent-work measurement
 applies to the standard configuration, not that fallback.
 
+## Audio frame updates
+
+Commands, live-player edits and spatial positions now stage into one reusable
+request. The Cleanup-stage `audio_update` adds the listener, makes the frame's
+Update call and consumes finished-voice/meter replies. Earlier Update calls no
+longer discard those replies. Play/stop/load operations remain separate.
+The regression drives all three production producers and the consumer: one
+Update call per frame, ordered gain changes, finished-voice removal, live meters
+and retained position-buffer storage across 1,000 updates. Failed one-frame
+commands are cleared as before; positions are regenerated the next frame.
+This change does not yet suppress unchanged position entries.
+
 ## Mixer bus comparison
 
 The audio mixer compares borrowed bus keys and backend-facing values before

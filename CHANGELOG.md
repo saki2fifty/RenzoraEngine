@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 08:33 UTC
+
+- Combined per-frame audio updates so sound-finished notifications are handled reliably, and reused the update buffers instead of rebuilding them.
+
 ## September 6, 2026 — 08:19 UTC
 
 - Avoided rebuilding unchanged audio mixer bus lists while keeping live meters and mixer edits responsive.
