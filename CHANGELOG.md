@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 06:22 UTC
 
 - Stopped settled tile objects from repeating bake checks, while retaining retries for late atlas loads and keeping tileset sampling crisp after image changes.
+- Stopped unchanged water shading values from repeatedly notifying the renderer, while retaining sun and texture updates.
 
 ## September 6, 2026 — 06:06 UTC
 

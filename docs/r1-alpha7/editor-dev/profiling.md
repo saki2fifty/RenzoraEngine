@@ -521,3 +521,10 @@ settled frames and successful re-baking after an edit.
 Tileset sampler repair considers changed handles and image-added/modified/loaded
 messages. Settled frames with no image messages visit only changed handles;
 late loads and another consumer changing the sampler still trigger repair.
+
+## Water materials
+
+Water shading builds a complete candidate uniform off-asset and assigns it only
+when values differ. Sun and recreated simulation texture handles still update;
+the simulation itself is not paused. A headless 1,000-frame regression observes
+zero stable material-change events, then verifies shading, sun and texture edits.

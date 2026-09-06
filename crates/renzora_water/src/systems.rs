@@ -384,9 +384,15 @@ pub fn update_water_uniforms(
         let Some(mut material) = materials.get_mut(&mat_handle.0) else {
             continue;
         };
-        sync_uniforms(surface, &mut material.uniforms);
-        material.uniforms.sun_direction =
+        let mut uniforms = material.uniforms;
+        sync_uniforms(surface, &mut uniforms);
+        uniforms.sun_direction =
             Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, sun_intensity);
+        // Build the complete candidate off-asset: mutable dereferencing the
+        // AssetMut would notify the renderer even if all values stayed equal.
+        if material.uniforms != uniforms {
+            material.uniforms = uniforms;
+        }
 
         // Re-point at the cascade maps if they were re-created (resolution or
         // cascade-count change). Comparing first keeps this from marking the
@@ -433,6 +439,46 @@ mod tests {
     use super::*;
     use crate::sim::WaterSimParams;
     use std::time::Duration;
+
+    #[test]
+    fn water_uniforms_only_notify_for_shading_sun_or_texture_changes() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<WaterMaterial>().init_asset::<Image>()
+            .add_systems(Update, update_water_uniforms);
+        let handle = app.world_mut().resource_mut::<Assets<WaterMaterial>>()
+            .add(WaterMaterial::default());
+        let entity = app.world_mut().spawn((WaterSurface::default(), MeshMaterial3d(handle.clone()))).id();
+        let changes = |app: &mut App| app.world_mut()
+            .resource_mut::<Messages<AssetEvent<WaterMaterial>>>().drain()
+            .filter(|e| matches!(e, AssetEvent::Modified { .. })).count();
+        app.update();
+        changes(&mut app);
+        for _ in 0..1000 {
+            app.update();
+            assert_eq!(changes(&mut app), 0);
+        }
+        app.world_mut().get_mut::<WaterSurface>(entity).expect("surface").roughness = 0.2;
+        app.update();
+        assert_eq!(changes(&mut app), 1);
+        let sun = app.world_mut().spawn((GlobalTransform::IDENTITY, DirectionalLight::default())).id();
+        app.update();
+        assert_eq!(changes(&mut app), 1);
+        app.world_mut().despawn(sun);
+        app.update();
+        assert_eq!(changes(&mut app), 1);
+        let displacement = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
+        let normal = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
+        app.insert_resource(WaterSimTextures { displacement: displacement.clone(), normal: normal.clone(), map_size: 1, num_cascades: 1 });
+        app.update();
+        assert_eq!(changes(&mut app), 1);
+        app.update();
+        assert_eq!(changes(&mut app), 0);
+        let assets = app.world().resource::<Assets<WaterMaterial>>();
+        let material = assets.get(&handle).expect("material");
+        assert_eq!(material.displacements.as_ref(), Some(&displacement));
+        assert_eq!(material.normals.as_ref(), Some(&normal));
+    }
 
     /// A minimal app with just the clock-driving system — no render world, so
     /// this runs headless in CI.

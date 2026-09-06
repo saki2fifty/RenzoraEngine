@@ -8,7 +8,7 @@ use crate::component::{WaterSurface, MAX_CASCADES};
 
 /// GPU-side uniform buffer for water shading parameters.
 /// Layout must match `WaterUniforms` in `water.wgsl` exactly.
-#[derive(Clone, Copy, Debug, ShaderType)]
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType)]
 pub struct WaterUniforms {
     /// Deep-water body colour (linear).
     pub water_color: Vec4,
