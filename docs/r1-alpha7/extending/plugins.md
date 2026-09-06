@@ -328,6 +328,15 @@ a safe schedule boundary. A failed candidate never runs, even if a later retry
 uses the same generation number, and does not disturb the running build. The
 stable staged file is unchanged.
 
+Directory-loaded C-ABI plugins now use this same activation transaction.
+Panel and script-backend replacements may reuse their prior generation's
+names, but still reject claims belonging to another plugin or duplicates
+within one candidate. Audio/network exclusive claims are held aside during
+initialization and restored exactly if the candidate fails. Successful
+replacement retires the prior generation only after initialization succeeds.
+Native plugin code remains trusted: rollback covers host registrations, not
+arbitrary external side effects performed by a plugin itself.
+
 **Durable host identity.** Every plugin component and resource the
 host registers is recorded under a durable, scene-persisted name
 that is stable across recompilation, editor restart, and

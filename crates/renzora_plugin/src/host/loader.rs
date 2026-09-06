@@ -691,160 +691,11 @@ fn load_one(
     identity: CanonicalId,
     is_editor: bool,
 ) -> LoadOutcome {
-    if is_proc_macro_dylib(path) {
-        return LoadOutcome::NotAPlugin;
-    }
-    // BEFORE any copy or load: `plugins/` is shared with the older Bevy-linking
-    // dylibs, and copying one to a new filename would make the OS map a second
-    // instance of it. See `exports_plugin_init`.
-    if !exports_plugin_init(path) {
-        return LoadOutcome::NotAPlugin;
-    }
-
-    // Resolved before the image is opened, because the generation is part of the
-    // shadow copy's filename.
-    let (slot, counter, generation) = {
-        let mut loaded = world.get_resource_or_insert_with(LoadedPlugins::default);
-        let slot = loaded.slot_for(path);
-        let s = &loaded.0[slot];
-        let first = s.images == 0;
-        (
-            slot,
-            s.generation.clone(),
-            if first { 0 } else { s.loaded_at + 1 },
-        )
-    };
-
-    // Only the editor loads a copy. The copy exists so a rebuild can overwrite
-    // the original while it is mapped (see [`shadow_copy`]) — a shipped game
-    // never reloads a plugin, so it has nothing to buy there and one real cost:
-    // `plugins/` is shared with whoever launched it. The editor spawns the game
-    // as a child pointed at the same directory, and it already has every shadow
-    // copy mapped and locked, so the child's `fs::copy` failed with "used by
-    // another process" for EVERY plugin. The runtime window came up with no
-    // audio backend, no scripting and no plugins at all — which reads as "audio
-    // is broken outside the editor" rather than "the runtime loaded nothing".
-    let image = if is_editor {
-        match shadow_copy(path, generation) {
-            Ok(p) => p,
-            Err(e) => return LoadOutcome::Failed(format!("could not stage a copy to load: {e}")),
-        }
-    } else {
-        path.to_path_buf()
-    };
-
-    // SAFETY: loading arbitrary native code is inherently unsafe — a plugin can
-    // do anything the process can. That is the same trust model as the existing
-    // dylib loader; the C ABI buys build-environment independence, not sandboxing.
-    let library = match unsafe { Library::new(&image) } {
-        Ok(l) => l,
-        Err(e) => return LoadOutcome::Failed(format!("could not open: {e}")),
-    };
-
-    // Never unmapped, on ANY path out of here — including the ones that decide
-    // this image is not wanted. `_libraries` already says a loaded plugin stays
-    // mapped for the life of the process; this extends that to a rejected one,
-    // because unloading is not merely wasteful, it **hangs**. `FreeLibrary` runs
-    // the image's static destructors while holding the Windows loader lock, and
-    // an image whose initialisers started a thread waits on that thread — which
-    // cannot finish, because finishing needs the lock.
-    //
-    // Only a build that *rejects* a plugin can hit it, which is why the editor
-    // never did and the game runtime always would: the runtime skips every
-    // Editor-scope plugin, so it deadlocked partway through the plugins folder,
-    // with no window, no message and no crash — a boot that simply stopped.
-    let library = std::mem::ManuallyDrop::new(library);
-
-    let init: Symbol<sys::ExtensionInit> =
-        match unsafe { library.get(sys::INIT_SYMBOL.as_bytes()) } {
-            Ok(s) => s,
-            Err(_) => return LoadOutcome::NotAPlugin,
-        };
-    let init = *init;
-
-    // Read the scope BEFORE calling init, so a plugin for the other binary never
-    // gets the chance to register a system, a component or a panel. Checking
-    // afterwards would mean unwinding registrations that already happened.
-    let scope = match unsafe { library.get::<sys::ScopeEntry>(sys::SCOPE_SYMBOL.as_bytes()) } {
-        Ok(f) => unsafe { f() },
-        // No declaration means Runtime, matching `renzora::add!`'s default.
-        Err(_) => sys::PluginScope::Runtime,
-    };
-    // Recorded here rather than on the success path, so the rejections below —
-    // and a plugin whose own init fails — still leave the answer behind.
-    // `scan_plugins` reads it instead of mapping the image a second time.
-    world.resource_mut::<LoadedPlugins>().0[slot].scope = Some(scope);
-    if !scope.is_known() {
-        return LoadOutcome::Failed(format!(
-            "declares scope {} which this build does not have",
-            scope.0
-        ));
-    }
-    if scope == sys::PluginScope::Editor && !is_editor {
-        return LoadOutcome::WrongScope(scope);
-    }
-
-    // Take the slot's previous registrations back before the new build adds its
-    // own, so a panel or a render pass is replaced rather than duplicated.
-    // Keep the prior systems until init succeeds; cancelling them here would
-    // stop last-good execution even when the new candidate is refused.
-    let prior_loaded_at = world.resource::<LoadedPlugins>().0[slot].loaded_at;
-    if generation > 0 {
-        super::retire_slot_registrations(world, slot, prior_loaded_at);
-    }
-
-    match super::init_plugin_gen_with_non_persistable(
-        world,
-        init,
-        counter.clone(),
-        generation,
-        slot,
-        identity,
-        false,
-    ) {
-        super::InitOutcome::Ok => {
-            counter.store(generation, std::sync::atomic::Ordering::Relaxed);
-            if generation > 0 {
-                super::system_lifecycle::retire(world, slot, prior_loaded_at);
-            }
-            let mut loaded = world.resource_mut::<LoadedPlugins>();
-            let s = &mut loaded.0[slot];
-            s.loaded_at = generation;
-            s.images += 1;
-            // Moved, still wrapped: `into_inner` here used to hand a bare
-            // `Library` to a `Vec` inside an ECS resource, which drops with the
-            // World and put `FreeLibrary` back on the shutdown path (see
-            // `_libraries`). Keeping the `ManuallyDrop` is what makes "never
-            // dropped" true at process exit as well as during the run.
-            s._libraries.push(library);
-            LoadOutcome::Loaded
-        }
-        super::InitOutcome::VersionTooOld => LoadOutcome::VersionTooOld,
-        super::InitOutcome::Failed => {
-            LoadOutcome::Failed("plugin init returned Failed".to_string())
-        }
-        // The version matched and the shape did not, so the two were built from
-        // headers that disagree about field order. Say that, rather than leaving
-        // an author to wonder why a plugin with the right version number is
-        // refused — the fix is a rebuild, not an engine update.
-        super::InitOutcome::AbiMismatch => LoadOutcome::Failed(
-            "plugin was built against a differently-shaped interface table — its version \
-             matches but a field was inserted, reordered or retyped. Rebuild the plugin \
-             against this engine's `renzora_plugin`"
-                .to_string(),
-        ),
-        // A value from a newer ABI. Reaching this arm at all is what the newtype
-        // bought: as a real enum the match above would have been exhaustive, and
-        // an out-of-range discriminant would have been undefined behaviour here
-        // rather than a case to handle.
-        //
-        // Refused rather than assumed successful — a plugin that reports a result
-        // this build has no name for has not told us it loaded.
-        other => LoadOutcome::Failed(format!(
-            "plugin init returned status {:?} which this engine does not know — it was built \
-             against a newer ABI. Rebuild it against this engine's `renzora_plugin`",
-            other
-        )),
+    // Directory and loose plugins must share the same last-good guarantees.
+    // Discovery/reload already applies directory-specific disabled filters.
+    match load_one_transactional(world, path, is_editor, &[], &[], identity) {
+        Ok(_) => LoadOutcome::Loaded,
+        Err(outcome) => outcome,
     }
 }
 
@@ -1006,6 +857,20 @@ pub unsafe fn activate_with_transaction(
         (s.generation.clone(), s.loaded_at)
     };
 
+    // Temporarily release only this generation's exclusive backend claims.
+    // No schedules run during activation; existing consumer links remain alive.
+    // A failed candidate restores these exact descriptors before returning.
+    let prior_audio = world.get_resource_mut::<super::PluginAudioBackend>().and_then(|mut r| {
+        if r.0.as_ref().is_some_and(|b| b.owner == slot && b.owner_generation == prior_loaded_at) {
+            r.0.take()
+        } else { None }
+    });
+    let prior_net = world.get_resource_mut::<super::PluginNetBackend>().and_then(|mut r| {
+        if r.0.as_ref().is_some_and(|b| b.owner == slot && b.owner_generation == prior_loaded_at) {
+            r.0.take()
+        } else { None }
+    });
+
     // ── Snapshot restorable state BEFORE init ────────────────────────────
     //
     // The snapshot must be taken before `init_plugin_gen` because a
@@ -1108,7 +973,7 @@ pub unsafe fn activate_with_transaction(
         journal.entries_mut().push(entry);
     }
 
-    match result {
+    let outcome = match result {
         super::InitOutcome::Ok => {
             // Commit: bump counter, retire ONLY the prior generation's
             // slot-owned registrations. The candidate's entries (at
@@ -1189,7 +1054,16 @@ pub unsafe fn activate_with_transaction(
                 rolled_back_entries: journal.entries().to_vec(),
             }
         }
+    };
+    if matches!(outcome, TransactionalActivationOutcome::RolledBack { .. }) {
+        if let Some(prior) = prior_audio {
+            world.resource_mut::<super::PluginAudioBackend>().0 = Some(prior);
+        }
+        if let Some(prior) = prior_net {
+            world.resource_mut::<super::PluginNetBackend>().0 = Some(prior);
+        }
     }
+    outcome
 }
 
 /// Restore the slot's counter and `loaded_at` after a rolled-back
@@ -1244,11 +1118,9 @@ fn refresh_compatible_schemas(
     }
 }
 
-/// Load a freshly-staged plugin library through the transactional
-/// activation path. Used by Phase 3 `renzora_loose_plugins` to feed the
-/// stable staged library through the same dlopen/symbol/ABI checks as
-/// the existing `load_one`, but with the snapshot/diff/commit/rollback
-/// transaction layered on top.
+/// Load a plugin library through the shared transactional activation path.
+/// Both directory discovery/reload and loose plugins use these image, scope,
+/// ABI and registration rollback checks.
 ///
 /// **Every** opened library image is retained for the life of the
 /// process: committed ones go to `PluginSlot::_libraries`, and every
@@ -1258,8 +1130,7 @@ fn refresh_compatible_schemas(
 /// plugin already registered into a dangling reference, and
 /// `FreeLibrary` itself has deadlocked on this platform before. The
 /// invariant is therefore: once `Library::new` returns `Ok`, the image
-/// stays mapped. See `PluginSlot::_libraries` for the same rule in the
-/// non-transactional path.
+/// stays mapped.
 pub fn load_one_transactional(
     world: &mut World,
     path: &Path,
@@ -1294,7 +1165,9 @@ pub fn load_one_transactional(
         let loaded = world.get_resource::<LoadedPlugins>().unwrap();
         loaded.0[slot].loaded_at
     };
-    let proposed_generation = prior_loaded_at.saturating_add(1);
+    let Some(proposed_generation) = prior_loaded_at.checked_add(1) else {
+        return Err(LoadOutcome::Failed("plugin generation exhausted; restart required".into()));
+    };
 
     let image = if is_editor {
         match shadow_copy(path, proposed_generation) {
@@ -1328,6 +1201,8 @@ pub fn load_one_transactional(
         Ok(f) => unsafe { f() },
         Err(_) => sys::PluginScope::Runtime,
     };
+    // Inventory needs the declared scope even when this host rejects it.
+    world.resource_mut::<LoadedPlugins>().0[slot].scope = Some(scope);
     if !scope.is_known() {
         retain_failed_library(world, slot, &library);
         return Err(LoadOutcome::Failed(format!(

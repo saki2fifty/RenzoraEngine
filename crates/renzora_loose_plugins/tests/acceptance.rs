@@ -38,6 +38,68 @@ mod harness;
 use harness::{recv_until, BuildServiceDriver, Harness, TestEnv};
 
 #[test]
+fn directory_reload_preserves_backends_on_failure_and_replaces_them_on_success() {
+    use renzora_plugin::host::{PluginAudioBackend, PluginNetBackend, PluginPanels, PluginScriptBackends};
+    let env = TestEnv::new();
+    let mut h = Harness::with_minimal_plugins(&env);
+    let dir = env.workdir.path().join("directory_reload");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{}backend_probe{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));
+    h.install_plugin_host(&dir);
+    let source = r#"
+use renzora_plugin::sys::*;
+unsafe extern "C" fn audio(_: *const AudioCall) -> AudioStatus { AudioStatus::Ok }
+unsafe extern "C" fn net(_: *const NetCall) -> NetStatus { NetStatus::Ok }
+unsafe extern "C" fn script(_: *const ScriptCall) -> ScriptStatus { ScriptStatus::Ok }
+#[no_mangle]
+pub unsafe extern "C" fn renzora_plugin_init(iface: *const Interface, host: *mut Host) -> InitResult {
+    let i = &*iface;
+    let a = AudioBackendDesc { name: Str256::new("probe").unwrap(), state: GENERATION as *mut _, entry: audio };
+    let n = NetBackendDesc { name: Str256::new("probe").unwrap(), state: GENERATION as *mut _, entry: net };
+    let exts = [Str256::new("probe").unwrap()];
+    let s = ScriptBackendDesc { name: Str256::new("probe").unwrap(), extensions: exts.as_ptr(), extension_count: 1, entry: script };
+    let p = PanelDesc { id: StrRef::new("probe.panel"), title: StrRef::new("Probe"), icon: StrRef::new(""), category: StrRef::new(""), markup: StrRef::new("<div>Probe</div>"), on_action: None, user: GENERATION as *mut _ };
+    if (i.add_audio_backend)(host, &a) != RegisterStatus::Ok
+        || (i.add_net_backend)(host, &n) != RegisterStatus::Ok
+        || (i.add_script_backend)(host, &s) != RegisterStatus::Ok
+        || (i.add_panel)(host, &p) != RegisterStatus::Ok {
+        return InitResult::Failed;
+    }
+    RESULT
+}
+"#;
+    for (state, result, expected_state, expected_generation) in [
+        (1, "InitResult::Ok", 1, 1),
+        (2, "InitResult::Failed", 1, 1),
+        (3, "InitResult::Ok", 3, 2),
+    ] {
+        let src = source.replace("GENERATION", &format!("{state}usize")).replace("RESULT", result);
+        let library = h.compile_source_to_cdylib(&src, "backend_probe");
+        std::fs::copy(&library, &path).unwrap();
+        if state == 1 {
+            let outcomes = h.load_dir(&dir);
+            assert!(matches!(outcomes[0].1, LoadOutcome::Loaded), "{outcomes:?}");
+        } else {
+            h.drive_reload(&path);
+        }
+        let world = h.app.world();
+        let audio = world.resource::<PluginAudioBackend>().0.as_ref().unwrap();
+        let net = world.resource::<PluginNetBackend>().0.as_ref().unwrap();
+        assert_eq!(audio.state, expected_state);
+        assert_eq!(net.state, expected_state);
+        assert_eq!(audio.owner_generation, expected_generation);
+        assert_eq!(net.owner_generation, expected_generation);
+        let scripts = &world.resource::<PluginScriptBackends>().0;
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].owner_generation, expected_generation);
+        let panels = &world.resource::<PluginPanels>().0;
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].user, expected_state);
+        assert_eq!(panels[0].owner_generation, expected_generation);
+    }
+}
+
+#[test]
 fn runtime_execution_plugin_system_runs_and_writes_observed_value() {
     let env = TestEnv::new();
     let mut h = Harness::with_minimal_plugins(&env);

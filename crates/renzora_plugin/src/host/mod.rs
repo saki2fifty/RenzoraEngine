@@ -1082,7 +1082,7 @@ unsafe extern "C" fn add_panel(
             .get_resource_or_insert_with(PluginPanels::default);
         // A duplicate id would produce two panels fighting over one dock slot
         // and one layout entry, which reads as a panel that will not stay put.
-        if panels.0.iter().any(|p| p.id == id) {
+        if panels.0.iter().any(|p| p.id == id && (p.owner != owner || p.owner_generation == ctx.gate.at)) {
             error!("two plugins registered a panel called `{id}` — the second is ignored");
             return sys::RegisterStatus::Invalid;
         }
@@ -1134,7 +1134,7 @@ unsafe extern "C" fn add_settings_section(
         let mut panels = ctx
             .world
             .get_resource_or_insert_with(PluginPanels::default);
-        if panels.0.iter().any(|p| p.id == id) {
+        if panels.0.iter().any(|p| p.id == id && (p.owner != owner || p.owner_generation == ctx.gate.at)) {
             error!("two plugins registered `{id}` — the second is ignored");
             return sys::RegisterStatus::Invalid;
         }
@@ -1201,7 +1201,12 @@ unsafe extern "C" fn add_script_backend(
         // differently on two machines.
         let taken: Vec<&str> = extensions
             .iter()
-            .filter(|e| backends.0.iter().any(|b| b.extensions.contains(e)))
+            .filter(|e| backends.0.iter().any(|b| {
+                // The prior generation stays registered until commit, but must
+                // not prevent its own replacement from claiming its extensions.
+                (b.owner != owner || b.owner_generation == ctx.gate.at)
+                    && b.extensions.contains(e)
+            }))
             .map(String::as_str)
             .collect();
         if !taken.is_empty() {

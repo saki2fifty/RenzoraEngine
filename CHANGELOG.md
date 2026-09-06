@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 13:54 UTC
+
+- Failed directory-plugin replacements now keep their working panels and backend registrations; successful replacements share the checked reload path used by loose Rust plugins.
+
 ## September 6, 2026 — 13:42 UTC
 
 - Cleared five warnings in shared engine tests so strict checks can cover those tests again, without changing editor behavior.
