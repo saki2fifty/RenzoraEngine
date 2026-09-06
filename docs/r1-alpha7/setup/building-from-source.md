@@ -30,6 +30,11 @@ cargo run --profile release --manifest-path xtask/Cargo.toml -- source-sdk --out
 
 Linux and macOS bundles keep this source package beside the executable. Compiler output goes into per-user cache storage, so the installation can remain read-only.
 
+The former `sdk` command no longer builds a compiled Bevy metadata archive. It
+exits with a migration message and creates no output. Use `source-sdk` for live
+Rust plugins/scripts; restart-required engine extensions use the separate
+engine-plugin build kit, not the retired metadata archive.
+
 ## Validation
 
 ```sh

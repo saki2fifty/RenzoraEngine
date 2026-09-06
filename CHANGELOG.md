@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 01:10 UTC
+
+- Removed the obsolete compiled-engine SDK exporter. Live Rust plugins and scripts keep their small source package; engine extensions keep their separate build kit.
+
 ## September 6, 2026 — 00:00 UTC
 
 - Reduced background disk activity by watching for plugin updates instead of repeatedly scanning every plugin. Recovery checks still catch missed changes.

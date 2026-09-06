@@ -30,7 +30,6 @@ use std::process::{Command, ExitCode};
 mod bundle;
 mod coverage;
 mod native_plugin;
-mod sdk;
 mod sync;
 mod wasm;
 
@@ -142,17 +141,8 @@ fn main() -> ExitCode {
             }
             Err(code) => code,
         },
-        // Regenerate ONLY the plugin SDK, without rebuilding or restaging
-        // anything else. Every staged build already refreshes it (see
-        // `build_and_stage`); this is for when that is all you want to redo.
-        // Optional flags exist for `docker/build-all.sh`, which stages every
-        // platform from one checkout and therefore cannot use any of the
-        // defaults: `--target-dir target/editor`, `--target <triple>` for a cross
-        // build, and `--out` because the container's layout is its own.
-        //
-        // Without these the container had no way to stage an SDK at all, so
-        // every published release shipped without one — the archive step in
-        // `package-release.sh` found no `sdk/` and silently produced nothing.
+        // The small source SDK is target-independent and needs no compiled
+        // engine metadata. Normal staging refreshes this same package.
         "source-sdk" => {
             let argv: Vec<String> = std::env::args().skip(2).collect();
             let out = flag_value(&argv, "--out").map(PathBuf::from)
@@ -163,25 +153,10 @@ fn main() -> ExitCode {
             }
         }
         "sdk" => {
-            let argv: Vec<String> = std::env::args().skip(2).collect();
-            let from = sdk::From {
-                target_dir: flag_value(&argv, "--target-dir"),
-                target: flag_value(&argv, "--target"),
-            };
-            let out_dir = flag_value(&argv, "--out")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo.join("dist").join(plat.dir));
-            match sdk::build_from(&repo, &plat, &out_dir, &from) {
-                Ok(out) => {
-                    if let Err(error) = renzora_rust_sdk::stage(&repo, &out_dir) {
-                        eprintln!("[xtask] source SDK staging failed: {error}");
-                        return ExitCode::FAILURE;
-                    }
-                    println!("[xtask] staged {}", out.display());
-                    ExitCode::SUCCESS
-                }
-                Err(code) => code,
-            }
+            // Fail explicitly instead of silently changing what old scripts
+            // requesting compiled Rust-ABI metadata receive.
+            eprintln!("[xtask] the compiled Bevy SDK has been retired; use source-sdk for live Rust plugins/scripts, or the engine-plugin build kit for engine extensions");
+            ExitCode::from(2)
         }
         // Profiling build + stage + launch — same as `run` but compiles the
         // `profiling` feature in, which re-adds Bevy's Tracy instrumentation
@@ -281,7 +256,7 @@ fn main() -> ExitCode {
         other => {
             eprintln!(
                 "[xtask] unknown command '{other}' \
-                 (expected: run | xr | dist | sdk | source-sdk | wasm [--no-opt] | plugin <name> | profile | \
+                 (expected: run | xr | dist | source-sdk | wasm [--no-opt] | plugin <name> | profile | \
                  coverage [--check|--bless] | sync [--check] | remove <crate-name>)"
             );
             ExitCode::from(2)
