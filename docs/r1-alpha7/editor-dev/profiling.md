@@ -565,8 +565,13 @@ Restoring a background rebuilds it normally. The canvas is not hidden: text
 uses separate child meshes, and the dark surface for a canvas without a template
 remains owned by the panel synchronizer. Lifecycle tests cover all three empty
 background transitions, repeated empty frames, restoration and fallback
-preservation. Font-asset byte changes with the same font source remain a
-separate invalidation limitation.
+preservation. Font asset revisions also invalidate text-bearing canvases. On
+same-ID font-byte replacement, the shared text helper refreshes Bevy's font
+collection through its public loader before the next mesh build; a hash change
+alone would otherwise keep using stale glyph data. Background-only canvases do
+not rebuild for font changes. This refresh is asset-event driven, not a per-frame
+font-byte comparison. The regression replaces real font data under one handle
+and checks that actual glyph geometry changes and then settles again.
 
 ## Audio timeline bookkeeping
 
@@ -645,11 +650,13 @@ new candidates and changes to unnamed ancestors still do. Eligibility marker
 and standard Disabled transitions are included. The existing 100 ms rebuild
 debounce remains for genuine scene churn.
 
-Unrestricted dynamic icon callbacks retain conservative invalidation because
-they can read unrelated world state. The built-in widget icon callback declares
-its entity-local dependency. Arbitrary custom filter/icon component change
-tracking remains a separate limitation; this does not claim complete automatic
-dependency discovery.
+Custom filter membership is checked through retained entity archetypes and
+resolved filter component IDs. Dynamic icon results are compared each frame,
+including callbacks that read unrelated world state. Changes invalidate the
+cached tree; unchanged results do not rebuild it. These lightweight dependency
+checks still run, rather than claiming automatic discovery of callback reads.
+The regression covers custom components on unnamed ancestors, entity-local and
+global icon changes, and 1,000 unchanged frames without a tree rebuild.
 
 ## Empty hierarchy caching
 

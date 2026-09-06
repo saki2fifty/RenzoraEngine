@@ -25,11 +25,13 @@
 //! coverage→SDF→strip step ([`pack_sdf_strip`]) and the material are shared.
 
 mod material;
+mod font_refresh;
 mod mesh;
 mod pack;
 mod sdf;
 
 pub use material::{ensure_sdf_material, SdfTextMaterial};
+pub use font_refresh::{ensure_font_asset_tracking, FontAssetRevision};
 pub use mesh::{build_text_mesh, WORLD_UNITS_PER_PX};
 pub use pack::{glyph_key, pack_sdf_strip, PackedGlyph};
 pub use sdf::{coverage_to_sdf, SPREAD};

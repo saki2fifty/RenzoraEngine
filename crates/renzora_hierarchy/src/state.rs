@@ -121,10 +121,31 @@ pub(crate) type HierarchyCandidate = (
     )>,
 );
 
-/// Build the entity tree from the world.
-///
-/// Takes `&mut World` only to build the candidate `QueryState` (which registers
-/// the component ids it needs); everything after that is read-only.
+/// Resolve user component filters into reusable storage shared with invalidation.
+pub(crate) fn resolve_filter_ids(
+    world: &World,
+    include: &mut Vec<bevy::ecs::component::ComponentId>,
+    exclude: &mut Vec<bevy::ecs::component::ComponentId>,
+) {
+    include.clear();
+    exclude.clear();
+    let (names, out) = match world.get_resource::<HierarchyFilter>() {
+        Some(HierarchyFilter::OnlyWithComponents(names)) => (names, include),
+        Some(HierarchyFilter::ExcludeDescendantsOf(names)) => (names, exclude),
+        _ => return,
+    };
+    let Some(registry) = world.get_resource::<AppTypeRegistry>() else { return };
+    let registry = registry.read();
+    out.extend(names.iter().filter_map(|name| {
+        let reg = registry.iter().find(|r| {
+            let table = r.type_info().type_path_table();
+            table.short_path() == *name || table.ident() == Some(*name)
+        })?;
+        world.components().get_id(reg.type_id())
+    }));
+}
+
+/// Build the entity tree; mutable access only registers the candidate query.
 pub fn build_entity_tree(world: &mut World, spawn_seq: &mut HierarchySpawnSeq) -> Vec<EntityNode> {
     let mut candidates = world.query_filtered::<(Entity, &Name), HierarchyCandidate>();
     let world: &World = world;
@@ -133,29 +154,8 @@ pub fn build_entity_tree(world: &mut World, spawn_seq: &mut HierarchySpawnSeq) -
     let all_candidates: Vec<Entity> = candidates.iter(world).map(|(e, _)| e).collect();
     spawn_seq.sync(&all_candidates);
     // Resolve hierarchy filter — map component type names to ComponentIds.
-    let resolve_ids = |names: &Vec<&'static str>| -> Vec<bevy::ecs::component::ComponentId> {
-        let Some(registry) = world.get_resource::<AppTypeRegistry>() else {
-            return Vec::new();
-        };
-        let registry = registry.read();
-        names
-            .iter()
-            .filter_map(|name| {
-                let reg = registry.iter().find(|r| {
-                    let table = r.type_info().type_path_table();
-                    table.short_path() == *name || (table.ident() == Some(*name))
-                })?;
-                world.components().get_id(reg.type_id())
-            })
-            .collect()
-    };
-    let (include_ids, exclude_ids): (Vec<_>, Vec<_>) = match world.get_resource::<HierarchyFilter>()
-    {
-        Some(HierarchyFilter::OnlyWithComponents(names)) => (resolve_ids(names), Vec::new()),
-        Some(HierarchyFilter::ExcludeDescendantsOf(names)) => (Vec::new(), resolve_ids(names)),
-        _ => (Vec::new(), Vec::new()),
-    };
-    let filter_component_ids = include_ids;
+    let (mut filter_component_ids, mut exclude_ids) = (Vec::new(), Vec::new());
+    resolve_filter_ids(world, &mut filter_component_ids, &mut exclude_ids);
 
     struct Entry {
         entity: Entity,

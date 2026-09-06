@@ -12,7 +12,7 @@
 //! The exclusive `update_hierarchy_cache` system runs in `Update`, rebuilds
 //! only when dirty, and the panel reads from the cached `Vec<EntityNode>`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -25,6 +25,38 @@ use crate::state::{build_entity_tree, EntityNode, HierarchySpawnSeq};
 /// Candidates before user filtering, plus every ancestor they depend on.
 #[derive(Resource, Default)]
 pub(crate) struct HierarchyDependencies(HashSet<Entity>);
+
+/// Observed dynamic dependencies, retained between hierarchy rebuilds.
+#[derive(Default)]
+pub struct DynamicDependencies {
+    entities: HashMap<Entity, DependencyValue>,
+    include: Vec<bevy::ecs::component::ComponentId>,
+    exclude: Vec<bevy::ecs::component::ComponentId>,
+    scratch_include: Vec<bevy::ecs::component::ComponentId>,
+    scratch_exclude: Vec<bevy::ecs::component::ComponentId>,
+}
+
+#[derive(PartialEq)]
+struct DependencyValue {
+    archetype: bevy::ecs::archetype::ArchetypeId,
+    icon: Option<(&'static str, [u8; 3])>,
+    viewport_visibility: Option<Visibility>,
+}
+
+fn dependency_value(world: &World, entity: Entity, dynamic_icons: bool) -> Option<DependencyValue> {
+    let entity_ref = world.get_entity(entity).ok()?;
+    Some(DependencyValue {
+        archetype: entity_ref.archetype().id(),
+        // Arbitrary callbacks cannot expose read dependencies. Compare their
+        // results instead, so resource/component value edits remain observable
+        // without rebuilding tree structure when the displayed icon is equal.
+        icon: if dynamic_icons {
+            world.get_resource::<renzora::ComponentIconRegistry>()
+                .and_then(|icons| icons.entity_icon(world, entity))
+        } else { None },
+        viewport_visibility: world.get::<renzora::ViewportGateHidden>(entity).map(|v| v.0),
+    })
+}
 
 #[derive(SystemParam)]
 pub struct HierarchyChangeScope<'w, 's> {
@@ -205,7 +237,15 @@ impl AssetBadgeChanges<'_, '_> {
 
 /// Exclusive system: rebuilds `HierarchyTreeCache` when dirty. Runs in
 /// `Update` so the cache is populated before the panel reads it.
-pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<Option<f32>>) {
+pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<Option<f32>>, mut observed: Local<DynamicDependencies>) {
+    let dynamic_icons = world.get_resource::<renzora::ComponentIconRegistry>()
+        .is_some_and(|icons| icons.iter().any(|entry| entry.dynamic_icon_fn.is_some()));
+    let DynamicDependencies { scratch_include, scratch_exclude, .. } = &mut *observed;
+    crate::state::resolve_filter_ids(world, scratch_include, scratch_exclude);
+    if observed.include != observed.scratch_include || observed.exclude != observed.scratch_exclude
+        || observed.entities.iter().any(|(&entity, prior)| dependency_value(world, entity, dynamic_icons).as_ref() != Some(prior)) {
+        world.resource_mut::<HierarchyDirty>().0 = true;
+    }
     let dirty = world.resource::<HierarchyDirty>().0;
     // An empty tree is a valid cached scene, not a request to rebuild forever.
     // HierarchyDirty starts true, so the first build needs no size-based gate.
@@ -237,6 +277,16 @@ pub fn update_hierarchy_cache(world: &mut World, mut last_build: Local<Option<f3
         }
     });
 
+    observed.entities.clear();
+    for &entity in &world.resource::<HierarchyDependencies>().0 {
+        if let Some(value) = dependency_value(world, entity, dynamic_icons) {
+            observed.entities.insert(entity, value);
+        }
+    }
+    let DynamicDependencies { include, exclude, scratch_include, scratch_exclude, .. } = &mut *observed;
+    include.clone_from(scratch_include);
+    exclude.clone_from(scratch_exclude);
+
     let nodes = world.resource_scope(|world, mut seq: Mut<HierarchySpawnSeq>| {
         build_entity_tree(world, &mut seq)
     });
@@ -255,6 +305,58 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_millis(101));
         app.update();
+    }
+
+    #[test]
+    fn custom_filter_membership_and_dynamic_icon_values_refresh_without_tree_churn() {
+        #[derive(Component, Reflect)]
+        struct CustomFilter;
+        #[derive(Component)]
+        struct CustomIcon(bool);
+        #[derive(Resource, Default)]
+        struct GlobalIcon(bool);
+        let mut app = App::new();
+        app.init_resource::<HierarchyTreeCache>()
+            .init_resource::<HierarchyDependencies>()
+            .init_resource::<HierarchyDirty>()
+            .init_resource::<HierarchySpawnSeq>()
+            .init_resource::<renzora::ComponentIconRegistry>()
+            .init_resource::<GlobalIcon>()
+            .init_resource::<Time>()
+            .register_type::<CustomFilter>()
+            .insert_resource(HierarchyFilter::OnlyWithComponents(vec!["CustomFilter"]))
+            .add_systems(Update, (mark_hierarchy_dirty, update_hierarchy_cache).chain());
+        app.world_mut().register_component::<CustomFilter>();
+        app.world_mut().resource_mut::<renzora::ComponentIconRegistry>().register(renzora::ComponentIconEntry {
+            type_id: std::any::TypeId::of::<CustomIcon>(), name: "custom", icon: "circle", color: [1, 2, 3], priority: 1,
+            dynamic_icon_fn: Some(|world, entity| {
+                world.get::<CustomIcon>(entity).map(|icon| {
+                    (if icon.0 || world.resource::<GlobalIcon>().0 { "star" } else { "circle" }, [1, 2, 3])
+                })
+            }),
+        });
+        let ancestor = app.world_mut().spawn_empty().id();
+        let child = app.world_mut().spawn((Name::new("child"), ChildOf(ancestor), CustomIcon(false))).id();
+        advance(&mut app);
+        assert!(app.world().resource::<HierarchyTreeCache>().nodes.is_empty());
+        app.world_mut().entity_mut(ancestor).insert(CustomFilter);
+        advance(&mut app);
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().nodes[0].entity, child);
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().nodes[0].icon, "circle");
+        app.world_mut().get_mut::<CustomIcon>(child).unwrap().0 = true;
+        advance(&mut app);
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().nodes[0].icon, "star");
+        app.world_mut().get_mut::<CustomIcon>(child).unwrap().0 = false;
+        advance(&mut app);
+        app.world_mut().resource_mut::<GlobalIcon>().0 = true;
+        advance(&mut app);
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().nodes[0].icon, "star");
+        let version = app.world().resource::<HierarchyTreeCache>().version;
+        for _ in 0..1_000 { advance(&mut app); }
+        assert_eq!(app.world().resource::<HierarchyTreeCache>().version, version);
+        app.world_mut().entity_mut(ancestor).remove::<CustomFilter>();
+        advance(&mut app);
+        assert!(app.world().resource::<HierarchyTreeCache>().nodes.is_empty());
     }
 
     #[test]

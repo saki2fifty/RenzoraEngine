@@ -44,6 +44,7 @@ impl Material for SdfTextMaterial {
 /// rather than by compiling its own — so `is_plugin_added` is comparing the same
 /// `TypeId` on both sides. See the module doc.
 pub fn ensure_sdf_material(app: &mut App) {
+    super::font_refresh::ensure_font_asset_tracking(app);
     if app.is_plugin_added::<MaterialPlugin<SdfTextMaterial>>() {
         return;
     }

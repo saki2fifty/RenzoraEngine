@@ -185,6 +185,7 @@ fn emit_world_ui_meshes(
     mut sdf_materials: ResMut<Assets<SdfTextMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut tcx: TextCtx,
+    font_revision: Res<renzora::text_mesh::FontAssetRevision>,
     panels: Query<(
         Entity,
         &UiCanvas,
@@ -311,6 +312,9 @@ fn emit_world_ui_meshes(
         }
 
         // Nothing changed since the last build → leave all geometry untouched.
+        if !texts.is_empty() {
+            font_revision.0.hash(&mut hasher);
+        }
         let hash = hasher.finish();
         if built.map(|b| b.0) == Some(hash) {
             continue;
@@ -499,6 +503,7 @@ mod tests {
             .init_resource::<ScaleCx>()
             .init_resource::<RemSize>()
             .add_systems(Update, emit_world_ui_meshes);
+        renzora::text_mesh::ensure_font_asset_tracking(&mut app);
         let root = app
             .world_mut()
             .spawn((
@@ -586,5 +591,47 @@ mod tests {
         app.update();
         assert_eq!(app.world().get::<Mesh3d>(canvas).unwrap().0, fallback);
         assert!(app.world().get::<WorldUiMeshBuilt>(canvas).is_none());
+
+        // Replace actual font bytes at the same asset ID. Both the collection
+        // and the mesh hash must advance, not merely the authored font source.
+        app.add_message::<AssetEvent<Font>>();
+        app.add_systems(PostUpdate, bevy::text::load_font_assets_into_font_collection);
+        let font = app.world_mut().resource_mut::<Assets<Font>>().add(Font::from_bytes(
+            include_bytes!("../../../../assets/fonts/NotoSans-Regular.ttf").to_vec(),
+        ));
+        app.world_mut().entity_mut(root).insert((Text::new("WWWiii"), TextFont {
+            font: bevy::text::FontSource::Handle(font.clone()),
+            ..default()
+        }));
+        app.world_mut().entity_mut(canvas).insert(WorldUiPanelLive {
+            camera: Entity::PLACEHOLDER, ui_root: root, image: Handle::default(),
+        });
+        app.update();
+        app.update();
+        let text_mesh = |app: &App| {
+            app.world().get::<Children>(canvas).unwrap().iter().find_map(|child| {
+                app.world().get::<WorldUiTextGeom>(child)?;
+                Some(app.world().get::<Mesh3d>(child).unwrap().0.clone())
+            }).unwrap()
+        };
+        let old_mesh = text_mesh(&app);
+        let positions = |app: &App, handle: &Handle<Mesh>| {
+            app.world().resource::<Assets<Mesh>>().get(handle).unwrap()
+                .attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap().to_vec()
+        };
+        let old_positions = positions(&app, &old_mesh);
+        for _ in 0..3 { app.update(); }
+        assert_eq!(text_mesh(&app), old_mesh);
+        app.world_mut().resource_mut::<Assets<Font>>().insert(font.id(), Font::from_bytes(
+            include_bytes!("../../../../assets/fonts/JetBrainsMono-Regular.ttf").to_vec(),
+        )).unwrap();
+        app.world_mut().write_message(AssetEvent::<Font>::Modified { id: font.id() });
+        app.update();
+        app.update();
+        let new_mesh = text_mesh(&app);
+        assert_ne!(new_mesh, old_mesh);
+        assert_ne!(positions(&app, &new_mesh), old_positions);
+        for _ in 0..3 { app.update(); }
+        assert_eq!(text_mesh(&app), new_mesh);
     }
 }

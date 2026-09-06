@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 14:22 UTC
+
+- Replacing a font now refreshes world-space text. Custom hierarchy filters and icons follow changes while unchanged frames keep their cached results.
+
 ## September 6, 2026 — 14:07 UTC
 
 - Physics impulses now add to existing motion according to body mass, respect locked axes, and leave static/kinematic bodies unchanged in both 2D and 3D.
