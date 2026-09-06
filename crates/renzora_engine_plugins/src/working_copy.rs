@@ -16,30 +16,44 @@ pub(crate) fn prepare(job: &EngineBuildJob) -> io::Result<PathBuf> {
             "working copy and snapshot must not overlap",
         ));
     }
+    refresh_snapshot(&source, &destination, &job.stamp.build_kit_hash)?;
+    Ok(destination)
+}
+
+fn refresh_snapshot(source: &Path, destination: &Path, kit_hash: &str) -> io::Result<()> {
     let complete = destination.join(".renzora-working-copy-complete");
-    let reusable = complete.is_file();
-    if reusable {
+    // A stable compiler path may now serve a newer kit. Reuse vendor bytes
+    // only for the exact kit that completed this copy; failed refreshes carry
+    // no marker and must revalidate the complete snapshot on the next attempt.
+    let reusable = fs::read(&complete).ok().as_deref() == Some(kit_hash.as_bytes());
+    if complete.exists() {
         fs::remove_file(&complete)?;
     }
     // A failed refresh leaves no completion marker. The next attempt refreshes
     // vendor bytes as well rather than trusting a partially populated tree.
-    synchronize(&source, &destination, reusable, true)?;
-    fs::write(complete, b"1")?;
-    Ok(destination)
+    synchronize(source, destination, reusable, true)?;
+    fs::write(complete, kit_hash)?;
+    Ok(())
 }
 
 pub(crate) fn directory(job: &EngineBuildJob) -> PathBuf {
-    let key = blake3::hash(
+    job.cache_root.join("workspaces").join(workspace_key(
+        &job.stamp.toolchain_hash,
+        &job.target,
+        &job.profile,
+    ))
+}
+
+fn workspace_key(toolchain: &str, target: &str, profile: &str) -> String {
+    blake3::hash(
         format!(
-            "{}:{}",
+            "{}:{toolchain}:{target}:{profile}",
             crate::native_overlay::NATIVE_OVERLAY_SCHEMA,
-            job.stamp.build_kit_hash
         )
         .as_bytes(),
     )
     .to_hex()
-    .to_string();
-    job.cache_root.join("workspaces").join(key)
+    .to_string()
 }
 
 fn synchronize(
@@ -115,6 +129,57 @@ fn remove(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kit_refresh_preserves_paths_but_refreshes_changed_vendor_bytes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("source");
+        let output = temp.path().join("output");
+        fs::create_dir_all(source.join("vendor")).expect("vendor");
+        fs::write(source.join("vendor/dep.rs"), "same").expect("dependency");
+        fs::write(source.join("engine.rs"), "engine").expect("engine");
+        refresh_snapshot(&source, &output, "kit-a").expect("first kit");
+        let before = fs::metadata(output.join("engine.rs"))
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        fs::write(source.join("vendor/dep.rs"), "updated").expect("updated dependency");
+        refresh_snapshot(&source, &output, "kit-b").expect("new kit");
+        assert_eq!(
+            fs::read(output.join("vendor/dep.rs")).expect("updated vendor"),
+            b"updated"
+        );
+        assert_eq!(
+            fs::metadata(output.join("engine.rs"))
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
+            before
+        );
+        assert_eq!(
+            fs::read(output.join(".renzora-working-copy-complete")).expect("provenance"),
+            b"kit-b"
+        );
+        fs::remove_file(output.join(".renzora-working-copy-complete")).expect("incomplete refresh");
+        fs::write(output.join("vendor/dep.rs"), "partial").expect("partial copy");
+        refresh_snapshot(&source, &output, "kit-b").expect("recover incomplete refresh");
+        assert_eq!(
+            fs::read(output.join("vendor/dep.rs")).expect("recovered vendor"),
+            b"updated"
+        );
+        assert_ne!(
+            workspace_key("toolchain-a", "target", "dist"),
+            workspace_key("toolchain-b", "target", "dist")
+        );
+        assert_ne!(
+            workspace_key("toolchain-a", "target", "dist"),
+            workspace_key("toolchain-a", "other", "dist")
+        );
+        assert_ne!(
+            workspace_key("toolchain-a", "target", "dist"),
+            workspace_key("toolchain-a", "target", "release")
+        );
+    }
 
     #[test]
     fn refresh_preserves_unchanged_files_and_retires_removed_sources() {

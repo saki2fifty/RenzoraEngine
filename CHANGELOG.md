@@ -6,6 +6,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 
 - Kept the editor open and showed an error when a Marketplace restart cannot launch.
 - Avoided repeated night-star material and position updates while the scene is unchanged; twinkle animation is preserved.
+- Improved reuse of unchanged engine-build files across build-kit updates and cleaned up a Windows build warning.
 
 ## September 6, 2026 — 23:08 UTC
 

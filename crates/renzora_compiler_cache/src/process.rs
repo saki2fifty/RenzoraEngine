@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -54,6 +54,7 @@ pub struct OwnedChild {
 pub mod platform {
     use super::*;
     use std::os::unix::io::{FromRawFd, IntoRawFd};
+    use std::process::Stdio;
 
     /// POSIX inner: a `std::process::Child` plus the process-group id.
     pub struct Inner {

@@ -164,6 +164,19 @@ not have that feature`. The acceptance test `prod_real_source_compiles_publishes
 proves the first-compile network gate works end-to-end with the
 real `BuildService` and a real SDK path.
 
+## Engine-plugin working copies
+
+Restart-required engine builds keep compiler source paths stable for each
+toolchain, target, profile and integration-schema combination. Repackaging a
+build kit does not itself assign every dependency a new source path. The
+cache-wide build lock still protects the entire refresh and compilation.
+
+The completed working-copy marker records the exact kit digest. A changed kit
+or interrupted refresh forces vendor synchronization; unchanged file bytes keep
+their modification times. Immutable snapshot verification and published
+generation identities still include the kit digest. Stable paths improve reuse
+opportunities, but do not promise a cache hit when actual inputs change.
+
 ## Loose-plugin integration
 
 > The loose hot-plugin path uses the same
