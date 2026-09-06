@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 6, 2026 — 04:54 UTC
 
 - Stopped unchanged runtime UI scale values from repeatedly marking layout inputs as changed, while preserving resize and canvas updates.
+- Removed unnecessary temporary collision lists while keeping the same contact notifications.
 
 ## September 6, 2026 — 01:10 UTC
 

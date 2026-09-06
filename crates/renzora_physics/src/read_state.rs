@@ -182,12 +182,73 @@ fn diff_collision_state(
             .map(|n| n.as_str().to_string())
             .unwrap_or_default()
     };
-    let entered: Vec<Entity> = current.difference(&rs.prev).copied().collect();
-    let exited: Vec<Entity> = rs.prev.difference(&current).copied().collect();
+    // The public snapshot exposes only one name per transition. Stop at the
+    // first difference instead of allocating lists of contacts we never use.
+    let entered = current.difference(&rs.prev).next();
+    let exited = rs.prev.difference(&current).next();
     rs.colliding = !current.is_empty();
-    rs.entered = !entered.is_empty();
-    rs.exited = !exited.is_empty();
-    rs.entered_name = name_of(entered.first());
-    rs.exited_name = name_of(exited.first());
+    rs.entered = entered.is_some();
+    rs.exited = exited.is_some();
+    rs.entered_name = name_of(entered);
+    rs.exited_name = name_of(exited);
     rs.prev = current;
+}
+
+#[cfg(all(test, any(feature = "avian3d", feature = "avian2d")))]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::SystemState;
+    use std::collections::HashSet;
+
+    #[test]
+    fn collision_snapshot_matches_full_diff_through_contact_lifecycle() {
+        let mut world = World::new();
+        let entities: Vec<_> = (0..2048)
+            .map(|i| world.spawn(Name::new(format!("contact-{i}"))).id())
+            .collect();
+        let unnamed = world.spawn_empty().id();
+        let removed = world.spawn(Name::new("removed")).id();
+        world.despawn(removed);
+        let mut query = SystemState::<Query<&Name>>::new(&mut world);
+        let names = query
+            .get(&world)
+            .expect("name query is valid for this world");
+        let mut rs = CollisionReadState::default();
+        let mut largest_temporary_list = 0;
+        let first: HashSet<_> = entities[..1024].iter().copied().collect();
+        let second: HashSet<_> = entities[1024..].iter().copied().collect();
+        // Idle, enter, stay, simultaneous exits/enters, missing names, exit,
+        // and clearing the one-frame exit flags all retain the old semantics.
+        for current in [
+            HashSet::new(),
+            first.clone(),
+            first,
+            second,
+            HashSet::from([unnamed]),
+            HashSet::from([removed]),
+            HashSet::new(),
+            HashSet::new(),
+        ] {
+            let entered: Vec<_> = current.difference(&rs.prev).copied().collect();
+            let exited: Vec<_> = rs.prev.difference(&current).copied().collect();
+            largest_temporary_list = largest_temporary_list.max(entered.len() + exited.len());
+            let name_of = |entity: Option<&Entity>| {
+                entity
+                    .and_then(|entity| names.get(*entity).ok())
+                    .map(|name| name.as_str())
+                    .unwrap_or_default()
+            };
+            let expected_entered = name_of(entered.first()).to_owned();
+            let expected_exited = name_of(exited.first()).to_owned();
+            let expected_current = current.clone();
+            diff_collision_state(&mut rs, current, &names);
+            assert_eq!(rs.colliding, !expected_current.is_empty());
+            assert_eq!(rs.entered, !entered.is_empty());
+            assert_eq!(rs.exited, !exited.is_empty());
+            assert_eq!(rs.entered_name, expected_entered);
+            assert_eq!(rs.exited_name, expected_exited);
+            assert_eq!(rs.prev, expected_current);
+        }
+        assert_eq!(largest_temporary_list, 2048);
+    }
 }

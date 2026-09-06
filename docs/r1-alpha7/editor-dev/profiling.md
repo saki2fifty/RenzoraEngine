@@ -449,3 +449,12 @@ but only writes the global scale when the calculated value differs. This avoids
 unchanged-scale change notifications without relying on cached resize events.
 The regression workload measures notifications across 1,000 stable frames and
 window/canvas changes; it is not an FPS benchmark.
+
+## Collision snapshots
+
+Collision snapshots expose only the first contact that entered and the first
+that exited during a frame. Both physics backends now stop each difference
+iterator at that first contact, avoiding temporary lists of unused contacts.
+The contact sets are still checked every frame; this is not an event-driven
+physics rewrite or a measured FPS improvement. Contact ordering remains
+unspecified, as before.
