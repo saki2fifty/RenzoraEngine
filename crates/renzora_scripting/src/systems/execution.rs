@@ -4,7 +4,6 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 // `bevy::platform::time::Instant`, never `std`'s — std's panics on wasm.
 use bevy::platform::time::Instant;
@@ -238,20 +237,7 @@ pub fn run_scripts(world: &mut World) {
     // snake_case id — stored in `Name` (see `renzora::entity_id`). This is the
     // single identifier scripts use in `get_on`/`set_on`/`{{ … }}`; the old
     // separate `EntityTag` overlay is gone, so `id` is the only way in.
-    let mut entities_by_name: HashMap<String, u64> = HashMap::new();
-    let mut name_to_entity: HashMap<String, Entity> = HashMap::new();
-    {
-        let mut query = world.query::<(Entity, &Name)>();
-        for (e, n) in query.iter(world) {
-            let name = n.as_str().to_string();
-            entities_by_name.insert(name.clone(), e.to_bits());
-            name_to_entity.insert(name, e);
-        }
-    }
-
-    // All three read handlers borrow the same immutable frame lookup. Their
-    // boxed lifetimes require ownership, not a full map copy for every script.
-    let name_to_entity = Arc::new(name_to_entity);
+    let (entities_by_name, name_to_entity) = super::names::snapshot(world);
 
     // A real frame number, not a placeholder. This was hardcoded to 0 for as
     // long as nothing read it — and then the plugin bridge started using it to

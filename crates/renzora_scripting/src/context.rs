@@ -134,7 +134,7 @@ pub(crate) struct ScriptFrameInputs {
     pub action_axis_1d: HashMap<String, f32>,
     pub action_axis_2d: HashMap<String, Vec2>,
     pub gamepads: Vec<GamepadSnapshot>,
-    pub found_entities: HashMap<String, u64>,
+    pub found_entities: Arc<HashMap<String, u64>>,
     pub timers_just_finished: Vec<String>,
 }
 
@@ -340,7 +340,7 @@ impl ScriptContext {
             self.action_axis_1d = frame.action_axis_1d.clone();
             self.action_axis_2d = frame.action_axis_2d.clone();
             self.gamepads = frame.gamepads.clone();
-            self.found_entities = frame.found_entities.clone();
+            self.found_entities = (*frame.found_entities).clone();
             self.timers_just_finished = frame.timers_just_finished.clone();
         }
     }

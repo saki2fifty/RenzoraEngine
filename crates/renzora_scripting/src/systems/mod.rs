@@ -2,6 +2,7 @@
 
 mod commands;
 pub mod execution;
+pub(crate) mod names;
 pub mod reflection;
 
 pub use commands::apply_script_commands;

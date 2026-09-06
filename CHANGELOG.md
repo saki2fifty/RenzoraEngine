@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 15:14 UTC
+
+- Reduced repeated work in unchanged world-space UI and script scene-name lookups. Scene edits, font changes and script cleanup still refresh the affected data.
+
 ## September 6, 2026 — 14:32 UTC
 
 - Reduced repeated work in world-space text, script timing, navigation updates and network retries. Added regressions that check retained storage and unchanged-frame behavior.

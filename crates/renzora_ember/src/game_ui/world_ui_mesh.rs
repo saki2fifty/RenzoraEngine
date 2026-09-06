@@ -16,7 +16,8 @@
 //!
 //! ## Only rebuild on change
 //!
-//! The walk is cheap; recreating meshes/materials/textures is not — and doing it
+//! Settled canvases skip the tree walk. Dirty canvases still hash their geometry:
+//! recreating meshes/materials/textures is expensive — and doing it
 //! every frame both tanks the FPS and (worse) despawns text meshes while the
 //! render world may still reference them, drawing freed vertex buffers as garbage
 //! triangles. So each panel stores a hash of the geometry it last built; a frame
@@ -25,6 +26,7 @@
 //!
 //! Milestone: rects + SDF text. Images, borders and rounded corners follow.
 
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use bevy::asset::RenderAssetUsages;
@@ -182,6 +184,77 @@ struct TextCtx<'w> {
     rem: Res<'w, RemSize>,
 }
 
+#[derive(Default)]
+struct MeshInvalidation {
+    owners: HashMap<Entity, HashSet<Entity>>,
+    members: HashMap<Entity, Vec<Entity>>,
+    dirty: HashSet<Entity>,
+    visiting: Vec<Entity>,
+}
+
+impl MeshInvalidation {
+    fn changed(&mut self, entity: Entity) {
+        if let Some(owners) = self.owners.get(&entity) {
+            self.dirty.extend(owners.iter().copied());
+        }
+    }
+
+    fn forget(&mut self, owner: Entity) {
+        if let Some(members) = self.members.remove(&owner) {
+            for entity in members {
+                if let Some(owners) = self.owners.get_mut(&entity) {
+                    owners.remove(&owner);
+                    if owners.is_empty() { self.owners.remove(&entity); }
+                }
+            }
+        }
+        self.dirty.remove(&owner);
+    }
+
+    fn finish(&mut self, owner: Entity) {
+        self.dirty.remove(&owner);
+        if self.members.get(&owner).is_some_and(|members| *members == self.visiting) { return; }
+        // Text/layout edits do not rebuild membership tables. Only actual tree
+        // changes retire the old routing, keeping animated canvases inexpensive.
+        let members = std::mem::take(&mut self.visiting);
+        self.forget(owner);
+        for &entity in &members { self.owners.entry(entity).or_default().insert(owner); }
+        self.members.insert(owner, members);
+    }
+}
+
+#[derive(SystemParam)]
+struct MeshChanges<'w, 's> {
+    filters: Res<'w, bevy::ecs::entity_disabling::DefaultQueryFilters>,
+    changed: Query<
+        'w,
+        's,
+        Entity,
+        (
+            Allow<bevy::ecs::entity_disabling::Disabled>,
+            Or<(
+                Changed<ComputedNode>,
+                Changed<UiGlobalTransform>,
+                Changed<BackgroundColor>,
+                Changed<Text>,
+                Changed<TextFont>,
+                Changed<TextColor>,
+                Changed<Children>,
+                Changed<bevy::ecs::entity_disabling::Disabled>,
+            )>,
+        ),
+    >,
+    layout: RemovedComponents<'w, 's, ComputedNode>,
+    transform: RemovedComponents<'w, 's, UiGlobalTransform>,
+    background: RemovedComponents<'w, 's, BackgroundColor>,
+    text: RemovedComponents<'w, 's, Text>,
+    font: RemovedComponents<'w, 's, TextFont>,
+    color: RemovedComponents<'w, 's, TextColor>,
+    children: RemovedComponents<'w, 's, Children>,
+    disabled: RemovedComponents<'w, 's, bevy::ecs::entity_disabling::Disabled>,
+    state: Local<'s, MeshInvalidation>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_world_ui_meshes(
     mut commands: Commands,
@@ -193,8 +266,8 @@ fn emit_world_ui_meshes(
     font_revision: Res<renzora::text_mesh::FontAssetRevision>,
     panels: Query<(
         Entity,
-        &UiCanvas,
-        Option<&WorldUiPanelLive>,
+        Ref<UiCanvas>,
+        Option<Ref<WorldUiPanelLive>>,
         Option<&WorldUiMeshBuilt>,
     )>,
     children: Query<&Children>,
@@ -209,9 +282,50 @@ fn emit_world_ui_meshes(
     )>,
     mut rect_mat: Local<Option<Handle<StandardMaterial>>>,
     mut scratch: Local<WorldUiMeshScratch>,
+    mut changes: MeshChanges,
+    #[cfg(test)] mut measured: Option<ResMut<MeshWorkMeasured>>,
 ) {
+    let MeshChanges {
+        filters,
+        changed,
+        layout,
+        transform,
+        background,
+        text,
+        font,
+        color,
+        children: removed_children,
+        disabled,
+        state,
+    } = &mut changes;
+    // Unknown third-party disabling markers need the original eligibility walk.
+    let custom_filters = filters.disabling_ids().count() > 1;
+    for entity in changed
+        .iter()
+        .chain(layout.read())
+        .chain(transform.read())
+        .chain(background.read())
+        .chain(text.read())
+        .chain(font.read())
+        .chain(color.read())
+        .chain(removed_children.read())
+        .chain(disabled.read())
+    {
+        state.changed(entity);
+    }
+    // Retire memberships when a canvas disappears or is temporarily excluded.
+    let retired: Vec<_> = state
+        .members
+        .keys()
+        .filter(|entity| panels.get(**entity).is_err())
+        .copied()
+        .collect();
+    for owner in retired {
+        state.forget(owner);
+    }
     for (entity, canvas, live, built) in &panels {
         if !canvas.is_world() || !canvas.is_mesh_mode() {
+            state.forget(entity);
             continue;
         }
         // Mesh mode but no template/root (e.g. the template was cleared) → drop any
@@ -219,6 +333,7 @@ fn emit_world_ui_meshes(
         // `sync_world_ui_canvases` now shows. The canvas's own dark quad comes from
         // there; here we only clean up our child geometry.
         let Some(live) = live else {
+            state.forget(entity);
             if let Ok(ch) = children.get(entity) {
                 for c in ch.iter() {
                     if text_children.get(c).is_ok() {
@@ -231,18 +346,38 @@ fn emit_world_ui_meshes(
             }
             continue;
         };
-        let panel_size = canvas_size(canvas);
-        let res = canvas_resolution(canvas).as_vec2();
+        if !custom_filters
+            && built.is_some()
+            && state.members.contains_key(&entity)
+            && !state.dirty.contains(&entity)
+            && !canvas.is_changed()
+            && !live.is_changed()
+            && !font_revision.is_changed()
+            && !tcx.rem.is_changed()
+        {
+            continue;
+        }
+        state.visiting.clear();
+        let panel_size = canvas_size(&canvas);
+        let res = canvas_resolution(&canvas).as_vec2();
         if res.x <= 0.0 || res.y <= 0.0 {
             continue;
         }
         let scale = panel_size / res; // world units per UI px
-        // px (y-down, origin top-left) → panel-local world (centred, y-up).
-        let to_local =
-            |px: Vec2| Vec2::new((px.x - res.x * 0.5) * scale.x, -(px.y - res.y * 0.5) * scale.y);
+                                      // px (y-down, origin top-left) → panel-local world (centred, y-up).
+        let to_local = |px: Vec2| {
+            Vec2::new(
+                (px.x - res.x * 0.5) * scale.x,
+                -(px.y - res.y * 0.5) * scale.y,
+            )
+        };
 
         // One shared high-water allocation, not another buffer per canvas.
-        let WorldUiMeshScratch { rects, texts, queue } = &mut *scratch;
+        let WorldUiMeshScratch {
+            rects,
+            texts,
+            queue,
+        } = &mut *scratch;
         rects.clear();
         texts.clear();
         queue.clear();
@@ -259,6 +394,11 @@ fn emit_world_ui_meshes(
         queue.push_back(live.ui_root);
         let mut order = 0u32;
         while let Some(n) = queue.pop_front() {
+            state.visiting.push(n);
+            #[cfg(test)]
+            if let Some(measured) = measured.as_mut() {
+                measured.visits += 1;
+            }
             if let Ok((cn, gt, bg, text, tf, tc)) = nodes.get(n) {
                 let center = gt.translation;
                 // Skip any node bevy hasn't finished laying out — a non-finite
@@ -314,6 +454,7 @@ fn emit_world_ui_meshes(
             order += 1;
         }
 
+        state.finish(entity);
         // Nothing changed since the last build → leave all geometry untouched.
         if !texts.is_empty() {
             font_revision.0.hash(&mut hasher);
@@ -341,9 +482,10 @@ fn emit_world_ui_meshes(
                 }));
             }
             let h = meshes.add(std::mem::take(rects).into_mesh());
-            commands
-                .entity(entity)
-                .insert((Mesh3d(h), MeshMaterial3d(rect_mat.as_ref().unwrap().clone())));
+            commands.entity(entity).insert((
+                Mesh3d(h),
+                MeshMaterial3d(rect_mat.as_ref().unwrap().clone()),
+            ));
         } else {
             // Empty authored geometry must replace the previous output too.
             // The no-template fallback belongs to sync_world_ui_canvases and
@@ -435,6 +577,10 @@ fn emit_world_ui_meshes(
 }
 
 #[cfg(test)]
+#[derive(Resource, Default)]
+struct MeshWorkMeasured { visits: usize }
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -521,8 +667,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn settled_canvas_keeps_mesh_and_layout_edit_rebuilds() {
+    fn mesh_app() -> App {
         let mut app = App::new();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
@@ -537,6 +682,168 @@ mod tests {
             .init_resource::<RemSize>()
             .add_systems(Update, emit_world_ui_meshes);
         renzora::text_mesh::ensure_font_asset_tracking(&mut app);
+        app
+    }
+
+    #[test]
+    fn scene_shaped_ui_workload() {
+        let mut app = mesh_app();
+        app.init_resource::<MeshWorkMeasured>();
+        let root = app.world_mut().spawn_empty().id();
+        for _ in 0..1_024 {
+            app.world_mut().spawn((
+                ComputedNode {
+                    size: Vec2::splat(10.0),
+                    ..default()
+                },
+                UiGlobalTransform::default(),
+                BackgroundColor(Color::WHITE),
+                ChildOf(root),
+            ));
+        }
+        let canvas = app
+            .world_mut()
+            .spawn((
+                UiCanvas {
+                    render_space: "world".into(),
+                    render_mode: "mesh".into(),
+                    ..default()
+                },
+                WorldUiPanelLive {
+                    camera: Entity::PLACEHOLDER,
+                    ui_root: root,
+                    image: Handle::default(),
+                },
+            ))
+            .id();
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<MeshWorkMeasured>().visits = 0;
+        let started = std::time::Instant::now();
+        for _ in 0..1_000 {
+            app.update();
+        }
+        eprintln!(
+            "UI scene: 1024 nodes, 1000 settled frames: {:?}, {} node visits",
+            started.elapsed(),
+            app.world().resource::<MeshWorkMeasured>().visits
+        );
+        assert_eq!(app.world().resource::<MeshWorkMeasured>().visits, 0);
+        assert!(app.world().get::<Mesh3d>(canvas).is_some());
+    }
+
+    #[test]
+    fn dirty_canvases_follow_membership_removal_and_reactivation() {
+        use bevy::ecs::entity_disabling::Disabled;
+        let mut app = mesh_app();
+        app.init_resource::<MeshWorkMeasured>();
+        let roots = [
+            app.world_mut().spawn_empty().id(),
+            app.world_mut().spawn_empty().id(),
+        ];
+        let canvases = roots.map(|root| {
+            app.world_mut()
+                .spawn((
+                    UiCanvas {
+                        render_space: "world".into(),
+                        render_mode: "mesh".into(),
+                        ..default()
+                    },
+                    WorldUiPanelLive {
+                        camera: Entity::PLACEHOLDER,
+                        ui_root: root,
+                        image: Handle::default(),
+                    },
+                ))
+                .id()
+        });
+        let leaf = app
+            .world_mut()
+            .spawn((
+                ComputedNode {
+                    size: Vec2::splat(10.0),
+                    ..default()
+                },
+                UiGlobalTransform::default(),
+                BackgroundColor(Color::WHITE),
+                ChildOf(roots[0]),
+            ))
+            .id();
+        app.update();
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvases[0]).is_some());
+        assert!(app.world().get::<Mesh3d>(canvases[1]).is_none());
+        app.world_mut().entity_mut(leaf).insert(ChildOf(roots[1]));
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvases[0]).is_none());
+        assert!(app.world().get::<Mesh3d>(canvases[1]).is_some());
+        app.world_mut().entity_mut(leaf).insert(Disabled);
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvases[1]).is_none());
+        app.world_mut().entity_mut(leaf).remove::<Disabled>();
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvases[1]).is_some());
+        app.world_mut().entity_mut(leaf).remove::<ComputedNode>();
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvases[1]).is_none());
+        // Unrelated UI churn must not walk either canvas.
+        app.update();
+        app.world_mut().resource_mut::<MeshWorkMeasured>().visits = 0;
+        app.world_mut()
+            .spawn((ComputedNode::default(), UiGlobalTransform::default()));
+        app.update();
+        assert_eq!(app.world().resource::<MeshWorkMeasured>().visits, 0);
+    }
+
+    #[test]
+    fn custom_disabling_keeps_mesh_eligibility() {
+        #[derive(Component)]
+        struct Hidden;
+        let mut app = mesh_app();
+        let marker = app.world_mut().register_component::<Hidden>();
+        app.world_mut()
+            .resource_mut::<bevy::ecs::entity_disabling::DefaultQueryFilters>()
+            .register_disabling_component(marker);
+        let root = app
+            .world_mut()
+            .spawn((
+                ComputedNode {
+                    size: Vec2::splat(10.0),
+                    ..default()
+                },
+                UiGlobalTransform::default(),
+                BackgroundColor(Color::WHITE),
+            ))
+            .id();
+        let canvas = app
+            .world_mut()
+            .spawn((
+                UiCanvas {
+                    render_space: "world".into(),
+                    render_mode: "mesh".into(),
+                    ..default()
+                },
+                WorldUiPanelLive {
+                    camera: Entity::PLACEHOLDER,
+                    ui_root: root,
+                    image: Handle::default(),
+                },
+            ))
+            .id();
+        app.update();
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvas).is_some());
+        app.world_mut().entity_mut(root).insert(Hidden);
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvas).is_none());
+        app.world_mut().entity_mut(root).remove::<Hidden>();
+        app.update();
+        assert!(app.world().get::<Mesh3d>(canvas).is_some());
+    }
+
+    #[test]
+    fn settled_canvas_keeps_mesh_and_layout_edit_rebuilds() {
+        let mut app = mesh_app();
         let root = app
             .world_mut()
             .spawn((

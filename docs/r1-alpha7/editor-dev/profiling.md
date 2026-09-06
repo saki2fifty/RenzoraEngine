@@ -510,8 +510,13 @@ wire-format tests compare all shared fields and encoded bytes against owned data
 Custom engine-side backends retain isolated owned fields unless they explicitly
 opt into `ScriptBackend::supports_shared_frame_inputs` and use
 `ScriptContext::frame_inputs()`. Their ability to mutate their own copies remains
-unchanged. Entity-specific child data and initial pass snapshot construction
-remain separate costs; this is not a claim that all context allocation is gone.
+unchanged. Scene-name tables now retain immutable storage across passes. A
+cached query compares ordered entity IDs and Name change ticks; it rebuilds the
+tables on changes, including removals, disabling and duplicate-name order changes.
+No name strings are cloned or hashed on a settled pass. The token scan remains,
+and entity-specific child data and other input construction are separate costs.
+The index is released when no eligible script entities remain, even if script
+execution has stopped. Existing retained snapshots stay immutable.
 
 ## Hidden System Profiler
 
@@ -554,8 +559,10 @@ frames; this is not per-mesh dirty-region caching or a measured FPS improvement.
 Mesh-mode canvases share retained traversal, rectangle and text-entry scratch
 buffers. Label strings are borrowed, and font sources are cloned only when a
 mesh rebuild is needed. Font choice and text alpha participate in the content
-hash. The full layout walk and hash still run; this is allocation reduction,
-not a dirty-canvas scheduler. Headless tests retain all five rectangle buffers
+hash. Component and relationship changes now route to affected mesh canvases;
+settled canvases skip their layout walk and content hash. Typed change queries
+still check component ticks, but unrelated UI changes do not traverse a canvas.
+Headless tests retain all five rectangle buffers
 through 1,000 fills and keep the actual canvas mesh handle across 1,000 stable
 updates before checking a layout edit.
 
@@ -576,6 +583,18 @@ alone would otherwise keep using stale glyph data. Background-only canvases do
 not rebuild for font changes. This refresh is asset-event driven, not a per-frame
 font-byte comparison. The regression replaces real font data under one handle
 and checks that actual glyph geometry changes and then settles again.
+
+The routing includes layout, transform, text/style, child-list and standard
+Disabled changes/removals. New roots, changed canvas settings and pending font
+builds still run. Membership tables only change when tree membership changes.
+Unknown custom disabling filters retain the conservative eligibility walk.
+
+A headless 1,024-node workload over 1,000 settled frames went from 1,025,000
+node visits to zero. Observed test times were 314 ms before and 127–166 ms after;
+these include scheduling/change-query overhead and are not graphical FPS results.
+A 10,000-name, 100-pass workload went from 365 ms rebuilding tables to about 7 ms
+reusing them. Exact timings depend on host load; retained allocations and work
+counts are the regression guarantees.
 
 ## Audio timeline bookkeeping
 

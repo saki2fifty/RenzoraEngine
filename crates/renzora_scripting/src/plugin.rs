@@ -163,6 +163,7 @@ impl Plugin for ScriptingPlugin {
         // what happened before, since the in-tree interpreter's `evict_entity`
         // existed and nothing ever called it.
         app.add_systems(Update, evict_despawned_scripts.in_set(ScriptingSet::Cleanup));
+        app.add_systems(Update, crate::systems::names::release_unused.in_set(ScriptingSet::Cleanup));
 
         // Bridge blueprint lifecycle/cursor ScriptActions (the interpreter only
         // emits ScriptActions; despawn + cursor lock would otherwise be no-ops).

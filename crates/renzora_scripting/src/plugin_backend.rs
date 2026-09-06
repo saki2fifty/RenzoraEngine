@@ -1133,7 +1133,7 @@ mod tests {
             id: 3,
             ..Default::default()
         });
-        frame.found_entities.insert("actor".into(), 42);
+        std::sync::Arc::make_mut(&mut frame.found_entities).insert("actor".into(), 42);
         frame.timers_just_finished.push("alarm".into());
         let frame = std::sync::Arc::new(frame);
         let make_context = || {
