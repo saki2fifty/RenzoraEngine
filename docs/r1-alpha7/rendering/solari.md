@@ -225,6 +225,10 @@ Two things are worth knowing:
   set `shadow_maps_enabled: false` on all lights while Solari is active.
 
   The suppression is applied in the **render world**, to the extracted lights.
+  It takes effect after the current light settings have been copied and before
+  rendering prepares shadow maps, including on the first frame. Turning Solari
+  or suppression off restores each light's authored shadow setting, even when
+  the light has not moved or otherwise changed.
   Your `PointLight` / `DirectionalLight` components are never written, so a scene
   saved while Solari happens to be on doesn't silently persist shadows-off. Turn
   the toggle off if you want to keep raster shadows — for instance to compare

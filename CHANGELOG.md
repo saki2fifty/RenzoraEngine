@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 22:55 UTC
+
+- Fixed a ray-traced lighting startup warning and made shadow suppression respect light settings when switching on or off.
+
 ## September 6, 2026 — 21:56 UTC
 
 - Clarified how to build standalone plugins with the existing settings, avoiding libraries that build successfully but cannot load.

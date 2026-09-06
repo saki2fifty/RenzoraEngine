@@ -51,10 +51,10 @@ use bevy::platform::collections::HashMap;
 use bevy::pbr::{
     extract_lights, DefaultOpaqueRendererMethod, ExtractedDirectionalLight, ExtractedPointLight,
 };
-use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::{ExtractSchedule, RenderApp};
 use bevy::render::render_resource::TextureUsages;
+use bevy::render::sync_world::RenderEntity;
 use bevy::render::view::Msaa;
+use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::solari::realtime::SolariLighting;
 use bevy::solari::scene::RaytracingMesh3d;
 use bevy::solari::SolariPlugins;
@@ -118,11 +118,10 @@ impl Plugin for SolariPlugin {
             (
                 sync_solari_cameras,
                 manage_solari_render_mode,
-                sync_shadow_map_suppression,
+                sync_shadow_map_suppression.after(sync_solari_cameras),
             ),
         );
         app.init_resource::<SuppressShadowMaps>();
-        app.add_plugins(ExtractResourcePlugin::<SuppressShadowMaps>::default());
         // Applied in the render world, to the *extracted* lights, so the main
         // world's light components are never written. See `SuppressShadowMaps`.
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -653,8 +652,8 @@ fn clear_solari_reset(mut cameras: Query<&mut SolariLighting>) {
 /// lighting, and the user hasn't turned the [`SolariGi::suppress_shadow_maps`]
 /// toggle off.
 ///
-/// Extracted to the render world, where [`suppress_shadow_maps`] acts on it.
-#[derive(Resource, Clone, Copy, Default, ExtractResource)]
+/// Read from the main world during extraction by [`suppress_shadow_maps`].
+#[derive(Resource, Default)]
 struct SuppressShadowMaps(bool);
 
 /// Track whether shadow maps should be suppressed, for the render world to read.
@@ -671,8 +670,7 @@ fn sync_shadow_map_suppression(
         && sources
             .iter()
             .any(|gi| gi.enabled && gi.suppress_shadow_maps);
-    // Only write on a change; this resource is extracted every frame and a
-    // needless write would mark it changed for every consumer.
+    // Only write on a change to avoid needless change-detection churn.
     if suppress.0 != want {
         suppress.0 = want;
     }
@@ -693,8 +691,8 @@ fn sync_shadow_map_suppression(
 /// per-light mesh culling, which is a bigger saving — but those components are
 /// serialized, so a scene saved while Solari happened to be on would silently
 /// persist shadows-off and stay broken after Solari was turned back off. The
-/// extracted copies are rebuilt from scratch every frame and never written to
-/// disk, so acting on them is free of that whole class of problem.
+/// extracted copies are never written to disk. Bevy only refreshes changed
+/// lights, so we also restore their authored flags when suppression turns off.
 ///
 /// Solari's own lighting is unaffected: its binder reads colour, illuminance,
 /// transform and sun-disk size from `ExtractedDirectionalLight`, never
@@ -703,24 +701,52 @@ fn sync_shadow_map_suppression(
 /// Note this is global rather than per-camera, in the same way Solari's deferred
 /// renderer method is: while it's on, no camera renders shadow maps.
 fn suppress_shadow_maps(
-    suppress: Res<SuppressShadowMaps>,
-    mut directional: Query<&mut ExtractedDirectionalLight>,
-    mut point: Query<&mut ExtractedPointLight>,
+    mut commands: Commands,
+    suppress: Extract<Res<SuppressShadowMaps>>,
+    directional: Extract<Query<(RenderEntity, &DirectionalLight)>>,
+    point: Extract<Query<(RenderEntity, &PointLight)>>,
+    spot: Extract<Query<(RenderEntity, &SpotLight)>>,
+    mut was_suppressed: Local<bool>,
 ) {
-    if !suppress.0 {
+    // With Solari off, Bevy already owns the correct flags. Only visit lights
+    // once on the transition back, to restore any unchanged extracted copies.
+    if !suppress.0 && !*was_suppressed {
         return;
     }
-    for mut light in &mut directional {
-        if light.shadow_maps_enabled {
-            light.shadow_maps_enabled = false;
-        }
+    *was_suppressed = suppress.0;
+    // ExtractSchedule deliberately does not apply deferred commands. Queue
+    // these edits after extract_lights so its insertions cannot overwrite them,
+    // and so first-frame lights exist before we access their render copies.
+    // Reading the main-world resource also avoids waiting for an extracted copy
+    // that is itself still queued for insertion on the first frame.
+    for (entity, light) in &directional {
+        let enabled = light.shadow_maps_enabled && !suppress.0;
+        commands.queue(move |world: &mut World| {
+            if let Some(mut light) = world.get_mut::<ExtractedDirectionalLight>(entity) {
+                if light.shadow_maps_enabled != enabled {
+                    light.shadow_maps_enabled = enabled;
+                }
+            }
+        });
     }
-    // Spot lights extract as `ExtractedPointLight` with `spot_light_angles` set,
-    // so this covers them too.
-    for mut light in &mut point {
-        if light.shadow_maps_enabled {
-            light.shadow_maps_enabled = false;
-        }
+    // Both source kinds share the same extracted component. Read authored flags
+    // even on unchanged lights; otherwise disabling suppression leaves them off.
+    for (entity, authored) in point
+        .iter()
+        .map(|(entity, light)| (entity, light.shadow_maps_enabled))
+        .chain(
+            spot.iter()
+                .map(|(entity, light)| (entity, light.shadow_maps_enabled)),
+        )
+    {
+        let enabled = authored && !suppress.0;
+        commands.queue(move |world: &mut World| {
+            if let Some(mut light) = world.get_mut::<ExtractedPointLight>(entity) {
+                if light.shadow_maps_enabled != enabled {
+                    light.shadow_maps_enabled = enabled;
+                }
+            }
+        });
     }
 }
 
@@ -1475,15 +1501,198 @@ mod tests {
     }
 
     #[test]
+    fn shadow_suppression_survives_real_extraction_and_restores_unchanged_lights() {
+        use bevy::ecs::schedule::ScheduleLabel;
+        use bevy::light::{DirectionalLightShadowMap, PointLightShadowMap};
+        use bevy::render::extract_plugin::ExtractPlugin;
+        use bevy::render::sync_world::SyncToRenderWorld;
+        use bevy::render::Render;
+
+        // Real Bevy extraction and deferred-command application, without a GPU.
+        let mut app = App::new();
+        app.add_plugins(ExtractPlugin::default());
+        app.init_resource::<PointLightShadowMap>();
+        app.init_resource::<DirectionalLightShadowMap>();
+        app.insert_resource(SuppressShadowMaps(true));
+        let render = app.sub_app_mut(RenderApp);
+        render.update_schedule = Some(Render.intern());
+        render.add_systems(
+            ExtractSchedule,
+            (extract_lights, suppress_shadow_maps.after(extract_lights)),
+        );
+        let directional = app
+            .world_mut()
+            .spawn((
+                DirectionalLight {
+                    shadow_maps_enabled: true,
+                    ..default()
+                },
+                SyncToRenderWorld,
+            ))
+            .id();
+        let point = app
+            .world_mut()
+            .spawn((
+                PointLight {
+                    shadow_maps_enabled: true,
+                    ..default()
+                },
+                SyncToRenderWorld,
+            ))
+            .id();
+        let spot = app
+            .world_mut()
+            .spawn((
+                SpotLight {
+                    shadow_maps_enabled: true,
+                    ..default()
+                },
+                SyncToRenderWorld,
+            ))
+            .id();
+        for entity in [directional, point, spot] {
+            app.world_mut()
+                .entity_mut(entity)
+                .insert(ViewVisibility::VISIBLE);
+        }
+        let assert_flags = |app: &App, expected: bool| {
+            let render = app.sub_app(RenderApp).world();
+            let id = |entity| {
+                app.world()
+                    .get::<RenderEntity>(entity)
+                    .expect("synced light")
+                    .id()
+            };
+            assert_eq!(
+                render
+                    .get::<ExtractedDirectionalLight>(id(directional))
+                    .expect("directional extracted")
+                    .shadow_maps_enabled,
+                expected
+            );
+            for entity in [point, spot] {
+                assert_eq!(
+                    render
+                        .get::<ExtractedPointLight>(id(entity))
+                        .expect("point/spot extracted")
+                        .shadow_maps_enabled,
+                    expected
+                );
+            }
+        };
+
+        // No render-world resource exists on frame one. All three newly
+        // extracted lights must nevertheless be suppressed on that very frame.
+        app.update();
+        assert_flags(&app, false);
+        app.update();
+        assert_flags(&app, false);
+
+        // Only the setting changes: Bevy does not re-extract unchanged lights.
+        app.world_mut().resource_mut::<SuppressShadowMaps>().0 = false;
+        app.update();
+        assert_flags(&app, true);
+        app.world_mut().resource_mut::<SuppressShadowMaps>().0 = true;
+        app.update();
+        assert_flags(&app, false);
+
+        // A changed light queues a replacement; suppression must run after it.
+        app.world_mut()
+            .get_mut::<PointLight>(point)
+            .expect("point")
+            .intensity += 1.0;
+        app.update();
+        assert_flags(&app, false);
+        assert!(
+            app.world()
+                .get::<DirectionalLight>(directional)
+                .expect("directional")
+                .shadow_maps_enabled
+        );
+        assert!(
+            app.world()
+                .get::<PointLight>(point)
+                .expect("point")
+                .shadow_maps_enabled
+        );
+        assert!(
+            app.world()
+                .get::<SpotLight>(spot)
+                .expect("spot")
+                .shadow_maps_enabled
+        );
+
+        // Authored shadows-off must not be changed to on when Solari stops.
+        app.world_mut()
+            .get_mut::<DirectionalLight>(directional)
+            .expect("directional")
+            .shadow_maps_enabled = false;
+        app.world_mut()
+            .get_mut::<PointLight>(point)
+            .expect("point")
+            .shadow_maps_enabled = false;
+        app.world_mut()
+            .get_mut::<SpotLight>(spot)
+            .expect("spot")
+            .shadow_maps_enabled = false;
+        app.update();
+        app.world_mut().resource_mut::<SuppressShadowMaps>().0 = false;
+        app.update();
+        assert_flags(&app, false);
+
+        // With suppression still off, authored changes remain Bevy's job.
+        app.world_mut()
+            .get_mut::<PointLight>(point)
+            .expect("point")
+            .shadow_maps_enabled = true;
+        app.update();
+        let render_point = app
+            .world()
+            .get::<RenderEntity>(point)
+            .expect("synced point")
+            .id();
+        assert!(app
+            .sub_app(RenderApp)
+            .world()
+            .get::<ExtractedPointLight>(render_point)
+            .expect("point extracted")
+            .shadow_maps_enabled);
+
+        // Hidden lights lose their extracted component; queued suppression must
+        // tolerate that, and a newly visible light must be suppressed again.
+        app.world_mut().resource_mut::<SuppressShadowMaps>().0 = true;
+        app.world_mut()
+            .entity_mut(point)
+            .insert(ViewVisibility::HIDDEN);
+        app.update();
+        assert!(app
+            .sub_app(RenderApp)
+            .world()
+            .get::<ExtractedPointLight>(render_point)
+            .is_none());
+        app.world_mut()
+            .entity_mut(point)
+            .insert(ViewVisibility::VISIBLE);
+        app.update();
+        assert_flags(&app, false);
+    }
+
+    #[test]
     fn shadow_suppression_needs_solari_active_and_the_toggle_on() {
-        // Mirrors `sync_shadow_map_suppression`'s condition. Solari being active
-        // is not enough on its own: the toggle exists so raster shadows can be
-        // kept while comparing backends.
+        // Exercise the actual system, not a duplicate of its condition.
         let want = |active: bool, sources: &[SolariGi]| {
-            active
-                && sources
-                    .iter()
-                    .any(|gi| gi.enabled && gi.suppress_shadow_maps)
+            let mut world = World::new();
+            world.init_resource::<SuppressShadowMaps>();
+            if active {
+                world.spawn(SolariLighting::default());
+            }
+            for source in sources {
+                world.spawn(source.clone());
+            }
+            world
+                .run_system_cached(sync_shadow_map_suppression)
+                .expect("valid suppression inputs");
+            world.resource::<SuppressShadowMaps>().0
         };
         let on = SolariGi::default();
         let toggled_off = SolariGi {
