@@ -247,7 +247,6 @@ pub fn mark_emitting_entities(
 pub fn adopt_backend(
     registered: Option<Res<PluginAudioBackend>>,
     mut link: ResMut<AudioLink>,
-    mut mixer: ResMut<MixerState>,
 ) {
     let Some(registered) = registered else { return };
 
@@ -261,10 +260,8 @@ pub fn adopt_backend(
                         "[audio] backend `{}` on `{}` at {} Hz",
                         entry.name, info.device, info.sample_rate
                     );
-                    // Touch the mixer so the board is pushed to the fresh
-                    // backend on the same frame, rather than whenever someone
-                    // next moves a fader.
-                    mixer.set_changed();
+                    // The link generation makes board publication refresh;
+                    // adoption does not change the authored mixer settings.
                 }
                 Ok(None) => warn!("[audio] backend `{}` did not answer init", entry.name),
                 Err(e) => {
@@ -288,24 +285,32 @@ pub fn adopt_backend(
 /// Compared rather than gated on `is_changed()`, because the meters are written
 /// into `MixerState` every frame and that marks it changed every frame — see
 /// [`audio_update`]. Peak levels are not part of the board, so an equal snapshot
-/// means there is nothing to send.
+/// means there is nothing to send within the same backend generation.
 pub fn sync_mixer_to_backend(
     mixer: Res<MixerState>,
     mut link: ResMut<AudioLink>,
-    mut sent: Local<Vec<BusState>>,
+    mut sent: Local<SentMixerBoard>,
 ) {
     if !link.is_active() {
         return;
     }
-    let current = board(&mixer);
-    if *sent == current {
+    if sent.generation == Some(link.generation()) && board_matches(&mixer, &sent.buses) {
         return;
     }
+    let current = board(&mixer);
     if let Err(e) = link.set_buses(&current) {
         warn!("[audio] could not send the bus graph: {e}");
         return;
     }
-    *sent = current;
+    sent.buses = current;
+    sent.generation = Some(link.generation());
+}
+
+/// Last successful mixer publication, scoped to an adopted backend generation.
+#[derive(Default)]
+pub struct SentMixerBoard {
+    generation: Option<u64>,
+    buses: Vec<BusState>,
 }
 
 /// The mixer as the backend sees it: built-ins in their contractual order, then
@@ -314,26 +319,44 @@ pub fn sync_mixer_to_backend(
 /// Master first because the backend's own master is index 0 and the two lists
 /// have to line up for meters to land on the right strip.
 pub fn board(mixer: &MixerState) -> Vec<BusState> {
-    let entry = |key: &str, strip: &crate::mixer::ChannelStrip| BusState {
-        key: key.to_string(),
-        gain: strip.volume as f32,
-        pan: strip.panning as f32,
-        muted: strip.muted,
-        soloed: strip.soloed,
-    };
-    let mut out = vec![
-        entry("Master", &mixer.master),
-        entry("Sfx", &mixer.sfx),
-        entry("Music", &mixer.music),
-        entry("Ambient", &mixer.ambient),
-    ];
-    out.extend(
+    board_strips(mixer)
+        .map(|(key, strip)| BusState {
+            key: key.to_string(),
+            gain: strip.volume as f32,
+            pan: strip.panning as f32,
+            muted: strip.muted,
+            soloed: strip.soloed,
+        })
+        .collect()
+}
+
+fn board_strips(mixer: &MixerState) -> impl Iterator<Item = (&str, &crate::mixer::ChannelStrip)> {
+    [
+        ("Master", &mixer.master),
+        ("Sfx", &mixer.sfx),
+        ("Music", &mixer.music),
+        ("Ambient", &mixer.ambient),
+    ]
+    .into_iter()
+    .chain(
         mixer
             .custom_buses
             .iter()
-            .map(|b| entry(&b.key, &b.strip)),
-    );
-    out
+            .map(|bus| (bus.key.as_str(), &bus.strip)),
+    )
+}
+
+fn board_matches(mixer: &MixerState, sent: &[BusState]) -> bool {
+    // Compare the wire values before allocating their owned strings/vector.
+    // Ordinary float equality intentionally preserves BusState's NaN behavior.
+    sent.len() == 4 + mixer.custom_buses.len()
+        && board_strips(mixer).zip(sent).all(|((key, strip), old)| {
+            old.key == key
+                && old.gain == strip.volume as f32
+                && old.pan == strip.panning as f32
+                && old.muted == strip.muted
+                && old.soloed == strip.soloed
+        })
 }
 
 /// Which scene camera the ears default to: the one marked `DefaultCamera`, else
@@ -476,6 +499,127 @@ mod tests {
     use super::*;
     use crate::mixer::ChannelStrip;
 
+    #[test]
+    fn mixer_resends_on_backend_adoption_and_retries_failed_sends() {
+        use renzora_plugin::sys::{AudioCall, AudioOp, AudioStatus};
+        use renzora_plugin::wire::Reader;
+        #[derive(Default)]
+        struct Backend {
+            boards: Vec<Vec<BusState>>,
+            fail: bool,
+        }
+        unsafe extern "C" fn entry(call: *const AudioCall) -> AudioStatus {
+            // SAFETY: AudioLink supplies a live call and this test keeps its
+            // boxed Backend alive until after the app and all calls finish.
+            let call = unsafe { &*call };
+            // SAFETY: the installed state points to that Backend; app.update
+            // and test assertions do not access it concurrently.
+            let backend = unsafe { &mut *(call.state as *mut Backend) };
+            if call.op != AudioOp::SetBuses {
+                return AudioStatus::UnknownOp;
+            }
+            // SAFETY: the link owns the payload for this complete call.
+            let bytes = unsafe { call.payload.as_slice() };
+            let Ok(board) = renzora_plugin::audio::read_buses(&mut Reader::new(bytes)) else {
+                return AudioStatus::Error;
+            };
+            backend.boards.push(board);
+            if backend.fail {
+                AudioStatus::Error
+            } else {
+                AudioStatus::Ok
+            }
+        }
+        let mut backend = Box::<Backend>::default();
+        let pointer = backend.as_mut() as *mut Backend as usize;
+        let mut app = App::new();
+        app.init_resource::<MixerState>()
+            .init_resource::<AudioLink>()
+            .add_systems(Update, sync_mixer_to_backend);
+        app.world_mut().resource_mut::<MixerState>().add_bus();
+        app.world_mut()
+            .resource_mut::<AudioLink>()
+            .adopt("first".into(), pointer, entry);
+        app.update();
+        assert_eq!(backend.boards.len(), 1);
+        assert_eq!(backend.boards[0].len(), 5);
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(backend.boards.len(), 1);
+        // Even a same-address adoption must receive its own initial board.
+        app.world_mut()
+            .resource_mut::<AudioLink>()
+            .adopt("replacement".into(), pointer, entry);
+        app.update();
+        assert_eq!(backend.boards.len(), 2);
+        backend.fail = true;
+        app.world_mut().resource_mut::<MixerState>().master.muted = true;
+        app.update();
+        app.update();
+        assert_eq!(backend.boards.len(), 4);
+        backend.fail = false;
+        app.update();
+        app.update();
+        assert_eq!(backend.boards.len(), 5);
+        assert!(backend.boards.last().unwrap()[0].muted);
+        app.world_mut().resource_mut::<AudioLink>().release();
+        app.update();
+        assert_eq!(backend.boards.len(), 5);
+        app.world_mut()
+            .resource_mut::<AudioLink>()
+            .adopt("returned".into(), pointer, entry);
+        app.update();
+        assert_eq!(backend.boards.len(), 6);
+        assert!(backend.boards.last().unwrap()[0].muted);
+    }
+
+    #[test]
+    fn settled_mixer_comparison_avoids_board_builds_and_preserves_wire_equality() {
+        let mut mixer = MixerState::default();
+        mixer.add_bus();
+        mixer.add_bus();
+        assert!(!board_matches(&mixer, &[]));
+        let sent = board(&mixer);
+        let mut builds = 0;
+        for frame in 0..1000 {
+            mixer.master.peak_level = frame as f32 / 1000.0;
+            if !board_matches(&mixer, &sent) {
+                builds += 1;
+                let _ = board(&mixer);
+            }
+        }
+        assert_eq!(builds, 0);
+        for edit in 0..8 {
+            let mut changed = MixerState::default();
+            changed.add_bus();
+            changed.add_bus();
+            match edit {
+                0 => changed.sfx.volume = 0.25,
+                1 => changed.music.panning = 0.5,
+                2 => changed.ambient.muted = true,
+                3 => changed.master.soloed = true,
+                4 => changed.custom_buses[0].key.push('x'),
+                5 => changed.custom_buses.swap(0, 1),
+                6 => {
+                    changed.custom_buses.pop();
+                }
+                _ => {
+                    changed.add_bus();
+                }
+            }
+            assert!(!board_matches(&changed, &sent));
+            assert_eq!(board_matches(&changed, &sent), board(&changed) == sent);
+        }
+        mixer.rename_bus(0, "Footsteps");
+        assert!(board_matches(&mixer, &sent));
+        for value in [0.0, -0.0, f64::INFINITY, f64::NAN] {
+            mixer.master.volume = value;
+            let sent = board(&mixer);
+            assert_eq!(board_matches(&mixer, &sent), board(&mixer) == sent);
+        }
+    }
+
     /// The ears default to the same camera play mode renders through, so the
     /// two can never disagree about which viewpoint the scene is heard from.
     #[test]
@@ -518,12 +662,14 @@ mod tests {
 
     #[test]
     fn the_board_carries_strip_state() {
-        let mut mixer = MixerState::default();
-        mixer.music = ChannelStrip {
-            volume: 0.25,
-            panning: -0.5,
-            muted: true,
-            soloed: true,
+        let mixer = MixerState {
+            music: ChannelStrip {
+                volume: 0.25,
+                panning: -0.5,
+                muted: true,
+                soloed: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let board = board(&mixer);

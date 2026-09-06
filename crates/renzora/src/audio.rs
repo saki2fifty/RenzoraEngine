@@ -51,6 +51,7 @@ struct Loaded {
 #[derive(Resource, Default)]
 pub struct AudioLink {
     backend: Option<Loaded>,
+    generation: u64,
     /// What the backend said it can do. `None` until [`Self::init`] succeeds.
     info: Option<BackendInfo>,
     next_sound: u64,
@@ -81,6 +82,11 @@ pub struct VoiceId(pub u64);
 pub struct CaptureId(pub u64);
 
 impl AudioLink {
+    /// Adoption/release generation for caches of successfully sent backend state.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Is a backend loaded and working?
     pub fn is_active(&self) -> bool {
         self.backend.is_some() && !self.poisoned
@@ -107,6 +113,7 @@ impl AudioLink {
 
     /// Adopt a backend the plugin host registered.
     pub fn adopt(&mut self, name: String, state: usize, entry: sys::AudioEntry) {
+        self.generation = self.generation.wrapping_add(1);
         self.backend = Some(Loaded { name, state, entry });
         self.info = None;
         self.poisoned = false;
@@ -115,6 +122,7 @@ impl AudioLink {
     /// Forget the backend. Called when its plugin is unloaded — both `entry` and
     /// `state` point into an image about to be unmapped.
     pub fn release(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.backend = None;
         self.info = None;
     }

@@ -656,6 +656,20 @@ custom query-disabling components are registered, ordering retains its original
 eligibility scan as a compatibility fallback; the zero-parent-work measurement
 applies to the standard configuration, not that fallback.
 
+## Mixer bus comparison
+
+The audio mixer compares borrowed bus keys and backend-facing values before
+building an owned bus list. Stable settings no longer allocate a vector and
+copy every bus key just for equality testing. Actual edits still build/send the
+board, and a failed send still retries. The successful-board cache also records
+the AudioLink adoption/release generation, so a newly adopted backend receives
+the full settings even when their values are unchanged. Meter values and display names remain
+outside that wire comparison. A 1,000-comparison regression with changing meters
+requires zero new boards; edits, custom-bus order/count, NaN and signed-zero
+semantics are checked against the previous owned-board equality.
+An actual link-boundary test checks one send across 1,000 settled updates,
+same-address re-adoption, failed-send retries and release/re-adoption.
+
 ## Startup GPU capability probe
 
 Ray-tracing availability and the integrated-GPU hint share one cached temporary

@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 08:19 UTC
+
+- Avoided rebuilding unchanged audio mixer bus lists while keeping live meters and mixer edits responsive.
+- Resent the current mixer settings when an audio backend is newly adopted, even if no fader has changed.
+
 ## September 6, 2026 — 08:12 UTC
 
 - Shared common frame data across built-in script executions, avoiding repeated input copies while preserving existing custom backends and script behavior.
