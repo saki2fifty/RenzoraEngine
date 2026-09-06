@@ -8,6 +8,7 @@ default = ["editor"]
 editor = []
 
 [dependencies]
+renzora_mesh_primitives = { path = "../renzora_mesh_primitives" }
 renzora_undo = { path = "../renzora_undo" }
 renzora_editor_framework = { path = "../renzora_editor_framework" }
 bevy = { workspace = true }

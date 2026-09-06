@@ -70,6 +70,7 @@ terrain = ["dep:renzora_terrain"]
 physics = ["dep:renzora_physics", "dep:avian3d", "dep:avian2d"]
 
 [dependencies]
+renzora_mesh_primitives = { path = "../renzora_mesh_primitives" }
 renzora_macros = { path = "../renzora_macros" }
 bevy = { workspace = true }
 renzora = { path = "../renzora", default-features = false }

@@ -6,6 +6,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 
 - Kept script components attached during execution and shared their read-handler name lookup, reducing repeated structural changes and copying.
 - Stopped the hidden System Profiler from refreshing its view data; opening it resumes updates.
+- Consolidated duplicated mesh generators so the editor and game use one implementation, preserving existing shapes and import paths.
 
 ## September 6, 2026 — 05:46 UTC
 
