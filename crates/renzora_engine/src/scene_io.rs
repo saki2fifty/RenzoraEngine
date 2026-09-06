@@ -2141,59 +2141,124 @@ pub fn on_sprite_custom_size_inserted(
 /// Derive `Sprite.rect` from a [`renzora::core::SpriteSheet`] grid and the
 /// loaded image's pixel dimensions.
 ///
-/// Runs every frame (editor and runtime) rather than on `Changed<SpriteSheet>`
-/// because the rect depends on the *image* as much as the grid: the texture
-/// loads asynchronously and can be swapped via `SpriteImagePath`, neither of
-/// which touches `SpriteSheet`. The write is compare-first so an idle sprite
-/// doesn't trip `Changed<Sprite>` (render re-extraction, the custom-size
-/// mirror) every frame.
+/// Changed inputs/outputs, pending images and image asset events cover both
+/// authored edits and asynchronous loading. The write stays compare-first so
+/// settling does not trigger render extraction or the custom-size mirror.
 #[cfg(feature = "render_2d")]
 pub fn apply_sprite_sheet_crop(
     images: Res<Assets<Image>>,
-    mut sprites: Query<(&renzora::core::SpriteSheet, &mut bevy::sprite::Sprite)>,
+    mut sprites: ParamSet<(Query<SheetCropData, SheetCropDirty>, Query<SheetCropData>)>,
+    mut events: MessageReader<AssetEvent<Image>>,
+    mut dirty_images: Local<std::collections::HashSet<AssetId<Image>>>,
+    mut commands: Commands,
 ) {
-    for (sheet, mut sprite) in &mut sprites {
-        let hframes = sheet.hframes.max(1);
-        let vframes = sheet.vframes.max(1);
-        let desired = if hframes == 1 && vframes == 1 {
-            // 1×1 grid = the whole image; leave the rect unset so the sprite
-            // behaves exactly like one without a SpriteSheet (native sizing
-            // keeps tracking the image if it's swapped).
-            None
-        } else {
-            // Image not loaded yet → keep the current rect and retry next
-            // frame once the asset lands.
-            let Some(image) = images.get(&sprite.image) else {
-                continue;
-            };
-            let size = image.size_f32();
-            let frame_w = size.x / hframes as f32;
-            let frame_h = size.y / vframes as f32;
-            // Wrap rather than clamp so a linear 0→N animation track loops
-            // cleanly through the sheet.
-            let idx = sheet.frame % (hframes * vframes);
-            let col = (idx % hframes) as f32;
-            let row = (idx / hframes) as f32;
-            // Inset the rect by a whisker on every side. At a fractional
-            // camera zoom, the interpolated UV at a quad edge can overshoot
-            // the cell boundary by float error; with nearest sampling that
-            // one-boundary miss fetches the NEIGHBOURING cell's edge texel,
-            // painting a 1px line down the whole tile edge (colored bleed —
-            // or a "gap" when the neighbour texel is transparent). 0.05px is
-            // far above the interpolation error and far below a visible
-            // sampling shift.
-            const EDGE_INSET: f32 = 0.05;
-            Some(Rect::new(
-                col * frame_w + EDGE_INSET,
-                row * frame_h + EDGE_INSET,
-                (col + 1.0) * frame_w - EDGE_INSET,
-                (row + 1.0) * frame_h - EDGE_INSET,
-            ))
-        };
-        if sprite.rect != desired {
-            sprite.rect = desired;
+    dirty_images.clear();
+    for event in events.read() {
+        if let AssetEvent::Added { id }
+        | AssetEvent::Modified { id }
+        | AssetEvent::LoadedWithDependencies { id } = event
+        {
+            dirty_images.insert(*id);
         }
     }
+    let mut update = |(entity, sheet, mut sprite, pending): (
+        Entity,
+        Ref<renzora::SpriteSheet>,
+        Mut<bevy::sprite::Sprite>,
+        bool,
+    )| {
+        if update_sheet_rect(&sheet, &mut sprite, &images) {
+            if pending {
+                commands.entity(entity).remove::<SpriteSheetCropPending>();
+            }
+        } else if !pending {
+            commands.entity(entity).insert(SpriteSheetCropPending);
+        }
+    };
+    if dirty_images.is_empty() {
+        for item in &mut sprites.p0() {
+            update(item);
+        }
+    } else {
+        for item in &mut sprites.p1() {
+            if item.1.is_changed()
+                || item.2.is_changed()
+                || item.3
+                || dirty_images.contains(&item.2.image.id())
+            {
+                update(item);
+            }
+        }
+    }
+}
+
+/// A sprite-sheet crop waiting for its image to become available.
+#[cfg(feature = "render_2d")]
+#[derive(Component)]
+pub struct SpriteSheetCropPending;
+
+#[cfg(feature = "render_2d")]
+type SheetCropData<'a> = (
+    Entity,
+    Ref<'a, renzora::SpriteSheet>,
+    &'a mut bevy::sprite::Sprite,
+    Has<SpriteSheetCropPending>,
+);
+
+#[cfg(feature = "render_2d")]
+type SheetCropDirty = Or<(
+    Changed<renzora::SpriteSheet>,
+    Changed<bevy::sprite::Sprite>,
+    With<SpriteSheetCropPending>,
+)>;
+
+#[cfg(feature = "render_2d")]
+fn update_sheet_rect(
+    sheet: &renzora::SpriteSheet,
+    sprite: &mut Mut<bevy::sprite::Sprite>,
+    images: &Assets<Image>,
+) -> bool {
+    let hframes = sheet.hframes.max(1);
+    let vframes = sheet.vframes.max(1);
+    let desired = if hframes == 1 && vframes == 1 {
+        // 1×1 grid = the whole image; leave the rect unset so the sprite
+        // behaves exactly like one without a SpriteSheet (native sizing
+        // keeps tracking the image if it's swapped).
+        None
+    } else {
+        // Image not loaded yet → keep the current rect and retry next
+        // frame once the asset lands.
+        let Some(image) = images.get(&sprite.image) else {
+            return false;
+        };
+        let size = image.size_f32();
+        let frame_w = size.x / hframes as f32;
+        let frame_h = size.y / vframes as f32;
+        // Wrap rather than clamp so a linear 0→N animation track loops
+        // cleanly through the sheet.
+        let idx = sheet.frame % (hframes * vframes);
+        let col = (idx % hframes) as f32;
+        let row = (idx / hframes) as f32;
+        // Inset the rect by a whisker on every side. At a fractional
+        // camera zoom, the interpolated UV at a quad edge can overshoot
+        // the cell boundary by float error; with nearest sampling that
+        // one-boundary miss fetches the NEIGHBOURING cell's edge texel,
+        // painting a 1px line down the whole tile edge (colored bleed —
+        // or a "gap" when the neighbour texel is transparent). 0.05px is
+        // far above the interpolation error and far below a visible
+        // sampling shift.
+        const EDGE_INSET: f32 = 0.05;
+        Some(Rect::new(
+            col * frame_w + EDGE_INSET,
+            row * frame_h + EDGE_INSET,
+            (col + 1.0) * frame_w - EDGE_INSET,
+            (row + 1.0) * frame_h - EDGE_INSET,
+        ))
+    };
+    if sprite.rect != desired {
+        sprite.rect = desired;
+    }
+    true
 }
 
 #[cfg(feature = "render_2d")]
@@ -2279,7 +2344,13 @@ pub fn apply_y_sort(
 pub fn on_sprite_sheet_removed(
     trigger: On<Remove, renzora::core::SpriteSheet>,
     mut sprites: Query<&mut bevy::sprite::Sprite>,
+    mut commands: Commands,
 ) {
+    // The same observer runs during despawn, when deferred removal may find
+    // that the entity is already gone.
+    commands
+        .entity(trigger.entity)
+        .try_remove::<SpriteSheetCropPending>();
     if let Ok(mut sprite) = sprites.get_mut(trigger.entity) {
         sprite.rect = None;
     }
@@ -3372,6 +3443,196 @@ mod settled_sprite_tests {
 
     #[derive(Component)]
     struct Hidden;
+
+    #[derive(Resource, Default)]
+    struct SheetVisits(usize);
+
+    fn count_sheets(query: Query<(), SheetCropDirty>, mut count: ResMut<SheetVisits>) {
+        count.0 += query.iter().count();
+    }
+
+    #[test]
+    fn sheets_handle_late_images_replacement_edits_and_reactivation() {
+        use bevy::ecs::entity_disabling::Disabled;
+        use bevy::render::render_resource::Extent3d;
+        use bevy::sprite::Sprite;
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<SheetVisits>()
+            .add_message::<AssetEvent<Image>>()
+            .add_observer(on_sprite_sheet_removed)
+            .add_systems(
+                Update,
+                (
+                    refresh_reactivated_components::<renzora::SpriteSheet>,
+                    count_sheets,
+                    apply_sprite_sheet_crop,
+                )
+                    .chain(),
+            );
+        let image = app.world().resource::<Assets<Image>>().reserve_handle();
+        let entity = app
+            .world_mut()
+            .spawn((
+                renzora::SpriteSheet {
+                    hframes: 2,
+                    vframes: 1,
+                    frame: 0,
+                },
+                Sprite {
+                    image: image.clone(),
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+        assert!(app.world().get::<SpriteSheetCropPending>(entity).is_some());
+        let make_image = |width| {
+            let mut image = Image::default();
+            image.resize(Extent3d {
+                width,
+                height: 16,
+                depth_or_array_layers: 1,
+            });
+            image
+        };
+        // No synthetic message: pending work must see an image that becomes
+        // available before the asset event publisher runs.
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(image.id(), make_image(32))
+            .unwrap();
+        app.update();
+        assert!(app.world().get::<SpriteSheetCropPending>(entity).is_none());
+        assert_eq!(
+            app.world().get::<Sprite>(entity).unwrap().rect,
+            Some(Rect::new(0.05, 0.05, 15.95, 15.95))
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        let before = app.world().resource::<SheetVisits>().0;
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<SheetVisits>().0, before);
+        app.world_mut()
+            .get_mut::<renzora::SpriteSheet>(entity)
+            .unwrap()
+            .frame = 1;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .min
+                .x,
+            16.05
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(image.id(), make_image(64))
+            .unwrap();
+        app.world_mut()
+            .write_message(AssetEvent::<Image>::Modified { id: image.id() });
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .min
+                .x,
+            32.05
+        );
+        let replacement = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(make_image(16));
+        app.world_mut().get_mut::<Sprite>(entity).unwrap().image = replacement;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .min
+                .x,
+            8.05
+        );
+        app.world_mut().get_mut::<Sprite>(entity).unwrap().rect = None;
+        app.update();
+        assert!(app.world().get::<Sprite>(entity).unwrap().rect.is_some());
+        app.world_mut().entity_mut(entity).insert(Disabled);
+        app.world_mut()
+            .get_mut::<renzora::SpriteSheet>(entity)
+            .unwrap()
+            .frame = 0;
+        let active_image = app.world().get::<Sprite>(entity).unwrap().image.id();
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(active_image, make_image(48))
+            .unwrap();
+        app.world_mut()
+            .write_message(AssetEvent::<Image>::Modified { id: active_image });
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .get::<Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .min
+                .x,
+            8.05
+        );
+        app.world_mut().entity_mut(entity).remove::<Disabled>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .min
+                .x,
+            0.05
+        );
+        assert_eq!(
+            app.world()
+                .get::<Sprite>(entity)
+                .unwrap()
+                .rect
+                .unwrap()
+                .max
+                .x,
+            23.95
+        );
+        app.world_mut()
+            .get_mut::<renzora::SpriteSheet>(entity)
+            .unwrap()
+            .hframes = 1;
+        app.update();
+        assert_eq!(app.world().get::<Sprite>(entity).unwrap().rect, None);
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(SpriteSheetCropPending);
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<renzora::SpriteSheet>();
+        app.world_mut().flush();
+        assert!(app.world().get::<SpriteSheetCropPending>(entity).is_none());
+        assert_eq!(app.world().get::<Sprite>(entity).unwrap().rect, None);
+    }
 
     #[derive(Resource, Default)]
     struct Visits(usize, usize);

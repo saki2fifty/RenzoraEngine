@@ -385,7 +385,14 @@ impl Plugin for RuntimePlugin {
             // `SpriteSheet` grid + loaded image size. Runs in both editor and
             // runtime so a frame animated by the animation panel plays back
             // identically in the exported game.
-            app.add_systems(Update, scene_io::apply_sprite_sheet_crop);
+            app.add_systems(
+                Update,
+                (
+                    refresh_reactivated_components::<renzora::SpriteSheet>,
+                    scene_io::apply_sprite_sheet_crop,
+                )
+                    .chain(),
+            );
             app.add_observer(scene_io::on_sprite_sheet_removed);
             // Multi-tile "object" cropping: derive `Sprite.rect` from the
             // persisted `SpriteAtlasRegion` block so a tree/house stamped as a

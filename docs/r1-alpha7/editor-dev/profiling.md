@@ -573,7 +573,15 @@ changed settings, local transforms or propagated global transforms. Including
 the output components preserves repair after another system edits those outputs.
 A headless test sees no additional eligible entries across 1,000 settled frames
 and verifies edits/movement. Bevy still evaluates change filters; this is not an
-event-only index. Sprite-sheet image-dependent cropping is unchanged.
+event-only index.
+
+Sprite-sheet cropping now uses changed sheet/sprite inputs, a pending-image
+marker, and image-added/modified/loaded messages. Missing images keep their old
+crop and retry; settled sheets leave the ordinary crop query. Image-event frames
+inspect handles to find affected sprites. A 1,000-frame headless regression
+checks zero further eligible crop entries after settling, late image availability,
+dimension changes, handle replacement, frame edits, output repair, reactivation
+after expired events, 1×1 reset and removal of the pending marker.
 
 Atlas regions, Y-sort, tile-object baking and tileset sampling also refresh on
 reactivation. A shared removal reader marks the authored component changed when

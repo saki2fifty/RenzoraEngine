@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 07:59 UTC
+
+- Stopped recalculating unchanged sprite-sheet crops while preserving late image loading, image replacement, frame edits, and re-enabled objects.
+
 ## September 6, 2026 — 07:56 UTC
 
 - Reused one startup graphics capability check for ray tracing and integrated-graphics hints, and corrected stale runtime architecture descriptions.
