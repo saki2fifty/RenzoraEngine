@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 13:37 UTC
+
+- World-space UI no longer leaves an old background visible after its last background is removed, made transparent, or reduced to zero size.
+
 ## September 6, 2026 — 13:27 UTC
 
 - Fixed minimal runtime builds failing on optional scripting helpers, without changing normal editor scripting.

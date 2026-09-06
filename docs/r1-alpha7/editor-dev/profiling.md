@@ -559,6 +559,15 @@ not a dirty-canvas scheduler. Headless tests retain all five rectangle buffers
 through 1,000 fills and keep the actual canvas mesh handle across 1,000 stable
 updates before checking a layout edit.
 
+Removing the last visible background, making it fully transparent, or reducing
+its layout to zero size now clears the old panel background mesh and material.
+Restoring a background rebuilds it normally. The canvas is not hidden: text
+uses separate child meshes, and the dark surface for a canvas without a template
+remains owned by the panel synchronizer. Lifecycle tests cover all three empty
+background transitions, repeated empty frames, restoration and fallback
+preservation. Font-asset byte changes with the same font source remain a
+separate invalidation limitation.
+
 ## Audio timeline bookkeeping
 
 The playback scheduler borrows the duration cache, removes stale voices in place,

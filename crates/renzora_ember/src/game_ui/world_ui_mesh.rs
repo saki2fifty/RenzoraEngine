@@ -337,6 +337,13 @@ fn emit_world_ui_meshes(
             commands
                 .entity(entity)
                 .insert((Mesh3d(h), MeshMaterial3d(rect_mat.as_ref().unwrap().clone())));
+        } else {
+            // Empty authored geometry must replace the previous output too.
+            // The no-template fallback belongs to sync_world_ui_canvases and
+            // returns above; text remains independently owned by child meshes.
+            commands
+                .entity(entity)
+                .remove::<(Mesh3d, MeshMaterial3d<StandardMaterial>)>();
         }
 
         // ── Rebuild text child meshes via the shared 3D-text builder ──
@@ -531,5 +538,53 @@ mod tests {
             .x = 200.0;
         app.update();
         assert_ne!(app.world().get::<Mesh3d>(canvas).unwrap().0, first);
+
+        // Each route to an empty background must retire the previous mesh, and
+        // restoring it must work even after the empty hash has settled.
+        for empty_kind in 0..3 {
+            match empty_kind {
+                0 => {
+                    app.world_mut().entity_mut(root).remove::<BackgroundColor>();
+                }
+                1 => {
+                    app.world_mut()
+                        .entity_mut(root)
+                        .insert(BackgroundColor(Color::NONE));
+                }
+                _ => {
+                    app.world_mut().get_mut::<ComputedNode>(root).unwrap().size = Vec2::ZERO;
+                }
+            }
+            for _ in 0..3 {
+                app.update();
+                assert!(app.world().get::<Mesh3d>(canvas).is_none());
+                assert!(app
+                    .world()
+                    .get::<MeshMaterial3d<StandardMaterial>>(canvas)
+                    .is_none());
+                assert!(app.world().get::<WorldUiMeshBuilt>(canvas).is_some());
+            }
+            app.world_mut()
+                .entity_mut(root)
+                .insert(BackgroundColor(Color::WHITE));
+            app.world_mut().get_mut::<ComputedNode>(root).unwrap().size = Vec2::splat(100.0);
+            app.update();
+            assert!(app.world().get::<Mesh3d>(canvas).is_some());
+            assert!(app
+                .world()
+                .get::<MeshMaterial3d<StandardMaterial>>(canvas)
+                .is_some());
+        }
+
+        // A canvas without a template keeps the fallback supplied by the panel
+        // synchronizer, even when the laid-out root has no backgrounds.
+        let fallback = app.world().get::<Mesh3d>(canvas).unwrap().0.clone();
+        app.world_mut()
+            .entity_mut(canvas)
+            .remove::<WorldUiPanelLive>();
+        app.world_mut().entity_mut(root).remove::<BackgroundColor>();
+        app.update();
+        assert_eq!(app.world().get::<Mesh3d>(canvas).unwrap().0, fallback);
+        assert!(app.world().get::<WorldUiMeshBuilt>(canvas).is_none());
     }
 }
