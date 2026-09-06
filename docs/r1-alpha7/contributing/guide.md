@@ -54,6 +54,21 @@ renzora test                     # the full suite, exactly as CI runs it (contai
 
 > You do not need Docker for native development. In-workspace plugins are statically linked `rlib`s with generated wiring; [standalone plugins](/docs/r1-alpha7/extending/standalone-plugins) use a C ABI without linking Bevy. Native builds stage `renzora-editor` and `renzora` together. The runtime has no editor role or loadable editor bundle. Containers remain useful for configured cross-target builds.
 
+### Shared editor contract checks
+
+For changes to shared editor contracts in `renzora`, enable `editor` when
+checking their tests; the default feature set does not include that surface:
+
+```bash
+cargo test --profile dist -p renzora --features editor --lib
+cargo clippy --profile dist -p renzora --features editor --lib --tests --no-deps -- \
+  -D warnings -A clippy::too_many_arguments -A clippy::type_complexity
+```
+
+Keep test fixtures lint-clean too, without suppressing warnings or removing
+assertions. These targeted checks do not replace consumer-crate or workspace
+validation.
+
 ### Toolchain
 
 - You need **Git** and **rustup**. `rust-toolchain.toml` pins the Rust version and rustup selects it automatically; the project does **not** require nightly. You will also need your platform's usual native build dependencies — a C/C++ toolchain, and on Linux the X11/Wayland/ALSA/udev dev headers (the list mirrors `docker/base/Dockerfile`).

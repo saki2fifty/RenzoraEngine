@@ -141,12 +141,12 @@ mod tests {
         // Only the base exists → first duplicate is `_1` (not `_2`).
         let one = ["camera_3d"];
         assert_eq!(
-            unique_id("camera_3d", |s| one.iter().any(|t| *t == s)),
+            unique_id("camera_3d", |s| one.contains(&s)),
             "camera_3d_1"
         );
         // Base + `_1` exist → next is `_2`.
         let two = ["camera_3d", "camera_3d_1"];
-        let has = |s: &str| two.iter().any(|t| *t == s);
+        let has = |s: &str| two.contains(&s);
         assert_eq!(unique_id("camera_3d", has), "camera_3d_2");
         assert_eq!(unique_id("fresh", has), "fresh");
         // Already-suffixed desired strips before re-numbering.

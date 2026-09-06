@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 6, 2026 — 13:42 UTC
+
+- Cleared five warnings in shared engine tests so strict checks can cover those tests again, without changing editor behavior.
+
 ## September 6, 2026 — 13:37 UTC
 
 - World-space UI no longer leaves an old background visible after its last background is removed, made transparent, or reduced to zero size.

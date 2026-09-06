@@ -1551,8 +1551,10 @@ mod tests {
     fn vsync_round_trips() {
         // The whole point of the recent vsync setting is that it survives
         // a save/load. Lock that in.
-        let mut s = ViewportSettings::default();
-        s.vsync = false;
+        let s = ViewportSettings {
+            vsync: false,
+            ..default()
+        };
         let persisted = PersistedViewportSettings::from_settings(&s);
         let mut restored = ViewportSettings::default();
         persisted.apply(&mut restored);
@@ -1569,8 +1571,10 @@ mod tests {
             VisualizationMode::Depth,
             VisualizationMode::UvChecker,
         ] {
-            let mut s = ViewportSettings::default();
-            s.visualization_mode = mode;
+            let s = ViewportSettings {
+                visualization_mode: mode,
+                ..default()
+            };
             let p = PersistedViewportSettings::from_settings(&s);
             let mut restored = ViewportSettings::default();
             p.apply(&mut restored);
@@ -1591,8 +1595,10 @@ mod tests {
             CollisionGizmoVisibility::SelectedOnly,
             CollisionGizmoVisibility::Always,
         ] {
-            let mut s = ViewportSettings::default();
-            s.collision_gizmo_visibility = mode;
+            let s = ViewportSettings {
+                collision_gizmo_visibility: mode,
+                ..default()
+            };
             let p = PersistedViewportSettings::from_settings(&s);
             let mut restored = ViewportSettings::default();
             p.apply(&mut restored);
