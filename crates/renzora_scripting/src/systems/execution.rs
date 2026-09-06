@@ -23,7 +23,7 @@ use crate::resources::ScriptTimers;
 /// `ScriptEngine` borrow is live) and flush to `ScriptPerfStats` after
 /// each entity's hooks finish, when we can take a mutable borrow on
 /// the resource.
-#[derive(Default)]
+#[derive(Resource, Default)]
 struct PerfBatch {
     on_update: Vec<(PathBuf, Duration, Option<String>)>,
     on_ready: Vec<(PathBuf, Duration, Option<String>)>,
@@ -32,7 +32,7 @@ struct PerfBatch {
 }
 
 impl PerfBatch {
-    fn flush(self, world: &mut World) {
+    fn flush(&mut self, world: &mut World) {
         if self.on_update.is_empty()
             && self.on_ready.is_empty()
             && self.on_rpc.is_empty()
@@ -41,24 +41,24 @@ impl PerfBatch {
             return;
         }
         let mut perf = world.resource_mut::<ScriptPerfStats>();
-        for (path, dur, err) in self.on_update {
+        for (path, dur, err) in self.on_update.drain(..) {
             perf.record_on_update(
                 &path,
                 dur,
                 err.as_deref().map_or(Ok(()), Err),
             );
         }
-        for (path, dur, err) in self.on_ready {
+        for (path, dur, err) in self.on_ready.drain(..) {
             perf.record_on_ready(
                 &path,
                 dur,
                 err.as_deref().map_or(Ok(()), Err),
             );
         }
-        for (path, dur) in self.on_rpc {
+        for (path, dur) in self.on_rpc.drain(..) {
             perf.record_on_rpc(&path, dur);
         }
-        for (path, dur) in self.on_ui {
+        for (path, dur) in self.on_ui.drain(..) {
             perf.record_on_ui(&path, dur);
         }
     }
@@ -122,7 +122,8 @@ pub fn run_scripts(world: &mut World) {
     // Local accumulator for this pass's timing samples. Flushed into
     // the shared resource at the end so we don't fight for a mutable
     // borrow while the immutable `ScriptEngine` resource is in scope.
-    let mut perf_batch = PerfBatch::default();
+    // Retain timing buffers without holding a World borrow across callbacks.
+    let mut perf_batch = std::mem::take(&mut *world.get_resource_or_init::<PerfBatch>());
 
     // Extract resources we need (take ownership to avoid borrow conflicts)
     let time_elapsed = world.resource::<Time>().elapsed_secs_f64();
@@ -895,6 +896,7 @@ pub fn run_scripts(world: &mut World) {
     // Deferred until after the per-entity loop so we don't fight the
     // immutable `ScriptEngine` borrow held inside it.
     perf_batch.flush(world);
+    *world.resource_mut::<PerfBatch>() = perf_batch;
 }
 
 #[cfg(test)]
@@ -1001,8 +1003,13 @@ mod tests {
         let entity = world.spawn((component, Name::new("actor"))).id();
         let archetype = world.entity(entity).archetype().id();
         let entry_storage = world.get::<ScriptComponent>(entity).expect("component").scripts.as_ptr();
+        let mut timing_storage = None;
         for _ in 0..1000 {
             run_scripts(&mut world);
+            let batch = world.resource::<PerfBatch>();
+            assert!(batch.on_update.is_empty());
+            let address = batch.on_update.as_ptr();
+            assert_eq!(*timing_storage.get_or_insert(address), address);
             assert_eq!(world.entity(entity).archetype().id(), archetype);
             let component = world.get::<ScriptComponent>(entity).expect("component");
             assert_eq!(component.scripts.as_ptr(), entry_storage);
@@ -1010,6 +1017,10 @@ mod tests {
             assert!(!component.scripts[1].enabled);
         }
         assert_eq!(world.resource::<Removals>().0, 0);
+        assert_eq!(
+            world.resource::<ScriptPerfStats>().per_script[&PathBuf::from("test.fake")].on_update_calls,
+            1000
+        );
         let calls = calls.lock().expect("backend state");
         assert_eq!(calls.ready_paths.len(), 1);
         assert_eq!(calls.update_paths.len(), 1000);

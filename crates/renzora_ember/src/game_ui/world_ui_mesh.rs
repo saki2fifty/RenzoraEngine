@@ -163,6 +163,11 @@ fn hash_f32(h: &mut impl Hasher, f: f32) {
     h.write_u32(f.to_bits());
 }
 
+fn hash_text_content(h: &mut impl Hasher, text: &str) {
+    // Hash the byte slice in bulk, with Hash's string boundary marker.
+    text.hash(h);
+}
+
 /// Bevy's text pipeline resources, bundled so the emitter stays under the 16
 /// system-param cap. [`build_text_mesh`] drives all of these to lay out and
 /// rasterize a string (see its signature).
@@ -289,9 +294,7 @@ fn emit_world_ui_meshes(
                                 _ => tcx.rem.0,
                             };
                             let color = tc.map(|c| c.0.to_linear()).unwrap_or(LinearRgba::WHITE);
-                            for b in s.as_bytes() {
-                                hasher.write_u8(*b);
-                            }
+                            hash_text_content(&mut hasher, s);
                             hash_text_style(&mut hasher, c, size_px, color, &tf.font);
                             texts.push(TextNode {
                                 center: c,
@@ -434,6 +437,36 @@ fn emit_world_ui_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_hashing_processes_long_strings_in_bulk() {
+        #[derive(Default)]
+        struct CountedHash {
+            inner: std::collections::hash_map::DefaultHasher,
+            writes: usize,
+        }
+        impl Hasher for CountedHash {
+            fn finish(&self) -> u64 {
+                self.inner.finish()
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.writes += 1;
+                self.inner.write(bytes);
+            }
+        }
+        let text = "world-space text ".repeat(256);
+        let mut old = CountedHash::default();
+        for byte in text.as_bytes() {
+            old.write_u8(*byte);
+        }
+        let mut new = CountedHash::default();
+        hash_text_content(&mut new, &text);
+        assert_eq!(old.writes, text.len());
+        assert_eq!(new.writes, 2);
+        let mut edited = CountedHash::default();
+        hash_text_content(&mut edited, &(text + "!"));
+        assert_ne!(new.finish(), edited.finish());
+    }
 
     #[test]
     fn scratch_rectangles_retain_all_five_allocations() {

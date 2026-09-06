@@ -4,6 +4,10 @@ This page gives a plain-English overview of changes made on this fork. The newes
 
 ## September 6, 2026 — 14:32 UTC
 
+- Reduced repeated work in world-space text, script timing, navigation updates and network retries. Added regressions that check retained storage and unchanged-frame behavior.
+
+## September 6, 2026 — 14:30 UTC
+
 - Repaired plugin compatibility tests and updated automated checks for the current architecture, including smaller runtime configurations and separate optimized-build caches.
 
 ## September 6, 2026 — 14:22 UTC

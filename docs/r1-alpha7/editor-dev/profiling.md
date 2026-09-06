@@ -559,6 +559,10 @@ not a dirty-canvas scheduler. Headless tests retain all five rectangle buffers
 through 1,000 fills and keep the actual canvas mesh handle across 1,000 stable
 updates before checking a layout edit.
 
+Text content is hashed as a complete string instead of one hasher call per
+byte. A 4,352-byte regression reduces those calls to two while preserving edit
+invalidation. The full text is still read; this is not constant-time hashing.
+
 Removing the last visible background, making it fully transparent, or reducing
 its layout to zero size now clears the old panel background mesh and material.
 Restoring a background rebuilds it normally. The canvas is not hidden: text
@@ -674,6 +678,25 @@ checking for an available navigation mesh. Scene teardown therefore releases
 obsolete entries even after the mesh is gone, without adding a full-world scan.
 A headless test removes 1,000 agents while retaining a live agent's target, and
 checks individual component removal. Repath and movement polling remain unchanged.
+
+The script-readable navigation mirror now recalculates only after its agent,
+path or world transform changes (or the mirror is first added), and publishes
+only different values. A 1,000-frame test observes no stable publications;
+non-observable speed edits remain quiet and target clearing still updates readers.
+
+## Follow-up buffer reuse
+
+Script execution retains its four timing-sample vectors after flushing them.
+The production execution regression keeps the update buffer across 1,000 passes
+and verifies all 1,000 timing samples still reach the statistics. Per-sample
+script paths and other frame snapshots are still owned copies.
+
+Reliable UDP packets are encoded once and their bytes retained until acknowledged.
+The loopback regression sends 1,000 retries from the same allocation and checks
+identical received bytes, acknowledgement cleanup and duplicate suppression.
+The wire protocol and delivery policy are unchanged. Replay history still grows
+for the connection's lifetime; safely bounding it needs coordinated flow control,
+not simply forgetting old sequence numbers that could be retransmitted later.
 
 ## Gamepad input snapshots
 

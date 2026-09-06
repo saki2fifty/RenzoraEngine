@@ -59,10 +59,10 @@ pub(crate) struct Peer {
     pub addr: SocketAddr,
     pub client_id: u64,
     next_seq: u32,
-    /// Reliable packets sent but not yet acked: seq → (event, last_sent).
-    unacked: HashMap<u32, (GameEvent, Instant)>,
-    /// Reliable seqs we've already delivered, for dedup. Bounded by the RPC
-    /// volume of a session (low); a ring buffer is a future refinement.
+    /// Encode once: every retry sends the same owned bytes until acknowledged.
+    unacked: HashMap<u32, (Vec<u8>, Instant)>,
+    /// Session replay history. Bounding this requires sender flow control too:
+    /// forgetting an old sequence could redeliver a late reliable retry.
     seen: HashSet<u32>,
     pub last_recv: Instant,
     last_sent: Instant,
@@ -91,8 +91,11 @@ impl Peer {
     pub fn send_reliable(&mut self, socket: &UdpSocket, event: GameEvent) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
-        self.raw_send(socket, &Packet::Reliable { seq, event: event.clone() });
-        self.unacked.insert(seq, (event, Instant::now()));
+        let bytes = encode(&Packet::Reliable { seq, event });
+        let _ = socket.send_to(&bytes, self.addr);
+        let now = Instant::now();
+        self.last_sent = now;
+        self.unacked.insert(seq, (bytes, now));
     }
 
     /// An incoming reliable packet arrived: always ack it, and return `true`
@@ -109,11 +112,14 @@ impl Peer {
 
     /// Per-frame upkeep: resend timed-out reliable packets + keep-alive.
     pub fn tick(&mut self, socket: &UdpSocket) {
-        let now = Instant::now();
+        self.tick_at(socket, Instant::now());
+    }
+
+    fn tick_at(&mut self, socket: &UdpSocket, now: Instant) {
         let addr = self.addr;
-        for (seq, (event, sent)) in self.unacked.iter_mut() {
+        for (bytes, sent) in self.unacked.values_mut() {
             if now.duration_since(*sent) >= RESEND_AFTER {
-                let _ = socket.send_to(&encode(&Packet::Reliable { seq: *seq, event: event.clone() }), addr);
+                let _ = socket.send_to(bytes, addr);
                 *sent = now;
             }
         }
@@ -124,5 +130,53 @@ impl Peer {
 
     pub fn timed_out(&self) -> bool {
         self.last_recv.elapsed() >= PEER_TIMEOUT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_reuse_encoded_payload_and_ack_retires_it() {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut peer = Peer::new(receiver.local_addr().unwrap(), 1);
+        peer.send_reliable(
+            &sender,
+            GameEvent {
+                name: "payload".into(),
+                data: vec![42; 512],
+            },
+        );
+        let mut buf = [0; MAX_DATAGRAM];
+        let len = receiver.recv(&mut buf).unwrap();
+        let original = buf[..len].to_vec();
+        let allocation = peer.unacked[&0].0.as_ptr();
+        let start = peer.unacked[&0].1;
+        for retry in 1..=1_000 {
+            let now = start + RESEND_AFTER * retry;
+            // Isolate reliability from the independent keep-alive timer.
+            peer.last_sent = now;
+            peer.tick_at(&sender, now);
+            let len = receiver.recv(&mut buf).unwrap();
+            assert_eq!(&buf[..len], original.as_slice());
+            assert_eq!(peer.unacked[&0].0.as_ptr(), allocation);
+        }
+        match decode(&original).unwrap() {
+            Packet::Reliable { seq, event } => {
+                assert_eq!(seq, 0);
+                assert_eq!(event.name, "payload");
+                assert_eq!(event.data, vec![42; 512]);
+            }
+            _ => panic!("expected reliable packet"),
+        }
+        peer.on_ack(0);
+        assert!(peer.unacked.is_empty());
+        assert!(peer.on_reliable(&sender, 42));
+        assert!(!peer.on_reliable(&sender, 42));
     }
 }

@@ -530,12 +530,12 @@ fn draw_agent_paths(
 // Phase 3: scripting — NavReadState mirror + ScriptAction observer
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Per-entity nav state, refreshed each frame. Scripts and blueprints read
+/// Per-entity nav state, refreshed when its inputs change. Scripts and blueprints read
 /// this via the reflect path dispatcher:
 /// - `get("NavReadState.has_path")`
 /// - `get("NavReadState.distance_to_destination")`
 /// - `get("NavReadState.is_at_destination")`
-#[derive(Component, Clone, Copy, Debug, Default, Reflect, Serialize, Deserialize)]
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(Component, Serialize, Deserialize)]
 pub struct NavReadState {
     pub has_target: bool,
@@ -553,12 +553,19 @@ fn auto_init_nav_read_state(
     }
 }
 
-fn update_nav_read_state(mut q: Query<(&NavAgent, &NavPath, &GlobalTransform, &mut NavReadState)>) {
+fn update_nav_read_state(
+    mut q: Query<
+        (&NavAgent, &NavPath, &GlobalTransform, &mut NavReadState),
+        Or<(
+            Changed<NavAgent>,
+            Changed<NavPath>,
+            Changed<GlobalTransform>,
+            Added<NavReadState>,
+        )>,
+    >,
+) {
     for (agent, path, gt, mut read) in &mut q {
-        read.has_target = agent.target.is_some();
-        read.has_path = !path.waypoints.is_empty();
-        read.is_at_destination = agent.target.is_none();
-        read.distance_to_destination = match agent.target {
+        let distance_to_destination = match agent.target {
             Some(dest) => {
                 let pos = Vec3::new(gt.translation().x, 0.0, gt.translation().z);
                 let d = Vec3::new(dest.x, 0.0, dest.z);
@@ -566,6 +573,12 @@ fn update_nav_read_state(mut q: Query<(&NavAgent, &NavPath, &GlobalTransform, &m
             }
             None => 0.0,
         };
+        read.set_if_neq(NavReadState {
+            has_target: agent.target.is_some(),
+            has_path: !path.waypoints.is_empty(),
+            is_at_destination: agent.target.is_none(),
+            distance_to_destination,
+        });
     }
 }
 
@@ -888,6 +901,52 @@ mod tests {
         assert!(read.is_at_destination);
         assert!(!read.has_target);
         assert_eq!(read.distance_to_destination, 0.0);
+    }
+
+    #[test]
+    fn unchanged_navigation_does_not_publish_read_state_changes() {
+        #[derive(Resource, Default)]
+        struct Writes(usize);
+        let mut app = minimal_app();
+        app.init_resource::<Writes>().add_systems(
+            Update,
+            (
+                update_nav_read_state,
+                |q: Query<(), Changed<NavReadState>>, mut writes: ResMut<Writes>| {
+                    writes.0 += q.iter().count();
+                },
+            )
+                .chain(),
+        );
+        let entity = app
+            .world_mut()
+            .spawn((
+                NavAgent {
+                    target: Some(Vec3::X * 5.0),
+                    ..default()
+                },
+                NavPath::default(),
+                Transform::default(),
+                NavReadState::default(),
+            ))
+            .id();
+        pump(&mut app, 2);
+        let baseline = app.world().resource::<Writes>().0;
+        pump(&mut app, 1000);
+        assert_eq!(app.world().resource::<Writes>().0, baseline);
+        // A non-observable agent edit must not wake downstream consumers.
+        app.world_mut().get_mut::<NavAgent>(entity).unwrap().speed += 1.0;
+        pump(&mut app, 1);
+        assert_eq!(app.world().resource::<Writes>().0, baseline);
+        app.world_mut().get_mut::<NavAgent>(entity).unwrap().target = None;
+        pump(&mut app, 1);
+        assert_eq!(app.world().resource::<Writes>().0, baseline + 1);
+        assert!(
+            app.world()
+                .get::<NavReadState>(entity)
+                .unwrap()
+                .is_at_destination
+        );
     }
 
     // ── the script action surface ────────────────────────────────────────────
