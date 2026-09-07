@@ -1,6 +1,10 @@
+See what's changed in this fork, including improvements, fixes, and updates. [View the changelog](CHANGELOG.md), with the newest changes listed first.
+
+---
+
 # Renzora Engine
 
-This is the independently maintained **saki2fifty/RenzoraEngine** fork. Development, issues, releases, and automation stay in this repository; it does not synchronize with or submit changes to the original project. See the [changelog](CHANGELOG.md) for this fork's changes.
+This is the independently maintained **saki2fifty/RenzoraEngine** fork. Development, issues, releases, and automation stay in this repository; it does not synchronize with or submit changes to the original project.
 
 A 3D game engine and visual editor built on <a href="https://bevyengine.org/" target="_blank" rel="noopener noreferrer">Bevy 0.19</a>. It's fully compatible with the Bevy plugin ecosystem and is itself modular — every system is a plugin you can add, remove, or replace. Use it as a standalone engine to build games out of the box, or treat it as a customizable foundation you can modify into your own bespoke engine.
 

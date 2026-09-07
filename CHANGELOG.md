@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 15:43 UTC
+
+- Made the changelog easier to find with a short introduction and link at the very top of the README.
+
 ## September 7, 2026 — 14:30 UTC
 
 - Improved automated shutdown checks to verify that compiler processes are cleaned up correctly, including graceful exits.
