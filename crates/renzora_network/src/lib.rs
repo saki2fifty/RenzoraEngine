@@ -154,15 +154,17 @@ fn process_pending_connect(
         return;
     }
 
-    let server_addr = format!("{}:{}", pending.address, pending.port)
-        .parse::<std::net::SocketAddr>()
-        .unwrap_or_else(|_| {
-            std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                pending.port,
-            )
-        });
     commands.remove_resource::<PendingNetworkConnect>();
+    // Never redirect an invalid destination to a different machine. DNS must
+    // not block the frame thread; this transport currently accepts IP literals.
+    let Ok(address) = pending.address.parse::<std::net::IpAddr>() else {
+        log::error!(
+            "[network] Invalid IP address {:?}; use an IPv4 or IPv6 literal",
+            pending.address
+        );
+        return;
+    };
+    let server_addr = std::net::SocketAddr::new(address, pending.port);
 
     info!("[network] Connecting to {} ...", server_addr);
     match client::NetworkClient::connect(server_addr, client::rand_client_id()) {
@@ -199,3 +201,23 @@ fn sync_network_bridge(status: Res<NetworkStatus>, mut bridge: ResMut<renzora::N
 }
 
 renzora::add!(NetworkPlugin);
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_destinations_are_consumed_without_creating_a_localhost_connection() {
+        for address in ["", "not an address", "localhost", "127.0.0.1:9000"] {
+            let mut app = App::new();
+            app.insert_resource(PendingNetworkConnect {
+                address: address.into(),
+                port: 9000,
+            });
+            app.add_systems(Update, process_pending_connect);
+            app.update();
+            assert!(!app.world().contains_resource::<PendingNetworkConnect>());
+            assert!(!app.world().contains_resource::<client::NetworkClient>());
+        }
+    }
+}

@@ -7,7 +7,7 @@ edition = "2021"
 bevy = { workspace = true }
 
 # For `renzora::add!`, which is how a plugin gets into the app at all. The
-# contract dylib and nothing from it beyond the macro.
+# statically linked contract and nothing from it beyond the macro.
 renzora = { path = "../renzora", default-features = false }
 
 # The boundary. `host` for the resource the plugin loader fills in when a backend

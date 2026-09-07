@@ -249,7 +249,7 @@ fn resource_table_refreshes_after_resource_removal_and_reinsertion() {
     }
     let mut world = World::new();
     world.init_resource::<Time>();
-    let id = world.register_resource::<Value>();
+    let id = world.register_component::<Value>();
     world.insert_resource(Value(5));
     let mut observations = Box::new(Vec::<Option<u32>>::new());
     let system = build_dispatcher(

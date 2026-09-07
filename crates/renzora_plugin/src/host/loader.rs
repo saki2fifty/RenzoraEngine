@@ -1692,13 +1692,13 @@ mod image_watcher_tests {
         watcher.tick(0.3, &mut queue);
         assert!(queue.is_empty());
         watcher.tick(0.3, &mut queue);
-        assert_eq!(queue, [path.clone()]);
+        assert_eq!(queue.as_slice(), std::slice::from_ref(&path));
         assert_eq!(watcher.io_counts, (0, 3));
         queue.clear();
         // Notifications must reload even when metadata compares equal.
         watcher.settling.insert(path.clone());
         watcher.tick(0.3, &mut queue);
-        assert_eq!(queue, [path.clone()]);
+        assert_eq!(queue.as_slice(), std::slice::from_ref(&path));
         queue.clear();
         std::fs::remove_file(&path).unwrap();
         watcher.settling.insert(path);

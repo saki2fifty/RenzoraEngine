@@ -1469,6 +1469,7 @@ fn track_global_cursor(
     mut moves: MessageReader<bevy::window::CursorMoved>,
     windows: Query<&Window>,
 ) {
+    let mut next = cursor.pos;
     for ev in moves.read() {
         let Ok(win) = windows.get(ev.window) else {
             continue;
@@ -1481,7 +1482,12 @@ fn track_global_cursor(
             bevy::window::WindowPosition::At(origin) => origin.as_vec2(),
             _ => Vec2::ZERO,
         };
-        cursor.pos = Some(origin + ev.position * win.scale_factor());
+        next = Some(origin + ev.position * win.scale_factor());
+    }
+    // Consumers see only the final position after this system. Avoid publishing
+    // intermediate/duplicate positions as changes, without filtering input.
+    if cursor.pos != next {
+        cursor.pos = next;
     }
 }
 
@@ -4574,6 +4580,81 @@ fn populate_leaf(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_bursts_publish_only_final_position_and_preserve_raw_messages() {
+        use super::*;
+        use bevy::ecs::message::MessageCursor;
+        let mut world = World::new();
+        world.init_resource::<GlobalCursor>();
+        world.init_resource::<Messages<bevy::window::CursorMoved>>();
+        let window = world
+            .spawn(Window {
+                position: bevy::window::WindowPosition::At(IVec2::new(100, 200)),
+                ..default()
+            })
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(track_global_cursor);
+        for _ in 0..1000 {
+            world
+                .resource_mut::<Messages<bevy::window::CursorMoved>>()
+                .write(bevy::window::CursorMoved {
+                    window,
+                    position: Vec2::new(-5.0, 10.0),
+                    delta: None,
+                });
+        }
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<GlobalCursor>().pos,
+            Some(Vec2::new(95.0, 210.0))
+        );
+        assert_eq!(
+            MessageCursor::<bevy::window::CursorMoved>::default()
+                .read(world.resource::<Messages<bevy::window::CursorMoved>>())
+                .count(),
+            1000
+        );
+        world.clear_trackers();
+        for position in [Vec2::ZERO, Vec2::new(-5.0, 10.0)] {
+            world
+                .resource_mut::<Messages<bevy::window::CursorMoved>>()
+                .write(bevy::window::CursorMoved {
+                    window,
+                    position,
+                    delta: None,
+                });
+        }
+        world
+            .resource_mut::<Messages<bevy::window::CursorMoved>>()
+            .write(bevy::window::CursorMoved {
+                window: Entity::PLACEHOLDER,
+                position: Vec2::ZERO,
+                delta: None,
+            });
+        schedule.run(&mut world);
+        assert!(!world.is_resource_changed::<GlobalCursor>());
+        let second = world
+            .spawn(Window {
+                position: bevy::window::WindowPosition::At(IVec2::new(300, 400)),
+                ..default()
+            })
+            .id();
+        world
+            .resource_mut::<Messages<bevy::window::CursorMoved>>()
+            .write(bevy::window::CursorMoved {
+                window: second,
+                position: Vec2::X,
+                delta: None,
+            });
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<GlobalCursor>().pos,
+            Some(Vec2::new(301.0, 400.0))
+        );
+        assert!(world.is_resource_changed::<GlobalCursor>());
+    }
+
     use super::*;
 
     /// Only a bar with its parent's divider lying *along* it may double as that

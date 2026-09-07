@@ -129,7 +129,7 @@ fn a_streamed_response_arrives_in_order_and_ends_once() {
     app.init_resource::<PluginHttpInbox>();
 
     assert_eq!(
-        unsafe { init_test_plugin(app.world_mut(), stream_init) },
+        init_test_plugin(app.world_mut(), stream_init),
         sys::InitResult::Ok,
     );
 
@@ -195,7 +195,7 @@ fn poll_does_not_steal_stream_chunks() {
     app.init_resource::<PluginHttpInbox>();
 
     assert_eq!(
-        unsafe { init_test_plugin(app.world_mut(), stream_init) },
+        init_test_plugin(app.world_mut(), stream_init),
         sys::InitResult::Ok,
     );
 
@@ -463,7 +463,7 @@ fn schema_reaches_the_host() {
 /// where the `catch_unwind` guard lives — testing `sys` directly would prove
 /// nothing about the thing under test.
 fn panicking_system(mut q: renzora_plugin::ecs::Query<&mut renzora_plugin::ecs::Transform>) {
-    for t in &mut q {
+    if let Some(t) = (&mut q).into_iter().next() {
         t.translation.x += 1.0;
         panic!("deliberate test panic");
     }
@@ -689,7 +689,7 @@ struct Score {
 
 impl Clone for Score {
     fn clone(&self) -> Self {
-        Self { total: self.total }
+        *self
     }
 }
 impl Copy for Score {}
@@ -1546,8 +1546,7 @@ fn two_queries_in_one_system_stay_separate() {
 fn looks_but_does_not_touch(mut q: ecs::Query<&mut Spinner>) {
     for s in &mut q {
         // Read it, write the same value back. Nothing has changed.
-        let v = s.speed;
-        s.speed = v;
+        s.speed = std::hint::black_box(s.speed);
     }
 }
 
@@ -2271,7 +2270,7 @@ fn a_service_reply_reaches_the_plugin_once() {
     app.init_resource::<PluginServiceReplies>();
 
     assert_eq!(
-        unsafe { init_test_plugin(app.world_mut(), dialog_init) },
+        init_test_plugin(app.world_mut(), dialog_init),
         sys::InitResult::Ok
     );
 
@@ -2329,7 +2328,7 @@ fn a_reply_for_another_service_is_not_delivered() {
     app.init_resource::<PluginServiceReplies>();
 
     assert_eq!(
-        unsafe { init_test_plugin(app.world_mut(), dialog_init) },
+        init_test_plugin(app.world_mut(), dialog_init),
         sys::InitResult::Ok
     );
 

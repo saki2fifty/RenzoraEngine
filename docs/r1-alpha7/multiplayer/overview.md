@@ -19,6 +19,15 @@ Automatic entity/Transform replication, interpolation, prediction and avatar spa
 
 ## Bounded reliable delivery
 
+Connection addresses must be IPv4 or IPv6 literals, with the port supplied
+separately. Invalid addresses and hostnames are rejected with a diagnostic;
+they never silently connect to localhost. DNS resolution is not implemented.
+The client requires a matching acceptance ID before delivering application
+events. Malformed or unrelated packets do not refresh its timeout. After ten
+seconds without valid traffic (including an unanswered initial handshake), or
+after a disconnect, the client reports disconnected and stops retrying. Request
+a new connection explicitly to reconnect. These checks are not authentication.
+
 Within a connection, accepted events are retried until acknowledged or the connection ends. Duplicates are suppressed, but events are **not ordered**.
 
 - A peer may send at most 1,024 sequence positions beyond its oldest unacknowledged event. Newer acknowledgements cannot bypass a lost older event.

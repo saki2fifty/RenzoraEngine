@@ -203,6 +203,48 @@ pub fn propagate_persistent_to_children(
     }
 }
 
+/// Editor Play: load the global scenes a shipped game gets at `Startup`.
+///
+/// Idempotent — re-entering Play without a Stop would otherwise spawn a second
+/// copy of every global scene.
+pub fn on_load_autoload_scenes(_trigger: On<renzora::LoadAutoloadScenes>, mut commands: Commands) {
+    commands.queue(|world: &mut World| {
+        // `load_autoloads` is idempotent per scene path, so re-entering Play
+        // without a Stop adds nothing rather than duplicating.
+        load_autoloads(world);
+    });
+}
+
+/// Editor Stop: despawn what Play loaded.
+pub fn on_unload_autoload_scenes(
+    _trigger: On<renzora::UnloadAutoloadScenes>,
+    mut commands: Commands,
+) {
+    commands.queue(|world: &mut World| {
+        let Some(mut tracked) = world.get_resource_mut::<AutoloadedEntities>() else {
+            return;
+        };
+        // Clear the residency record with the entities. Leaving paths behind
+        // would make the next Play believe the scenes were still loaded and
+        // skip them, so Stop would permanently disable global scenes.
+        tracked.paths.clear();
+        let entities = std::mem::take(&mut tracked.entities);
+        let mut despawned = 0usize;
+        for entity in entities {
+            // Children of an already-despawned root are gone with it, and a
+            // script may have despawned something itself, so a missing id is
+            // routine rather than an error.
+            if world.get_entity(entity).is_ok() {
+                world.despawn(entity);
+                despawned += 1;
+            }
+        }
+        if despawned > 0 {
+            info!("[autoload] unloaded {despawned} global-scene entities");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,49 +295,4 @@ mod tests {
         );
         assert_eq!(state.phase, scene_io::SceneLoadPhase::Ready);
     }
-}
-
-/// Editor Play: load the global scenes a shipped game gets at `Startup`.
-///
-/// Idempotent — re-entering Play without a Stop would otherwise spawn a second
-/// copy of every global scene.
-pub fn on_load_autoload_scenes(
-    _trigger: On<renzora::LoadAutoloadScenes>,
-    mut commands: Commands,
-) {
-    commands.queue(|world: &mut World| {
-        // `load_autoloads` is idempotent per scene path, so re-entering Play
-        // without a Stop adds nothing rather than duplicating.
-        load_autoloads(world);
-    });
-}
-
-/// Editor Stop: despawn what Play loaded.
-pub fn on_unload_autoload_scenes(
-    _trigger: On<renzora::UnloadAutoloadScenes>,
-    mut commands: Commands,
-) {
-    commands.queue(|world: &mut World| {
-        let Some(mut tracked) = world.get_resource_mut::<AutoloadedEntities>() else {
-            return;
-        };
-        // Clear the residency record with the entities. Leaving paths behind
-        // would make the next Play believe the scenes were still loaded and
-        // skip them, so Stop would permanently disable global scenes.
-        tracked.paths.clear();
-        let entities = std::mem::take(&mut tracked.entities);
-        let mut despawned = 0usize;
-        for entity in entities {
-            // Children of an already-despawned root are gone with it, and a
-            // script may have despawned something itself, so a missing id is
-            // routine rather than an error.
-            if world.get_entity(entity).is_ok() {
-                world.despawn(entity);
-                despawned += 1;
-            }
-        }
-        if despawned > 0 {
-            info!("[autoload] unloaded {despawned} global-scene entities");
-        }
-    });
 }

@@ -857,6 +857,12 @@ wall-clock span between hooks in First and Last, not exclusive CPU time or GPU
 time. Compare groups from the same scene; these numbers help narrow a slowdown,
 but do not identify its cause or establish an FPS improvement.
 
+The dock cursor tracker now publishes only a changed final screen position per
+update. Duplicate or out-and-back cursor bursts do not invalidate the cursor
+resource; raw input remains available to other readers and captured dragging
+continues across window boundaries. This reduces redundant change signals, not
+event delivery, and is not a measured fix for the reported Windows FPS drop.
+
 ## Startup GPU capability probe
 
 Ray-tracing availability and the integrated-GPU hint share one cached temporary

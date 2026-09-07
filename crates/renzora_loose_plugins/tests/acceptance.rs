@@ -39,12 +39,18 @@ use harness::{recv_until, BuildServiceDriver, Harness, TestEnv};
 
 #[test]
 fn directory_reload_preserves_backends_on_failure_and_replaces_them_on_success() {
-    use renzora_plugin::host::{PluginAudioBackend, PluginNetBackend, PluginPanels, PluginScriptBackends};
+    use renzora_plugin::host::{
+        PluginAudioBackend, PluginNetBackend, PluginPanels, PluginScriptBackends,
+    };
     let env = TestEnv::new();
     let mut h = Harness::with_minimal_plugins(&env);
     let dir = env.workdir.path().join("directory_reload");
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{}backend_probe{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));
+    let path = dir.join(format!(
+        "{}backend_probe{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
     h.install_plugin_host(&dir);
     let source = r#"
 use renzora_plugin::sys::*;
@@ -73,7 +79,9 @@ pub unsafe extern "C" fn renzora_plugin_init(iface: *const Interface, host: *mut
         (2, "InitResult::Failed", 1, 1),
         (3, "InitResult::Ok", 3, 2),
     ] {
-        let src = source.replace("GENERATION", &format!("{state}usize")).replace("RESULT", result);
+        let src = source
+            .replace("GENERATION", &format!("{state}usize"))
+            .replace("RESULT", result);
         let library = h.compile_source_to_cdylib(&src, "backend_probe");
         std::fs::copy(&library, &path).unwrap();
         if state == 1 {

@@ -227,6 +227,19 @@ low whitecap threshold, a lake is low wind with almost no fetch.
 
 ## Limits
 
+### Pool-water allocation limits
+
+The separate `PoolWater` ripple component uses a simulation edge between 1 and
+1,024 cells and mesh subdivisions between 1 and 512. Values outside these ranges
+are clamped for allocation, including scene-loaded values and live edits; saved
+authored values are preserved. Defaults remain unchanged. At maximum simulation
+resolution each pool holds about 32 MiB of CPU arrays/image bytes plus a 16 MiB
+GPU texture, excluding driver overhead. Meshes have at most 263,169 vertices and
+1,572,864 indices. These are per-pool limits, not a total scene-memory guarantee.
+Repeated frames at an out-of-range setting reuse the bounded allocation.
+
+### Ocean limits
+
 - **One sea state per scene.** The cascade maps are global, so the *first*
   `WaterSurface` entity drives the simulation. Additional water entities render
   the same waves (with their own colours and mesh). Two genuinely different

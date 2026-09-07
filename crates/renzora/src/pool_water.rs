@@ -3,6 +3,22 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// Maximum simulation edge: 32 MiB of CPU arrays/image data plus a 16 MiB GPU
+/// texture per pool. This is a per-pool allocation bound, not a scene budget.
+pub const MAX_POOL_SIM_RESOLUTION: usize = 1024;
+/// Maximum mesh edge: at most 263,169 vertices and 1,572,864 indices per pool.
+pub const MAX_POOL_MESH_SUBDIVISIONS: u32 = 512;
+
+/// Bound authored or direct-constructor simulation dimensions before arithmetic.
+pub fn pool_sim_dimension(value: usize) -> usize {
+    value.clamp(1, MAX_POOL_SIM_RESOLUTION)
+}
+
+/// Bound authored mesh subdivision counts before arithmetic or allocation.
+pub fn pool_mesh_subdivisions(value: u32) -> u32 {
+    value.clamp(1, MAX_POOL_MESH_SUBDIVISIONS)
+}
+
 /// Interactive water attached to a pool container mesh.
 #[derive(Component, Clone, Debug, Reflect, Serialize, Deserialize)]
 #[reflect(Component, Default)]
@@ -28,9 +44,9 @@ pub struct PoolWater {
     pub wave_speed: f32,
     /// Simulation height to world-unit scale.
     pub height_scale: f32,
-    /// Square simulation texture resolution.
+    /// Square simulation texture resolution; allocation clamps to 1–1024.
     pub sim_resolution: u32,
-    /// Water mesh subdivisions.
+    /// Water mesh subdivisions; allocation clamps to 1–512.
     pub mesh_subdivisions: u32,
     /// Sun specular power.
     pub specular_power: f32,

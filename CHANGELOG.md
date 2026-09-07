@@ -2,6 +2,13 @@
 
 This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 23:38 UTC
+
+- Invalid multiplayer addresses no longer connect to localhost; clients now detect lost connections and reject premature game messages.
+- Added per-pool water limits to prevent extreme settings from requesting enormous allocations.
+- Avoided redundant cursor-position change signals while preserving mouse input and cross-window dragging; Windows FPS improvement remains unverified.
+- Cleaned up recorded test warnings and consolidated the internal progress ledger so historical notes no longer look like active work.
+
 ## September 7, 2026 — 20:45 UTC
 
 - Added regression checks for shape browsing, click-to-create and undo, camera settings, sunlight, and network failures; coverage requirements remain unchanged.

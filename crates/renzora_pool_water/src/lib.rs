@@ -10,6 +10,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 pub use renzora::pool_water::PoolWater;
+use renzora::pool_water::{pool_mesh_subdivisions, pool_sim_dimension};
 
 use material::{PoolWaterMaterial, PoolWaterUniforms};
 use simulation::WaterSim;
@@ -27,7 +28,7 @@ pub struct PoolWaterSurface(pub Entity);
 // ── Mesh generation ───────────────────────────────────────────────────────────
 
 fn generate_pool_water_mesh(half_x: f32, half_z: f32, subdivisions: u32) -> Mesh {
-    let subdivisions = subdivisions.max(1);
+    let subdivisions = pool_mesh_subdivisions(subdivisions);
     let verts_per_edge = subdivisions + 1;
     let total_verts = (verts_per_edge * verts_per_edge) as usize;
     let total_indices = (subdivisions * subdivisions * 6) as usize;
@@ -92,8 +93,8 @@ fn setup_pool_water(
         let mesh = meshes.add(generate_pool_water_mesh(0.5, 0.5, pool.mesh_subdivisions));
 
         let sim = WaterSim::new(
-            pool.sim_resolution.max(1) as usize,
-            pool.sim_resolution.max(1) as usize,
+            pool_sim_dimension(pool.sim_resolution as usize),
+            pool_sim_dimension(pool.sim_resolution as usize),
             pool.damping,
             pool.wave_speed,
             &mut images,
@@ -147,7 +148,7 @@ fn sync_pool_water_settings(
         if transform.translation.y != height {
             transform.translation.y = height;
         }
-        let resolution = pool.sim_resolution.max(1) as usize;
+        let resolution = pool_sim_dimension(pool.sim_resolution as usize);
         if sim.width != resolution || sim.height != resolution {
             // A different grid restarts the ripple state. Keep the surface and
             // material identities; the old texture is released through handles.
@@ -168,7 +169,7 @@ fn sync_pool_water_settings(
         if sim.speed != pool.wave_speed {
             sim.speed = pool.wave_speed;
         }
-        let subdivisions = pool.mesh_subdivisions.max(1);
+        let subdivisions = pool_mesh_subdivisions(pool.mesh_subdivisions);
         let expected_vertices = (u64::from(subdivisions) + 1).pow(2);
         if meshes
             .get(&mesh.0)
@@ -483,6 +484,68 @@ mod tests {
             .unwrap()
             .translation()
             .abs_diff_eq(expected, 1e-5));
+    }
+
+    #[test]
+    fn extreme_grid_sizes_are_bounded_and_do_not_reallocate_each_frame() {
+        let mut app = app();
+        let pool = app
+            .world_mut()
+            .spawn((
+                PoolWater {
+                    sim_resolution: u32::MAX,
+                    mesh_subdivisions: u32::MAX,
+                    ..default()
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        let surface = app.world().get::<PoolWaterLink>(pool).unwrap().0;
+        let sim = app.world().get::<WaterSim>(surface).unwrap();
+        assert_eq!((sim.width, sim.height), (1024, 1024));
+        assert_eq!(sim.heights.len(), 1024 * 1024);
+        let texture = sim.texture_handle.clone();
+        let storage = sim.heights.as_ptr();
+        let mesh = app.world().get::<Mesh3d>(surface).unwrap().0.clone();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .get(&mesh)
+                .unwrap()
+                .count_vertices(),
+            513 * 513
+        );
+        for _ in 0..3 {
+            app.update();
+            let sim = app.world().get::<WaterSim>(surface).unwrap();
+            assert_eq!(sim.texture_handle, texture);
+            assert_eq!(sim.heights.as_ptr(), storage);
+        }
+        app.world_mut()
+            .get_mut::<PoolWater>(pool)
+            .unwrap()
+            .sim_resolution = 0;
+        app.world_mut()
+            .get_mut::<PoolWater>(pool)
+            .unwrap()
+            .mesh_subdivisions = 0;
+        app.update();
+        assert_eq!(
+            app.world().get::<WaterSim>(surface).unwrap().heights.len(),
+            1
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .get(&mesh)
+                .unwrap()
+                .count_vertices(),
+            4
+        );
+        let mut images = Assets::<Image>::default();
+        let sim = WaterSim::new(usize::MAX, 0, 0.99, 2.0, &mut images);
+        assert_eq!((sim.width, sim.height), (1024, 1));
     }
 
     #[test]

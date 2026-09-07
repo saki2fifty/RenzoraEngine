@@ -41,6 +41,8 @@ impl WaterSim {
         speed: f32,
         images: &mut Assets<Image>,
     ) -> Self {
+        let width = renzora::pool_water::pool_sim_dimension(width);
+        let height = renzora::pool_water::pool_sim_dimension(height);
         let n = width * height;
         let texture_handle = images.add(Self::create_image(width, height));
         Self {

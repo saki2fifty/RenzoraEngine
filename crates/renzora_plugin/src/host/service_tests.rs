@@ -124,10 +124,10 @@ static OBSERVED: AtomicUsize = AtomicUsize::new(usize::MAX);
 unsafe extern "C" fn observe_sources(call: *const sys::SystemCall) -> sys::SystemStatus {
     // SAFETY: the host supplies a live call for this synchronous entry.
     let call = unsafe { &*call };
-    let bits = u32::from(!call.meshes.is_null()) * sys::system_services::MESHES
-        | u32::from(!call.images.is_null()) * sys::system_services::IMAGES
-        | u32::from(!call.http.is_null()) * sys::system_services::HTTP
-        | u32::from(!call.replies.is_null()) * sys::system_services::REPLIES;
+    let bits = (u32::from(!call.meshes.is_null()) * sys::system_services::MESHES)
+        | (u32::from(!call.images.is_null()) * sys::system_services::IMAGES)
+        | (u32::from(!call.http.is_null()) * sys::system_services::HTTP)
+        | (u32::from(!call.replies.is_null()) * sys::system_services::REPLIES);
     OBSERVED.store(bits as usize, Ordering::SeqCst);
     sys::SystemStatus::Ok
 }
