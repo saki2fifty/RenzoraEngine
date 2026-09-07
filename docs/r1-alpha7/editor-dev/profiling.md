@@ -795,6 +795,13 @@ same-address re-adoption, failed-send retries and release/re-adoption.
 
 ## Lumen timing bookkeeping
 
+Lumen retains pending mesh bakes across its four-per-frame budget, including
+handle changes that would otherwise stop matching a change filter next frame.
+Mesh, standard-material and graph-material asset events invalidate affected
+samples even when the handle is unchanged. Empty bake results are retained;
+asset events can invalidate them later. Event frames inspect existing sample
+owners; the transform/culling pass remains separate and is not eliminated.
+
 Lumen's bake-timing diagnostic retains the latest 60 samples in a bounded queue
 with a running sum. Its displayed average and lifetime counters are unchanged;
 this avoids shifting and summing the history every update, not geometry work.

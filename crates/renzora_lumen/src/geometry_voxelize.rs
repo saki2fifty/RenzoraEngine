@@ -61,6 +61,43 @@ pub struct MeshVoxelSamples {
     pub albedo: LinearRgba,
 }
 
+/// Keeps transient handle-change work eligible across the bake budget.
+#[derive(Component)]
+struct PendingVoxelBake;
+
+fn event_asset_id<A: Asset>(event: &AssetEvent<A>) -> AssetId<A> {
+    match *event {
+        AssetEvent::Added { id } | AssetEvent::Modified { id }
+        | AssetEvent::Removed { id } | AssetEvent::Unused { id }
+        | AssetEvent::LoadedWithDependencies { id } => id,
+    }
+}
+
+fn invalidate_baked_assets(
+    mut commands: Commands,
+    mut meshes: MessageReader<AssetEvent<Mesh>>,
+    mut materials: MessageReader<AssetEvent<StandardMaterial>>,
+    mut graphs: MessageReader<AssetEvent<renzora_shader::material::GraphMaterial>>,
+    samples: Query<(Entity, &Mesh3d, Option<&MeshMaterial3d<StandardMaterial>>,
+        Option<&MeshMaterial3d<renzora_shader::material::GraphMaterial>>),
+        (With<MeshVoxelSamples>, Allow<bevy::ecs::entity_disabling::Disabled>)>,
+) {
+    let meshes: std::collections::HashSet<_> = meshes.read().map(event_asset_id).collect();
+    let materials: std::collections::HashSet<_> = materials.read().map(event_asset_id).collect();
+    let graphs: std::collections::HashSet<_> = graphs.read().map(event_asset_id).collect();
+    if meshes.is_empty() && materials.is_empty() && graphs.is_empty() {
+        return;
+    }
+    for (entity, mesh, material, graph) in &samples {
+        if meshes.contains(&mesh.id())
+            || material.is_some_and(|m| materials.contains(&m.id()))
+            || graph.is_some_and(|m| graphs.contains(&m.id()))
+        {
+            commands.entity(entity).try_insert(PendingVoxelBake);
+        }
+    }
+}
+
 /// Per-frame stats for the CPU bake throttle in
 /// `bake_mesh_samples`. Surfaces in the debugger's Lumen panel so you
 /// can see "how many meshes did we bake this frame, how long did it
@@ -139,19 +176,18 @@ fn bake_mesh_samples(
             Entity,
             &Mesh3d,
             &MeshMaterial3d<StandardMaterial>,
-            Option<&MeshVoxelSamples>,
         ),
-        Or<(Without<MeshVoxelSamples>, Changed<Mesh3d>, Changed<MeshMaterial3d<StandardMaterial>>)>,
+        Or<(Without<MeshVoxelSamples>, With<PendingVoxelBake>, Changed<Mesh3d>, Changed<MeshMaterial3d<StandardMaterial>>)>,
     >,
     graph_query: Query<
         (
             Entity,
             &Mesh3d,
             &MeshMaterial3d<renzora_shader::material::GraphMaterial>,
-            Option<&MeshVoxelSamples>,
         ),
         Or<(
             Without<MeshVoxelSamples>,
+            With<PendingVoxelBake>,
             Changed<Mesh3d>,
             Changed<MeshMaterial3d<renzora_shader::material::GraphMaterial>>,
         )>,
@@ -162,52 +198,48 @@ fn bake_mesh_samples(
     let mut budget = MAX_BAKES_PER_FRAME;
     let mut bakes = 0usize;
     let mut samples_emitted: u64 = 0;
-    for (entity, mesh_handle, mat_handle, existing) in &standard_query {
-        if budget == 0 { break; }
-        let Some(mesh) = meshes.get(&mesh_handle.0) else { continue; };
+    for (entity, mesh_handle, mat_handle) in &standard_query {
+        if budget == 0 || !meshes.contains(&mesh_handle.0) {
+            commands.entity(entity).try_insert(PendingVoxelBake);
+            continue;
+        }
+        let mesh = meshes.get(&mesh_handle.0).expect("mesh checked above");
         let albedo = standard_materials
             .get(&mat_handle.0)
             .map(|m| m.base_color.to_linear())
             .unwrap_or(LinearRgba::WHITE);
-        if let Some(n) = bake_one(&mut commands, entity, mesh, albedo, existing) {
-            samples_emitted += n as u64;
-            bakes += 1;
-        }
+        samples_emitted += bake_one(&mut commands, entity, mesh, albedo) as u64;
+        bakes += 1;
         budget -= 1;
     }
 
-    for (entity, mesh_handle, mat_handle, existing) in &graph_query {
-        if budget == 0 { break; }
-        let Some(mesh) = meshes.get(&mesh_handle.0) else { continue; };
+    for (entity, mesh_handle, mat_handle) in &graph_query {
+        if budget == 0 || !meshes.contains(&mesh_handle.0) {
+            commands.entity(entity).try_insert(PendingVoxelBake);
+            continue;
+        }
+        let mesh = meshes.get(&mesh_handle.0).expect("mesh checked above");
         let albedo = graph_materials
             .get(&mat_handle.0)
             .map(|m| m.base.base_color.to_linear())
             .unwrap_or(LinearRgba::WHITE);
-        if let Some(n) = bake_one(&mut commands, entity, mesh, albedo, existing) {
-            samples_emitted += n as u64;
-            bakes += 1;
-        }
+        samples_emitted += bake_one(&mut commands, entity, mesh, albedo) as u64;
+        bakes += 1;
         budget -= 1;
     }
 
     stats.record(start.elapsed(), bakes, samples_emitted);
 }
 
-/// Returns the number of sample positions emitted, or `None` if the
-/// bake produced nothing AND the entity already had no samples (so we
-/// also didn't insert anything). The count is what the perf stats
-/// roll up into "samples baked this frame".
+/// Returns the number of sample positions emitted. Empty results are retained
+/// too, so they do not consume the bake budget again every frame.
 fn bake_one(
     commands: &mut Commands,
     entity: Entity,
     mesh: &Mesh,
     albedo: LinearRgba,
-    existing: Option<&MeshVoxelSamples>,
-) -> Option<usize> {
+) -> usize {
     let local_positions = sample_mesh_surface(mesh, SAMPLE_SPACING);
-    if local_positions.is_empty() && existing.is_none() {
-        return None;
-    }
     let n = local_positions.len();
     // `try_insert`: the mesh entity can be despawned (scene reload, deletion,
     // play-mode cleanup) between the query and this command flushing — skip it
@@ -216,7 +248,8 @@ fn bake_one(
         local_positions,
         albedo,
     });
-    Some(n)
+    commands.entity(entity).try_remove::<PendingVoxelBake>();
+    n
 }
 
 /// Generate sample points across the mesh's surface, spaced roughly
@@ -576,7 +609,7 @@ impl Plugin for GeometryVoxelizePlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "voxel_geo_inject.wgsl");
         app.init_resource::<LumenBakeStats>();
-        app.add_systems(Update, bake_mesh_samples);
+        app.add_systems(Update, (invalidate_baked_assets, bake_mesh_samples).chain());
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<GeometrySampleBuffer>();
@@ -605,6 +638,79 @@ impl Plugin for GeometryVoxelizePlugin {
 #[cfg(test)]
 mod retained_sample_tests {
     use super::*;
+
+    #[test]
+    fn same_id_asset_edits_rebake_and_empty_meshes_settle() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<renzora_shader::material::GraphMaterial>>()
+            .add_message::<AssetEvent<Mesh>>()
+            .add_message::<AssetEvent<StandardMaterial>>()
+            .add_message::<AssetEvent<renzora_shader::material::GraphMaterial>>()
+            .init_resource::<LumenBakeStats>()
+            .add_systems(Update, (invalidate_baked_assets, bake_mesh_samples).chain());
+        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>()
+            .add(Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default()));
+        let material = app.world_mut().resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let entity = app.world_mut().spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()))).id();
+        app.update();
+        for _ in 0..1000 { app.update(); }
+        assert_eq!(app.world().resource::<LumenBakeStats>().total_bakes, 1);
+        assert!(app.world().get::<MeshVoxelSamples>(entity).unwrap().local_positions.is_empty());
+        *app.world_mut().resource_mut::<Assets<Mesh>>().get_mut(&mesh).unwrap() = Mesh::from(Cuboid::new(1.0, 1.0, 1.0));
+        app.world_mut().write_message(AssetEvent::<Mesh>::Modified { id: mesh.id() });
+        app.update();
+        assert!(!app.world().get::<MeshVoxelSamples>(entity).unwrap().local_positions.is_empty());
+        app.world_mut().entity_mut(entity).insert(bevy::ecs::entity_disabling::Disabled);
+        app.world_mut().resource_mut::<Assets<StandardMaterial>>().get_mut(&material).unwrap().base_color = Color::srgb(1.0, 0.0, 0.0);
+        app.world_mut().write_message(AssetEvent::<StandardMaterial>::Modified { id: material.id() });
+        app.update();
+        assert!(app.world().get::<PendingVoxelBake>(entity).is_some());
+        app.world_mut().entity_mut(entity).remove::<bevy::ecs::entity_disabling::Disabled>();
+        app.update();
+        assert_eq!(app.world().get::<MeshVoxelSamples>(entity).unwrap().albedo, LinearRgba::RED);
+        let graph = app.world_mut()
+            .resource_mut::<Assets<renzora_shader::material::GraphMaterial>>()
+            .add(renzora_shader::material::GraphMaterial::default());
+        app.world_mut().entity_mut(entity)
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .insert(MeshMaterial3d(graph.clone()));
+        app.update();
+        app.world_mut().resource_mut::<Assets<renzora_shader::material::GraphMaterial>>()
+            .get_mut(&graph).unwrap().base.base_color = Color::srgb(0.0, 1.0, 0.0);
+        app.world_mut().write_message(AssetEvent::<renzora_shader::material::GraphMaterial>::Modified { id: graph.id() });
+        app.update();
+        assert_eq!(app.world().get::<MeshVoxelSamples>(entity).unwrap().albedo, LinearRgba::GREEN);
+    }
+
+    #[test]
+    fn changed_meshes_beyond_bake_budget_are_not_forgotten() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<renzora_shader::material::GraphMaterial>>()
+            .init_resource::<LumenBakeStats>()
+            .add_systems(Update, bake_mesh_samples);
+        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(1.0, 1.0, 1.0));
+        let material = app.world_mut().resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let entities: Vec<_> = (0..MAX_BAKES_PER_FRAME + 1).map(|_| {
+            app.world_mut().spawn((
+                Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()),
+                MeshVoxelSamples { local_positions: vec![Vec3::splat(99.0)], albedo: LinearRgba::BLACK },
+            )).id()
+        }).collect();
+        for _ in 0..3 {
+            app.update();
+            assert!(app.world().resource::<LumenBakeStats>().bakes_last_frame <= MAX_BAKES_PER_FRAME);
+        }
+        for entity in entities {
+            assert_ne!(app.world().get::<MeshVoxelSamples>(entity).unwrap().local_positions, vec![Vec3::splat(99.0)]);
+        }
+    }
 
     #[test]
     fn rolling_bake_statistics_match_reference_after_wrap_and_clone() {

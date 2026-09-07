@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 04:05 UTC
+
+- Fixed Lumen lighting updates being lost when several meshes change at once.
+- Refreshed lighting samples after mesh or material asset edits, and stopped rebaking unchanged empty meshes.
+
 ## September 7, 2026 — 03:58 UTC
 
 - Reduced Lumen timing-statistics bookkeeping while preserving the same rolling average.
