@@ -1,10 +1,11 @@
 # Changelog
 
-This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
+This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
 ## September 7, 2026 — 15:48 UTC
 
 - Added a prominent, clickable changelog banner at the top of the README.
+- Simplified the changelog's introductory wording.
 
 ## September 7, 2026 — 15:43 UTC
 
