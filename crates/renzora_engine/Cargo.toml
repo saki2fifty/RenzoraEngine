@@ -120,5 +120,8 @@ web-time = "1.1"
 # handle — see the wasm arm in `asset_reader::read`.
 renzora_webfs = { path = "../renzora_webfs" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

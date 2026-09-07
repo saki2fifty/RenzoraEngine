@@ -4,7 +4,9 @@ This page gives an overview of changes made on this fork. The newest changes are
 
 ## September 7, 2026 — 20:45 UTC
 
+- Added regression checks for shape browsing, click-to-create and undo, camera settings, sunlight, and network failures; coverage requirements remain unchanged.
 - Fixed plugin test-file discovery for coverage and custom build folders, without disabling coverage checks.
+- Removed the two completed release work branches after verifying their changes are preserved in main.
 
 ## September 7, 2026 — 18:18 UTC
 

@@ -30,6 +30,10 @@ const LABEL_H: f32 = 26.0;
 /// Total tile height: the icon block plus the label block plus padding.
 const TILE_H: f32 = 34.0 + LABEL_H + 12.0;
 
+#[cfg(test)]
+#[path = "native_tests.rs"]
+mod tests;
+
 pub struct NativeShapeLibrary;
 
 impl Plugin for NativeShapeLibrary {

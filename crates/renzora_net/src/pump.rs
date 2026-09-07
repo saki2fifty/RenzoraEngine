@@ -48,6 +48,10 @@ pub struct NetLink {
 /// failing.
 const GRACE_FRAMES: u32 = 300;
 
+#[cfg(test)]
+#[path = "pump_tests.rs"]
+mod tests;
+
 struct Loaded {
     name: String,
     state: usize,

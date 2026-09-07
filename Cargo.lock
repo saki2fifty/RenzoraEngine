@@ -7839,6 +7839,7 @@ dependencies = [
  "rfd",
  "ron 0.8.1",
  "serde",
+ "tempfile",
  "thiserror 2.0.20",
  "toml 0.8.23",
  "web-time",
