@@ -793,7 +793,7 @@ semantics are checked against the previous owned-board equality.
 An actual link-boundary test checks one send across 1,000 settled updates,
 same-address re-adoption, failed-send retries and release/re-adoption.
 
-## Loading snapshot publication
+## Cloth wind publication
 
 Cloth's world-wind bridge compares the effective velocity before writing its
 owned force slot. Identical wind does not mark the force resource changed;
@@ -801,10 +801,14 @@ gust changes, missing slots and external slot replacements still synchronize.
 Additional authored force slots remain untouched. This does not pause cloth
 simulation or establish a measured FPS gain.
 
+## Loading snapshot publication
+
 Asset and scene-loading bridges compare their complete public snapshots before
 writing. Unchanged snapshots do not publish resource changes. Asset elapsed time
 still advances after completion as before, so those clock changes still publish;
-the mesh-instance counting pass also remains. Missing snapshots are recreated.
+scene totals are now recounted only after mesh data changes/removals or archive
+resource changes. The component change-filter check and pending-load pass remain;
+this is not a fully event-driven loading tracker. Missing snapshots are recreated.
 
 ## Collision snapshot change tracking
 

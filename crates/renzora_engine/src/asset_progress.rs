@@ -1,8 +1,8 @@
 //! Runtime asset-load progress — exposed to scripts so a boot scene can
 //! drive a loading bar against actual load state.
 //!
-//! Every frame, [`tick_asset_load_progress`] walks the scene's
-//! `MeshInstanceData` entities and counts how many still carry
+//! [`tick_asset_load_progress`] refreshes scene totals when mesh data or the
+//! archive changes and counts how many entities still carry
 //! `PendingMeshInstanceRehydrate` (i.e. haven't had their `Gltf` asset
 //! finish loading). The pending paths are looked up in the rpak index to
 //! compute byte-level totals; without an rpak the byte counts stay zero
@@ -103,35 +103,53 @@ impl AssetLoadProgress {
 
 /// Refresh [`AssetLoadProgress`] from current scene state.
 ///
-/// Runs every `Update`. Counts files via `MeshInstanceData` + the
-/// `PendingMeshInstanceRehydrate` marker; computes byte sums by looking
-/// up each entity's `model_path` in the rpak index.
+/// Runs every `Update`. Recounts scene totals after mesh or archive changes;
+/// pending markers are checked each time so asynchronous completions remain
+/// visible without changing the loading state machine.
 pub fn tick_asset_load_progress(
     instances: Query<&MeshInstanceData>,
+    changed_instances: Query<(), Changed<MeshInstanceData>>,
+    mut removed_instances: RemovedComponents<MeshInstanceData>,
+    mut totals: Local<Option<(u32, u64, bool)>>,
     // Only models loaded through bevy_gltf are ever "pending" — see the `gltf`
     // feature. A project built from engine primitives has none.
-    #[cfg(feature = "gltf")]
-    pending: Query<&MeshInstanceData, With<scene_io::PendingMeshInstanceRehydrate>>,
+    #[cfg(feature = "gltf")] pending: Query<
+        &MeshInstanceData,
+        With<scene_io::PendingMeshInstanceRehydrate>,
+    >,
     vfs: Option<Res<Vfs>>,
     time: Res<Time>,
     mut progress: ResMut<AssetLoadProgress>,
 ) {
     // Count files. Only consider entities whose `model_path` is set —
     // primitives without an external mesh have nothing to load.
-    let mut total_files: u32 = 0;
-    let mut total_bytes: u64 = 0;
     let archive = vfs.as_ref().and_then(|v| v.archive());
-
-    for data in instances.iter() {
-        if let Some(path) = data.model_path.as_deref() {
-            total_files += 1;
-            if let Some(archive) = archive {
-                if let Some(entry) = archive.entry(path) {
-                    total_bytes += entry.compressed_size;
+    // Drain removals even when another invalidation already requires a recount.
+    // Pending-marker changes affect loaded counts, not scene totals.
+    let removed = removed_instances.read().count() != 0;
+    let recount = totals.is_none()
+        || removed
+        || !changed_instances.is_empty()
+        || vfs.as_ref().is_some_and(|v| v.is_changed())
+        || totals
+            .as_ref()
+            .is_some_and(|(_, _, present)| *present != vfs.is_some());
+    if recount {
+        let mut total_files = 0;
+        let mut total_bytes = 0;
+        for data in instances.iter() {
+            if let Some(path) = data.model_path.as_deref() {
+                total_files += 1;
+                if let Some(archive) = archive {
+                    if let Some(entry) = archive.entry(path) {
+                        total_bytes += entry.compressed_size;
+                    }
                 }
             }
         }
+        *totals = Some((total_files, total_bytes, vfs.is_some()));
     }
+    let (total_files, total_bytes, _) = totals.expect("totals initialized above");
 
     // `mut` is only exercised by the glTF-pending loop below; without models
     // nothing is ever pending, so the three stay at their initial values.
@@ -296,6 +314,100 @@ pub fn publish_scene_load_to_bridge(
 mod tests {
     use super::*;
     use renzora_scripting::{AssetProgressBridge, SceneLoadBridge};
+
+    #[test]
+    fn cached_totals_follow_edits_removals_and_pending_transitions() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<AssetLoadProgress>()
+            .add_systems(Update, tick_asset_load_progress);
+        app.update();
+        let entity = app
+            .world_mut()
+            .spawn(MeshInstanceData {
+                model_path: Some("one.glb".into()),
+            })
+            .id();
+        app.update();
+        for _ in 0..1000 {
+            app.update();
+            let progress = app.world().resource::<AssetLoadProgress>();
+            assert_eq!((progress.total_files, progress.loaded_files), (1, 1));
+        }
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(scene_io::PendingMeshInstanceRehydrate(Handle::default()));
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().loaded_files, 0);
+        assert!(app.world().resource::<AssetLoadProgress>().is_loading());
+        app.world_mut()
+            .get_mut::<MeshInstanceData>(entity)
+            .unwrap()
+            .model_path = None;
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_files, 0);
+        app.world_mut()
+            .get_mut::<MeshInstanceData>(entity)
+            .unwrap()
+            .model_path = Some("two.glb".into());
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_files, 1);
+        app.world_mut()
+            .entity_mut(entity)
+            .remove::<MeshInstanceData>();
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_files, 0);
+        app.world_mut().entity_mut(entity).insert(MeshInstanceData {
+            model_path: Some("three.glb".into()),
+        });
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_files, 1);
+        app.world_mut().despawn(entity);
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_files, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn cached_bytes_follow_archive_insertion_replacement_and_removal() {
+        let make_vfs = |bytes: Vec<u8>| {
+            let mut packer = renzora_rpak::RpakPacker::new();
+            packer.add_file("one.glb", bytes);
+            Vfs::from_rpak_bytes(&packer.finish(0).unwrap()).unwrap()
+        };
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<AssetLoadProgress>()
+            .add_systems(Update, tick_asset_load_progress);
+        app.world_mut().spawn(MeshInstanceData {
+            model_path: Some("one.glb".into()),
+        });
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_bytes, 0);
+        for data in [vec![1; 17], vec![2; 91]] {
+            let vfs = make_vfs(data);
+            let expected = vfs
+                .archive()
+                .unwrap()
+                .entry("one.glb")
+                .unwrap()
+                .compressed_size;
+            app.insert_resource(vfs);
+            app.update();
+            assert_eq!(
+                app.world().resource::<AssetLoadProgress>().total_bytes,
+                expected
+            );
+            app.update();
+            assert_eq!(
+                app.world().resource::<AssetLoadProgress>().loaded_bytes,
+                expected
+            );
+        }
+        app.world_mut().remove_resource::<Vfs>();
+        app.update();
+        assert_eq!(app.world().resource::<AssetLoadProgress>().total_bytes, 0);
+    }
 
     #[test]
     fn unchanged_bridges_stay_quiet_but_elapsed_and_scene_edits_publish() {
