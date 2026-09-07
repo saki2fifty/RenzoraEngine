@@ -6,6 +6,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 
 - Removed unused UI-helper warnings from lean builds while preserving full markup UI support.
 - Stopped unchanged collision snapshots from triggering unnecessary downstream updates.
+- Avoided republishing unchanged loading-status snapshots while preserving elapsed-time updates.
 
 ## September 6, 2026 — 23:48 UTC
 

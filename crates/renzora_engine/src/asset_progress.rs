@@ -227,6 +227,19 @@ pub fn publish_asset_progress_to_bridge(
         LoadProgressState::Loading => "loading",
         LoadProgressState::Done => "done",
     };
+    let fraction = progress.fraction();
+    if bridge.snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.state == state
+            && snapshot.total_files == progress.total_files
+            && snapshot.loaded_files == progress.loaded_files
+            && snapshot.total_bytes == progress.total_bytes
+            && snapshot.loaded_bytes == progress.loaded_bytes
+            && snapshot.current_path == progress.current_path
+            && snapshot.elapsed_secs == progress.elapsed_secs
+            && snapshot.fraction == fraction
+    }) {
+        return;
+    }
     let snapshot = bridge.snapshot.get_or_insert_with(Default::default);
     snapshot.state = state;
     snapshot.total_files = progress.total_files;
@@ -235,7 +248,7 @@ pub fn publish_asset_progress_to_bridge(
     snapshot.loaded_bytes = progress.loaded_bytes;
     update_progress_path(&mut snapshot.current_path, progress.current_path.as_deref());
     snapshot.elapsed_secs = progress.elapsed_secs;
-    snapshot.fraction = progress.fraction();
+    snapshot.fraction = fraction;
 }
 
 /// No-op stand-in when scripting is stripped; see
@@ -266,6 +279,13 @@ pub fn publish_scene_load_to_bridge(
         SceneLoadPhase::Ready => "ready",
         SceneLoadPhase::Failed => "failed",
     };
+    if bridge.snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.phase == phase
+            && snapshot.current_path == state.current_path
+            && snapshot.progress == state.progress
+    }) {
+        return;
+    }
     let snapshot = bridge.snapshot.get_or_insert_with(Default::default);
     snapshot.phase = phase;
     update_progress_path(&mut snapshot.current_path, state.current_path.as_deref());
@@ -276,6 +296,38 @@ pub fn publish_scene_load_to_bridge(
 mod tests {
     use super::*;
     use renzora_scripting::{AssetProgressBridge, SceneLoadBridge};
+
+    #[test]
+    fn unchanged_bridges_stay_quiet_but_elapsed_and_scene_edits_publish() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<AssetLoadProgress>();
+        world.init_resource::<AssetProgressBridge>();
+        world.init_resource::<SceneLoadBridge>();
+        world.insert_resource(scene_io::SceneLoadState {
+            phase: scene_io::SceneLoadPhase::Ready,
+            current_path: Some("scene.ron".into()),
+            progress: 1.0,
+        });
+        world.run_system_once(publish_asset_progress_to_bridge).unwrap();
+        world.run_system_once(publish_scene_load_to_bridge).unwrap();
+        for _ in 0..1000 {
+            world.clear_trackers();
+            world.run_system_once(publish_asset_progress_to_bridge).unwrap();
+            world.run_system_once(publish_scene_load_to_bridge).unwrap();
+            assert!(!world.is_resource_changed::<AssetProgressBridge>());
+            assert!(!world.is_resource_changed::<SceneLoadBridge>());
+        }
+        world.resource_mut::<AssetLoadProgress>().elapsed_secs = 3.0;
+        world.resource_mut::<scene_io::SceneLoadState>().current_path = None;
+        world.clear_trackers();
+        world.run_system_once(publish_asset_progress_to_bridge).unwrap();
+        world.run_system_once(publish_scene_load_to_bridge).unwrap();
+        assert!(world.is_resource_changed::<AssetProgressBridge>());
+        assert!(world.is_resource_changed::<SceneLoadBridge>());
+        assert_eq!(world.resource::<AssetProgressBridge>().snapshot.as_ref().unwrap().elapsed_secs, 3.0);
+        assert!(world.resource::<SceneLoadBridge>().snapshot.as_ref().unwrap().current_path.is_none());
+    }
 
     #[test]
     fn progress_retains_paths_without_changing_lifecycle_or_elapsed_time() {

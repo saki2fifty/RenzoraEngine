@@ -793,6 +793,13 @@ semantics are checked against the previous owned-board equality.
 An actual link-boundary test checks one send across 1,000 settled updates,
 same-address re-adoption, failed-send retries and release/re-adoption.
 
+## Loading snapshot publication
+
+Asset and scene-loading bridges compare their complete public snapshots before
+writing. Unchanged snapshots do not publish resource changes. Asset elapsed time
+still advances after completion as before, so those clock changes still publish;
+the mesh-instance counting pass also remains. Missing snapshots are recreated.
+
 ## Collision snapshot change tracking
 
 The 2D and 3D collision readers share change publication: settled contact sets
