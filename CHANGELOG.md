@@ -6,6 +6,7 @@ This page gives an overview of changes made on this fork. The newest changes are
 
 - Release packaging now rejects reused output folders and duplicate platform inputs instead of risking mixed or ambiguous downloads.
 - Linux folder-based packages now leave out retired SDK files and engine libraries while keeping current plugins and the source SDK.
+- Incomplete runtime outputs now stop packaging before any platform archive is created, including missing web runtime files.
 
 ## September 7, 2026 — 16:50 UTC
 

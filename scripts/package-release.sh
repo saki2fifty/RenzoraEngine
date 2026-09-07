@@ -277,6 +277,30 @@ if [ ${#FOUND[@]} -eq 0 ]; then
     exit 1
 fi
 
+# Validate runtime prerequisites across all inputs before producing any archive.
+# A recognised folder name alone is not evidence of a completed build.
+for d in "$ARTIFACTS_DIR"/*/*/; do
+    [ -d "$d" ] || continue
+    platform=$(basename "$d")
+    contains "$platform" "${KNOWN_PLATFORMS[@]}" || continue
+    if [ "$platform" = web-wasm32 ]; then
+        for name in renzora-runtime.js renzora-runtime_bg.wasm; do
+            if [ ! -s "$d$name" ]; then
+                echo "ERROR: missing or empty runtime file: $d$name" >&2
+                exit 1
+            fi
+        done
+    else
+        src=$(runtime_root "${d%/}")
+        name=renzora
+        [[ "$platform" == windows-* ]] && name=renzora.exe
+        if [ -z "$src" ] || [ ! -s "$src/$name" ]; then
+            echo "ERROR: missing or empty runtime $name for $platform ($d)" >&2
+            exit 1
+        fi
+    fi
+done
+
 # Two levels: <artifacts-dir>/<artifact-name>/<platform-dir>. A build job that
 # uploaded `dist/` gives exactly this shape.
 for d in "$ARTIFACTS_DIR"/*/*/; do

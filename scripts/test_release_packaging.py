@@ -90,6 +90,33 @@ class ReleasePackages(unittest.TestCase):
             self.assertIn("no recognised platform", result.stderr)
             self.assertEqual(list((root / "out").iterdir()), [])
 
+    def test_incomplete_runtime_inputs_fail_before_any_platform_is_packaged(self):
+        for platform, files in (
+            ("windows-x64", {}),
+            ("windows-x64", {"renzora.exe": ""}),
+            ("windows-x64", {"renzora": "wrong platform"}),
+            ("linux-x64", {"renzora.exe": "wrong platform"}),
+            ("macos-arm64", {"Renzora.app/Contents/MacOS/renzora": ""}),
+            ("web-wasm32", {"renzora-runtime.js": "fixture"}),
+            ("web-wasm32", {"renzora-runtime_bg.wasm": "fixture"}),
+            ("web-wasm32", {"renzora-runtime.js": "fixture", "renzora-runtime_bg.wasm": ""}),
+        ):
+            with self.subTest(platform=platform, files=files), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                good = root / "artifacts/a/windows-arm64"
+                good.mkdir(parents=True)
+                (good / "renzora.exe").write_text("valid earlier input")
+                staged = root / "artifacts/z" / platform
+                staged.mkdir(parents=True)
+                for name, contents in files.items():
+                    path = staged / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(contents)
+                result = self.run_packager(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("missing or empty runtime", result.stderr)
+                self.assertEqual(list((root / "out").iterdir()), [])
+
     def test_desktop_layouts_keep_source_sdk_only_in_engine_package(self):
         for platform, prefix, suffix in (
             ("windows-x64", "", ".exe"),
@@ -116,6 +143,8 @@ class ReleasePackages(unittest.TestCase):
                         self.assertTrue((staged / prefix / obsolete).is_file())
                 with zipfile.ZipFile(out / f"renzora-runtime-{platform}.zip") as archive:
                     self.assertIn(f"renzora{suffix}", archive.namelist())
+                    if not suffix:
+                        self.assertNotEqual(archive.getinfo("renzora").external_attr >> 16 & 0o111, 0)
                     self.assertIn("plugins/example.data", archive.namelist())
                     self.assertFalse(any("rust-sdk" in name or "renzora-editor" in name
                                          for name in archive.namelist()))

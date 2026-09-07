@@ -61,6 +61,12 @@ Use a fresh output directory for each attempt. Legacy host-library and SDK
 exclusions apply to flat, Linux AppDir, and macOS bundle layouts, while libraries
 inside `plugins/` and the current `rust-sdk/` source package remain included.
 
+Before creating archives, every recognised platform must contain a nonempty
+runtime executable with the expected filename (`renzora.exe` on Windows,
+`renzora` on Linux/macOS). Web inputs require both `renzora-runtime.js` and
+`renzora-runtime_bg.wasm`. These checks catch incomplete staging; they do not
+verify executable architecture, launch compatibility, or full editor readiness.
+
 ## Validation
 
 ```sh
