@@ -218,6 +218,10 @@ fn pump_until_loaded(app: &mut App, handle: &Handle<HtmlTemplate>) {
 
 ## What CI runs
 
+Undo-history capacity is also tested through the consumer API in `renzora_undo`: recording 501 distinct edits retains the newest 500 and evicts the oldest. The implementation limit stays private to the shared contract crate; this test does not import an implementation constant from another crate.
+
+HTTP round-trip tests register a fake backend with an explicit owner and generation, matching the current host registration contract. They exercise request delivery, concurrency, streaming, delayed registration, and backend loss without making live HTTP requests.
+
 `.github/workflows/test.yml` runs on pushes and pull requests to this fork's `main`, with manual dispatch available for work branches. Native jobs use `rust:1.95.0-bookworm`; the local `native-ci` action installs Linux build dependencies. No official-project container is pulled. Coverage uses the same setup. The workflow also checks that automation contains no official publishing destinations.
 
 Two jobs:

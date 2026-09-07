@@ -135,6 +135,7 @@ fn app_with_backend() -> App {
         state: desc.state as usize,
         entry: desc.entry,
         owner: 0,
+        owner_generation: 0,
     })));
     app
 }
@@ -306,6 +307,7 @@ fn a_request_made_before_the_backend_loads_waits_for_it() {
         state: desc.state as usize,
         entry: desc.entry,
         owner: 0,
+        owner_generation: 0,
     })));
     pump_until(&mut app, || worker.is_finished());
 

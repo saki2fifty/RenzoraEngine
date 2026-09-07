@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 14:03 UTC
+
+- Repaired outdated undo-history and network test setup so automated checks can validate the current engine again.
+
 ## September 7, 2026 — 13:18 UTC
 
 - Directed newly built editors' update checks, export downloads, repository links, and GitHub statistics to this independent fork.

@@ -940,7 +940,7 @@ mod tests {
     }
 
     impl CounterCmd {
-        fn new(id: &str, delta: i32) -> Box<dyn UndoCommand> {
+        fn boxed(id: &str, delta: i32) -> Box<dyn UndoCommand> {
             Box::new(CounterCmd {
                 id: id.to_string(),
                 delta,
@@ -992,10 +992,8 @@ mod tests {
     fn world() -> World {
         let mut w = World::new();
         w.insert_resource(Log::default());
-        w.insert_resource(UndoStacks {
-            active: UndoContext::Lifecycle,
-            ..default()
-        });
+        w.init_resource::<UndoStacks>();
+        w.resource_mut::<UndoStacks>().active = UndoContext::Lifecycle;
         w
     }
 
@@ -1014,7 +1012,7 @@ mod tests {
     #[test]
     fn execute_applies_command_and_records_it() {
         let mut w = world();
-        execute(&mut w, ctx(), CounterCmd::new("a", 5));
+        execute(&mut w, ctx(), CounterCmd::boxed("a", 5));
 
         assert_eq!(counter(&w), 5, "execute should run the command");
         assert_eq!(events(&w), vec!["exec:a"]);
@@ -1029,7 +1027,7 @@ mod tests {
     #[test]
     fn record_pushes_without_executing() {
         let mut w = world();
-        record(&mut w, ctx(), CounterCmd::new("a", 5));
+        record(&mut w, ctx(), CounterCmd::boxed("a", 5));
 
         // record must NOT call execute.
         assert_eq!(counter(&w), 0);
@@ -1040,9 +1038,9 @@ mod tests {
     #[test]
     fn push_three_undo_twice_yields_exact_state() {
         let mut w = world();
-        execute(&mut w, ctx(), CounterCmd::new("a", 1));
-        execute(&mut w, ctx(), CounterCmd::new("b", 10));
-        execute(&mut w, ctx(), CounterCmd::new("c", 100));
+        execute(&mut w, ctx(), CounterCmd::boxed("a", 1));
+        execute(&mut w, ctx(), CounterCmd::boxed("b", 10));
+        execute(&mut w, ctx(), CounterCmd::boxed("c", 100));
         assert_eq!(counter(&w), 111);
 
         let active = ctx();
@@ -1069,9 +1067,9 @@ mod tests {
     #[test]
     fn redo_reapplies_in_original_order() {
         let mut w = world();
-        execute(&mut w, ctx(), CounterCmd::new("a", 1));
-        execute(&mut w, ctx(), CounterCmd::new("b", 10));
-        execute(&mut w, ctx(), CounterCmd::new("c", 100));
+        execute(&mut w, ctx(), CounterCmd::boxed("a", 1));
+        execute(&mut w, ctx(), CounterCmd::boxed("b", 10));
+        execute(&mut w, ctx(), CounterCmd::boxed("c", 100));
 
         undo_once(&mut w); // undo c
         undo_once(&mut w); // undo b
@@ -1097,14 +1095,14 @@ mod tests {
     #[test]
     fn new_action_after_undo_clears_redo_stack() {
         let mut w = world();
-        execute(&mut w, ctx(), CounterCmd::new("a", 1));
-        execute(&mut w, ctx(), CounterCmd::new("b", 10));
+        execute(&mut w, ctx(), CounterCmd::boxed("a", 1));
+        execute(&mut w, ctx(), CounterCmd::boxed("b", 10));
 
         undo_once(&mut w); // undo b -> redo has [b]
         assert!(w.resource::<UndoStacks>().can_redo(&ctx()));
 
         // A brand-new action must invalidate the redo branch.
-        execute(&mut w, ctx(), CounterCmd::new("c", 100));
+        execute(&mut w, ctx(), CounterCmd::boxed("c", 100));
 
         let stacks = w.resource::<UndoStacks>();
         assert!(!stacks.can_redo(&ctx()), "redo invalidated by new action");
@@ -1147,7 +1145,7 @@ mod tests {
     #[test]
     fn clear_drops_both_stacks_for_context() {
         let mut w = world();
-        execute(&mut w, ctx(), CounterCmd::new("a", 1));
+        execute(&mut w, ctx(), CounterCmd::boxed("a", 1));
         undo_once(&mut w); // populate redo
         {
             let s = w.resource::<UndoStacks>();
@@ -1166,11 +1164,11 @@ mod tests {
     #[test]
     fn clear_is_scoped_to_one_context() {
         let mut w = world();
-        execute(&mut w, UndoContext::Lifecycle, CounterCmd::new("a", 1));
+        execute(&mut w, UndoContext::Lifecycle, CounterCmd::boxed("a", 1));
         execute(
             &mut w,
             UndoContext::Other("x".into()),
-            CounterCmd::new("b", 2),
+            CounterCmd::boxed("b", 2),
         );
 
         w.resource_mut::<UndoStacks>().clear(&UndoContext::Lifecycle);
@@ -1186,11 +1184,11 @@ mod tests {
     #[test]
     fn clear_all_wipes_every_context() {
         let mut w = world();
-        execute(&mut w, UndoContext::Lifecycle, CounterCmd::new("a", 1));
+        execute(&mut w, UndoContext::Lifecycle, CounterCmd::boxed("a", 1));
         execute(
             &mut w,
             UndoContext::Other("x".into()),
-            CounterCmd::new("b", 2),
+            CounterCmd::boxed("b", 2),
         );
 
         w.resource_mut::<UndoStacks>().clear_all();
@@ -1203,19 +1201,20 @@ mod tests {
     #[test]
     fn capacity_evicts_oldest_entries() {
         let mut w = world();
-        // Push one more than the cap.
-        for i in 0..(MAX_DEPTH + 1) {
-            record(&mut w, ctx(), CounterCmd::new(&format!("c{i}"), 1));
+        // Assert the consumer-visible policy, not the contract's private constant.
+        const EXPECTED_HISTORY_LIMIT: usize = 500;
+        for i in 0..(EXPECTED_HISTORY_LIMIT + 1) {
+            record(&mut w, ctx(), CounterCmd::boxed(&format!("c{i}"), 1));
         }
 
         let s = w.resource::<UndoStacks>();
         let (undo, _redo) = s.labels(&ctx());
-        assert_eq!(undo.len(), MAX_DEPTH, "stack capped at MAX_DEPTH");
+        assert_eq!(undo.len(), EXPECTED_HISTORY_LIMIT, "history stays bounded");
         // Oldest ("c0") evicted; newest still present at the back.
         assert_eq!(undo.first().map(String::as_str), Some("c1"));
         assert_eq!(
             undo.last().map(String::as_str),
-            Some(format!("c{}", MAX_DEPTH).as_str())
+            Some(format!("c{}", EXPECTED_HISTORY_LIMIT).as_str())
         );
     }
 
@@ -1334,7 +1333,7 @@ mod tests {
         // Back is mergeable "drag"; populate the redo branch, then a same-id
         // mergeable arrives and must clear redo (merge path, not push path).
         record(&mut w, ctx(), CounterCmd::mergeable("drag", 1)); // undo=[drag]
-        record(&mut w, ctx(), CounterCmd::new("z", 0)); // undo=[drag,z]
+        record(&mut w, ctx(), CounterCmd::boxed("z", 0)); // undo=[drag,z]
         undo_once(&mut w); // undo=[drag], redo=[z]
         assert!(w.resource::<UndoStacks>().can_redo(&ctx()));
 
