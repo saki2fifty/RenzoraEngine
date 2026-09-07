@@ -32,14 +32,11 @@ name: Build Engine
 #   wasm     wasm32            container                (`build` job)
 #
 # ── Why every desktop slice is native ────────────────────────────────────────
-# Because an editor cannot be cross-built. It ships a plugin SDK so the machine
-# it runs on can compile native plugins and Rust scripts, and an SDK's
-# proc-macro dylibs are artifacts of whatever ran the compiler — build it in the
-# Linux container and the Windows user gets Linux `.so` proc macros, which their
-# `rustc` cannot load: `can't find crate for bevy_derive`, and with it every name
-# behind `bevy::prelude`. Nor can it be patched afterwards, since each `.rmeta`
-# records the hash of what it was compiled against. `docker/build-all.sh` staged
-# such an SDK for months before anyone ran a cross-built editor's script tier.
+# Native runners remain this workflow's desktop build strategy. The retired
+# compiled Bevy SDK is no longer a reason to prohibit cross-compilation: live
+# Rust extensions ship a source SDK, and engine extensions use a separate build
+# kit. Cross-building an executable does not by itself validate its companions,
+# installed compiler/build kit, or operation on the target platform.
 #
 # So the container now stages runtimes only, and the desktop lanes here build
 # the published editors on their own operating systems. Each `cargo renzora dist`
@@ -175,13 +172,9 @@ jobs:
           # Desktop platforms build NATIVELY, one runner each; the containers
           # keep only what has no native runner.
           #
-          # This is not a preference. An editor ships a plugin SDK, and an SDK
-          # cannot be cross-built: its proc-macro dylibs are artifacts of the
-          # machine that ran the compiler, so a Linux container produces Linux
-          # ones whatever `--target` says. Handing those to a Windows user gives
-          # `can't find crate for bevy_derive` and, behind it, every name in
-          # `bevy::prelude`. `docker/build-all.sh` therefore stages no editor at
-          # all, which leaves the published editors to these lanes.
+          # This preserves the current delivery layout, not a compiled-SDK
+          # restriction. docker/build-all.sh stages desktop runtimes only;
+          # these native lanes stage the editor and its source SDK as well.
           #
           # Desktop containers are gone rather than kept for the runtimes,
           # because a native tree already yields both release assets — the
@@ -296,14 +289,10 @@ jobs:
           retention-days: 7
 
   # ── Desktop — native, one runner per platform, no container ──────────────────
-  # These lanes build the published EDITORS, and they are native because an
-  # editor cannot be cross-built. It carries a plugin SDK so the machine it runs
-  # on can compile native plugins and Rust scripts, and an SDK's proc-macro
-  # dylibs are artifacts of whatever ran the compiler — cross-compiling in the
-  # Linux container yields Linux ones no matter what `--target` says. The user
-  # then gets `can't find crate for bevy_derive` and every name behind
-  # `bevy::prelude` with it. So `docker/build-all.sh` stages no editor, and the
-  # editors are built here instead, each on its own operating system.
+  # These lanes build and stage desktop editors on their target operating
+  # systems. The source SDK contains no precompiled Bevy metadata. Keep this
+  # release strategy separate from cross-compilation support: neither native
+  # nor cross compilation alone proves installed-extension or GUI acceptance.
   #
   # Every lane runs `cargo renzora dist` — the same xtask a contributor uses
   # locally — which compiles the workspace on the `dist` profile and stages

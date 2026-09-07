@@ -84,7 +84,16 @@ The installed build needs the exact Rust toolchain and native system build tools
 
 ## Cross-platform builds
 
-The `docker/` toolchains support cross-compiling runtime/export artifacts. A cross-check such as the following validates Windows compilation without producing an editor EXE:
+The `docker/` toolchains support cross-compiling runtime/export artifacts.
+
+The release workflow currently uses native runners for desktop editor packages;
+`docker/build-all.sh` stages desktop runtimes, not complete editor installations.
+This is the current staging strategy, not a restriction imposed by the retired
+compiled Bevy SDK. The source SDK removes that old metadata dependency, but a
+cross-built executable still needs matching companions, an appropriate engine
+build kit for engine extensions, and target-machine acceptance testing.
+
+The following cross-check validates Windows compilation without producing an editor EXE:
 
 ```sh
 cargo check --profile dist -p renzora_engine_plugins --target x86_64-pc-windows-msvc
