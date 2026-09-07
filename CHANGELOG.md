@@ -2,6 +2,10 @@
 
 This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 16:04 UTC
+
+- Removed 15 completed work branches to simplify navigation; their changes remain in main. Kept three unmerged branches for reference.
+
 ## September 7, 2026 — 15:48 UTC
 
 - Added a prominent, clickable changelog banner at the top of the README.
