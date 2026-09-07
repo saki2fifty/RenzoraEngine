@@ -147,8 +147,8 @@ pub fn update_collision_read_state(
     collisions: avian3d::prelude::Collisions,
     names: Query<&Name>,
 ) {
-    for (entity, mut rs) in &mut q {
-        refresh_collision_state(&mut rs, &names, || {
+    for (entity, rs) in &mut q {
+        refresh_collision_component(rs, &names, || {
             collisions.entities_colliding_with(entity)
         });
     }
@@ -161,10 +161,23 @@ pub fn update_collision_read_state_2d(
     collisions: avian2d::prelude::Collisions,
     names: Query<&Name>,
 ) {
-    for (entity, mut rs) in &mut q {
-        refresh_collision_state(&mut rs, &names, || {
+    for (entity, rs) in &mut q {
+        refresh_collision_component(rs, &names, || {
             collisions.entities_colliding_with(entity)
         });
+    }
+}
+
+#[cfg(any(feature = "avian3d", feature = "avian2d"))]
+fn refresh_collision_component<I: Iterator<Item = Entity>>(
+    mut state: Mut<CollisionReadState>,
+    names: &Query<&Name>,
+    contacts: impl Fn() -> I,
+) {
+    // The diff reports every field/set mutation. Preserve allocation reuse
+    // without marking all settled bodies Changed merely by borrowing mutably.
+    if refresh_collision_state(state.bypass_change_detection(), names, contacts) {
+        state.set_changed();
     }
 }
 
@@ -177,20 +190,27 @@ fn refresh_collision_state<I: Iterator<Item = Entity>>(
     state: &mut CollisionReadState,
     names: &Query<&Name>,
     contacts: impl Fn() -> I,
-) {
+) -> bool {
     let mut count = 0;
     let unchanged = contacts().all(|entity| {
         count += 1;
         state.prev.contains(&entity)
     }) && count == state.prev.len();
     if unchanged {
+        let changed = state.colliding != (count != 0)
+            || state.entered
+            || state.exited
+            || !state.entered_name.is_empty()
+            || !state.exited_name.is_empty();
         state.colliding = count != 0;
         state.entered = false;
         state.exited = false;
         state.entered_name.clear();
         state.exited_name.clear();
+        changed
     } else {
         diff_collision_state(state, contacts().collect(), names);
+        true
     }
 }
 
@@ -227,6 +247,43 @@ mod tests {
     use super::*;
     use bevy::ecs::system::SystemState;
     use std::collections::HashSet;
+
+    #[test]
+    fn collision_component_only_marks_real_transitions_changed() {
+        use bevy::ecs::system::RunSystemOnce;
+        #[derive(Resource, Default)]
+        struct Contacts(Vec<Entity>);
+        fn refresh(
+            mut states: Query<&mut CollisionReadState>,
+            names: Query<&Name>,
+            contacts: Res<Contacts>,
+        ) {
+            for state in &mut states {
+                refresh_collision_component(state, &names, || contacts.0.iter().copied());
+            }
+        }
+        let mut world = World::new();
+        world.init_resource::<Contacts>();
+        let body = world.spawn(CollisionReadState::default()).id();
+        let other = world.spawn(Name::new("other")).id();
+        let mut changed = world.query_filtered::<Entity, Changed<CollisionReadState>>();
+        for touching in [false, true, false] {
+            world.resource_mut::<Contacts>().0 = if touching { vec![other] } else { vec![] };
+            for frame in 0..1000 {
+                let had_contacts = !world.get::<CollisionReadState>(body).unwrap().prev.is_empty();
+                let state = world.get::<CollisionReadState>(body).unwrap();
+                let expected_change = touching != had_contacts || state.entered || state.exited;
+                world.clear_trackers();
+                world.run_system_once(refresh).unwrap();
+                assert_eq!(changed.iter(&world).count(), usize::from(expected_change));
+                let state = world.get::<CollisionReadState>(body).unwrap();
+                assert_eq!(state.colliding, touching);
+                if frame > 0 {
+                    assert!(!state.entered && !state.exited);
+                }
+            }
+        }
+    }
 
     #[test]
     fn stable_contacts_skip_rebuild_and_transitions_keep_frame_semantics() {

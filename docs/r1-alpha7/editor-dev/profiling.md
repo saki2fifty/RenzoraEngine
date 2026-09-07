@@ -793,6 +793,14 @@ semantics are checked against the previous owned-board equality.
 An actual link-boundary test checks one send across 1,000 settled updates,
 same-address re-adoption, failed-send retries and release/re-adoption.
 
+## Collision snapshot change tracking
+
+The 2D and 3D collision readers share change publication: settled contact sets
+no longer mark every `CollisionReadState` as changed. Enter/exit transitions and
+clearing their one-frame flags still publish changes. Contact sets are still
+visited each update; this is not event-driven replacement of the physics graph
+scan or a measured FPS improvement.
+
 ## Script timer maintenance
 
 Completed one-shot timers no longer report completion repeatedly. A paused timer

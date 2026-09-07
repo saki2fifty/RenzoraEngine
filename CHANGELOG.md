@@ -5,6 +5,7 @@ This page gives a plain-English overview of changes made on this fork. The newes
 ## September 7, 2026 — 00:01 UTC
 
 - Removed unused UI-helper warnings from lean builds while preserving full markup UI support.
+- Stopped unchanged collision snapshots from triggering unnecessary downstream updates.
 
 ## September 6, 2026 — 23:48 UTC
 
