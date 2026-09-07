@@ -13,10 +13,10 @@
 # ── What this script produces: runtimes, not desktop editors ─────────────────
 # The output of a desktop lane is a RUNTIME — the game binary that
 # `renzora_export` uses as that platform's export template. The editor binary is
-# compiled and then not staged, because an editor carries a plugin SDK and an
-# SDK cannot be cross-built: its proc-macro dylibs are artifacts of the machine
-# running the compiler, so a Linux container can only ever produce Linux ones.
-# See the long note in `build_desktop`.
+# compiled in the editor lane but not staged. This is the current packaging
+# strategy, not a restriction imposed by the retired compiled Bevy SDK.
+# A complete editor installation needs its source SDK and matching companions;
+# engine extensions additionally need a matching engine build kit.
 #
 # So the three ways to build divide cleanly:
 #
@@ -24,8 +24,8 @@
 #   this script       runtimes / export templates, every platform, no editor
 #   CI native lanes   the published editors, one runner per platform
 #
-# The wasm lane is the exception that proves it: a wasm editor has no SDK and
-# compiles no Rust at runtime, so it is still built here.
+# The wasm lane produces separate runtime and editor bundles. It does not
+# provide the desktop's native Rust compilation workflow.
 #
 # ── Per-platform toolchain images ────────────────────────────────────────────
 # The toolchain is split into one image per platform (base + linux
@@ -492,34 +492,14 @@ build_desktop() {
     #   renzora         the runtime / shipped game (package `renzora_app`)
     #   renzora-editor  the editor              (package `renzora_editor_app`)
     #
-    # This script stages the RUNTIME only. It never ships an editor.
+    # Desktop lanes stage the RUNTIME only; the wasm lane is separate.
     #
-    # `renzora-editor` is compiled here (the lane builds `--workspace`) and then
-    # deliberately left behind, because a container cannot produce a *usable*
-    # editor for anything but its own Linux architecture, and it should not
-    # produce a half-usable one for everything else.
-    #
-    # The reason is the plugin SDK. An editor compiles native plugins and Rust
-    # scripts on the machine it runs on, so it ships the metadata and the
-    # proc-macro dylibs `rustc` needs. Proc macros run *inside* the compiler, so
-    # they are built for the host — and cross-compiling here means that host is
-    # Linux. Ship that to a Windows or macOS user and their `rustc` cannot load
-    # half of it: `can't find crate for bevy_derive`, and with it every name
-    # behind `bevy::prelude`. Nor can the mismatch be patched afterwards; each
-    # `.rmeta` records the hash of what it was compiled against, so the metadata
-    # and the proc macros have to come out of one build on one machine whose own
-    # platform is the platform being built for.
-    #
-    # That is not fixable in a cross-compiler, so the job moved instead:
-    #
-    #   cargo renzora     your own platform, complete, with a working SDK
-    #   this script       runtime templates, any platform, no editor
-    #   CI native lanes   editors, one runner per platform
-    #
-    # Nothing is lost. A game needs no SDK — it ships plugins already compiled —
-    # so cross-built runtimes are correct, which is exactly what the export
-    # templates in `renzora_export` are. And the editor for the machine you are
-    # sitting at never wanted a container in the first place.
+    # The editor lane compiles both executable packages but only copies the
+    # runtime below. The native release lanes use xtask to stage the complete
+    # editor layout, including the small source SDK. That SDK no longer ships
+    # compiled Bevy metadata; cross-compilation is not inherently prohibited.
+    # Changing this staging policy would also require validating companions,
+    # installed extension builds, and launch behavior on each target platform.
     #
     # The bundle wrappers below already expect this: `AppRun` and the `.app`'s
     # CFBundleExecutable both fall back to `renzora` when no editor binary is
@@ -542,11 +522,8 @@ build_desktop() {
     return 0
 }
 
-# The plugin SDK is deliberately absent from this script. It used to be staged
-# and packed here, which is how cross-built editors came to ship an SDK whose
-# proc macros were for the wrong operating system. Staging it belongs where it
-# can be correct: `cargo renzora` for the machine you are on, and the native
-# per-platform CI lanes for everything published. See `build_desktop`.
+# Desktop runtime templates omit the source SDK. Complete editor staging uses
+# xtask's source-SDK packaging instead; the old compiled SDK is retired.
 
 # ── Build one (platform, feature) pair, incl. its Rust std ───────────────────
 # The C-ABI plugins are built here rather than in a lane of their own because
@@ -851,12 +828,9 @@ build_wasm() {
     # the in-viewport path needs no subprocess, and the Window/VR targets that
     # would need one are hidden on wasm.
     echo "=== Building WASM Editor ==="
-    # `--features wasm` gates the binary target itself. On native the editor is a
-    # loadable image beside one executable, so this package's `[[bin]]` would be
-    # a redundant second exe — and an unlinkable one, since `renzora_editor` is
-    # now both rlib and dylib and a binary linking the rlib gives rustc two
-    # formats to choose between. wasm has no dynamic linking, so the editor there
-    # stays a separate bundle and asks for the target explicitly.
+    # The editor is a separate binary on native targets too. Its `wasm` feature
+    # is a compatibility flag, not a binary gate; target-specific dependencies
+    # select the browser backend. Keep its output separate from the runtime.
     cargo build --profile "$PROFILE" -p renzora_editor_app --bin renzora-editor \
         --features wasm \
         --target wasm32-unknown-unknown --target-dir target/wasm-editor || return 1

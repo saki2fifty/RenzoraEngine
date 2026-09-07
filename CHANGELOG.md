@@ -6,7 +6,7 @@ This page gives an overview of changes made on this fork. The newest changes are
 
 - Added checksum verification before installing the release compression tool.
 - Added automated checks for release package contents and download checksums. No new release or Windows build was produced.
-- Clarified why release builds use native desktop runners; the retired SDK no longer prevents cross-building an editor.
+- Clarified release and Docker build instructions: the retired SDK no longer prevents cross-building an editor, and the editor is a separate executable.
 
 ## September 7, 2026 — 16:21 UTC
 
