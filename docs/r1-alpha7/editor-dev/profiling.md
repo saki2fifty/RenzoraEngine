@@ -518,6 +518,11 @@ and entity-specific child data and other input construction are separate costs.
 The index is released when no eligible script entities remain, even if script
 execution has stopped. Existing retained snapshots stay immutable.
 
+## Hidden UI Editor
+
+The UI Editor's create-canvas button handler also uses the shared panel scope:
+it runs only while that panel is active, rather than polling while hidden.
+
 ## Hidden System Profiler
 
 The System Profiler refreshes its view data only while its tab is active in a

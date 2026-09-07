@@ -2,9 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
-## September 7, 2026 — 14:33 UTC
+## September 7, 2026 — 14:30 UTC
 
 - Improved automated shutdown checks to verify that compiler processes are cleaned up correctly, including graceful exits.
+- Stopped checking the UI Editor's create-canvas button while its panel is hidden.
 
 ## September 7, 2026 — 14:03 UTC
 

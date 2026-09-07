@@ -128,10 +128,6 @@ impl Plugin for GameUiEditorPlugin {
         interaction::register(app);
         nav::register(app);
         inspectors::register(app);
-        app.add_systems(
-            Update,
-            viewport::create_canvas_click.run_if(in_state(SplashState::Editor)),
-        );
 
         // The panel. `false` — it owns its own scrolling (the canvas area pans
         // and zooms rather than scrolls).
@@ -149,7 +145,8 @@ impl Plugin for GameUiEditorPlugin {
         app.register_shell_panel("ui_canvas", "UI Editor", "browser", "Scene");
         app.register_panel_content("ui_canvas", false, |commands, fonts| {
             build_ui_canvas(commands, fonts)
-        });
+        })
+        .systems(Update, viewport::create_canvas_click.run_if(in_state(SplashState::Editor)));
     }
 }
 
