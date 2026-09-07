@@ -218,7 +218,7 @@ fn pump_until_loaded(app: &mut App, handle: &Handle<HtmlTemplate>) {
 
 ## What CI runs
 
-`.github/workflows/test.yml` runs on pushes and pull requests to this fork's `main`, and on its CI repair branch. Native jobs use `rust:1.95.0-bookworm`; the local `native-ci` action installs Linux build dependencies. No official-project container is pulled. Coverage uses the same setup. The workflow also checks that automation contains no official publishing destinations.
+`.github/workflows/test.yml` runs on pushes and pull requests to this fork's `main`, with manual dispatch available for work branches. Native jobs use `rust:1.95.0-bookworm`; the local `native-ci` action installs Linux build dependencies. No official-project container is pulled. Coverage uses the same setup. The workflow also checks that automation contains no official publishing destinations.
 
 Two jobs:
 

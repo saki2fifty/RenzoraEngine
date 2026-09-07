@@ -4,7 +4,7 @@ name: Fork documentation archive
 # repository, and never require a website's publishing credentials.
 on:
   push:
-    branches: [main, 'fix/fork-ci-validation']
+    branches: [main]
     paths:
       - 'docs/**'
       - '.github/workflows/sync-docs.yml'

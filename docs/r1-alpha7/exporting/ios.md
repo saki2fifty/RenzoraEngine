@@ -64,7 +64,7 @@ There are two ways to produce `librenzora_ios.a`.
 
 ### In the build container (recommended)
 
-The `ghcr.io/renzora/ios` image (`docker/ios/Dockerfile`, `FROM base`) bundles the iOS SDK and toolchain, so a single command cross-compiles the library from any host:
+The `ghcr.io/saki2fifty/renzoraengine/ios` image (`docker/ios/Dockerfile`, `FROM base`) bundles the iOS SDK and toolchain, so a single command cross-compiles the library from any host:
 
 ```bash
 renzora build ios

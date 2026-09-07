@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 13:18 UTC
+
+- Directed newly built editors' update checks, export downloads, repository links, and GitHub statistics to this independent fork.
+- Updated installation guidance and added checks against reconnecting to the original project's repository.
+
 ## September 7, 2026 — 13:04 UTC
 
 - Separated this fork's automated checks, container publishing, and documentation archives from the original project's infrastructure.

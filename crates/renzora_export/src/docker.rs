@@ -3,7 +3,7 @@
 //!
 //! A lean export recompiles the engine from source, and cargo can only target
 //! the host triple. Every other platform therefore has to be built inside the
-//! `ghcr.io/renzora/<platform>` toolchain container — which is the same thing
+//! `ghcr.io/saki2fifty/renzoraengine/<platform>` toolchain container — which is the same thing
 //! `renzora build <platform>` does, and the reason those images exist.
 //!
 //! The engine talks to `docker` directly rather than shelling out to the
@@ -137,7 +137,7 @@ pub fn build_command(image_ref: &str, workspace: &Path) -> Command {
     cmd
 }
 
-/// `ghcr.io/renzora/<image>:<tag>`, where the tag is a content hash of the
+/// `ghcr.io/saki2fifty/renzoraengine/<image>:<tag>`, where the tag is a content hash of the
 /// Dockerfiles — `sha256(baseTag + docker/<image>/Dockerfile)[:12]`, with
 /// `baseTag = sha256(docker/base/Dockerfile)[:12]`.
 ///
@@ -155,7 +155,7 @@ pub fn image_ref(workspace_dir: &Path, image: &str) -> Option<String> {
         &workspace_dir.join("docker").join(image).join("Dockerfile"),
         Some(&base),
     )?;
-    Some(format!("ghcr.io/renzora/{image}:{tag}"))
+    Some(format!("{}/{image}:{tag}", renzora::version::TOOLCHAIN_REGISTRY))
 }
 
 /// First 12 hex of `sha256(prefix + contents-without-CR)`.

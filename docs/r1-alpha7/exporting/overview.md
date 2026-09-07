@@ -2,6 +2,8 @@
 
 Exporting turns your project into a shippable game: a runtime executable plus your packed assets, without editor tooling.
 
+This fork downloads runtime templates only from releases of `saki2fifty/RenzoraEngine` and resolves cross-compile images under `ghcr.io/saki2fifty/renzoraengine`. There is no fallback to the original project's releases or images. If a matching fork artifact has not been published, download-based export reports it unavailable; a compatible local template or source build is needed.
+
 ## The shipped game is the engine without the editor
 
 Source builds and installed engine-plugin builds produce separate editor and runtime executables. Export uses `renzora`, not `renzora-editor`. Adding or deleting an old editor library cannot change the runtime's role.

@@ -36,7 +36,7 @@ You can build either inside the engine's Docker image (no Android SDK on your ma
 
 ### Container route (recommended)
 
-The `ghcr.io/renzora/android` image (`docker/android/Dockerfile`, `FROM base`) already bundles everything: the `aarch64-linux-android` and `x86_64-linux-android` rustup targets and **Android NDK r27c** (amd64 host only — Google ships no arm64-Linux NDK). Your host only needs Docker. This route produces the native `libmain.so`; it does **not** assemble the APK (Gradle/Android SDK live outside the container).
+The `ghcr.io/saki2fifty/renzoraengine/android` image (`docker/android/Dockerfile`, `FROM base`) already bundles everything: the `aarch64-linux-android` and `x86_64-linux-android` rustup targets and **Android NDK r27c** (amd64 host only — Google ships no arm64-Linux NDK). Your host only needs Docker. This route produces the native `libmain.so`; it does **not** assemble the APK (Gradle/Android SDK live outside the container).
 
 ### Local route (Android Studio + cargo-ndk)
 

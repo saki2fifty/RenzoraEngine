@@ -15,7 +15,7 @@ So the only question a cross-platform export has to answer is: where does the ta
 
 ### 1. Download it from the editor (easiest)
 
-If a platform's template isn't present in `dist/`, the export modal offers **Download from GitHub** — it fetches `renzora-runtime-<platform>.zip` from the [`renzora/engine`](https://github.com/renzora/engine/releases) release **matching your engine's version** and installs it under `~/.renzora/templates/<version>/<platform>/`. Pick the platform, download once, export as often as you like.
+If a platform's template isn't present in `dist/`, the export modal offers **Download from GitHub** — it fetches `renzora-runtime-<platform>.zip` from the [`saki2fifty/RenzoraEngine`](https://github.com/saki2fifty/RenzoraEngine/releases) release **matching your engine's version** and installs it under `~/.renzora/templates/<version>/<platform>/`. Pick the platform, download once, export as often as you like.
 
 It asks for your version specifically, not for the newest release. The runtime and the editor are two halves of one version, so an `r1-alpha7` editor paired with an `r1-alpha6` runtime would produce a game that can't load the scene the editor just saved. If your exact version has no release yet — the usual case for a build from source — it falls back to the newest **nightly** for that version and labels it as such; it never falls back to an older version. The download is checksummed, and a mismatch installs nothing.
 

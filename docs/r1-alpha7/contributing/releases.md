@@ -1,6 +1,8 @@
 # Releases & Nightlies
 
-How the engine gets from `main` to something someone can download.
+How this independent fork gets from `main` to something someone can download.
+
+Release and toolchain-image automation is currently paused during fork isolation. The destinations below describe the corrected workflow, not a verified published image catalog. Release commands select only `saki2fifty/RenzoraEngine`; no official-project release is updated.
 
 Everything here is the **Build Engine** workflow, `.github/workflows/build-engine.yml`, plus the packaging script it calls, `scripts/package-release.sh`.
 
@@ -40,11 +42,11 @@ The nightly date is `%d%b%y` lowercased — `16aug26`. Tags sort readably per ve
 
 | Platform | Where | Notes |
 |---|---|---|
-| linux x64 + arm64 | `ghcr.io/renzora/linux` container | one container cross-builds both |
-| macos x64 + arm64 | `ghcr.io/renzora/macos` container | osxcross builds both slices |
-| windows x64 | `ghcr.io/renzora/windows` container | via xwin |
+| linux x64 + arm64 | `ghcr.io/saki2fifty/renzoraengine/linux` container | one container cross-builds both |
+| macos x64 + arm64 | `ghcr.io/saki2fifty/renzoraengine/macos` container | osxcross builds both slices |
+| windows x64 | `ghcr.io/saki2fifty/renzoraengine/windows` container | via xwin |
 | windows arm64 | native `windows-11-arm` runner | see below |
-| wasm32 | `ghcr.io/renzora/wasm` container | runtime + editor bundles |
+| wasm32 | `ghcr.io/saki2fifty/renzoraengine/wasm` container | runtime + editor bundles |
 
 **Windows ARM64 is the one target the Docker toolchain cannot produce.** The only MSVC pieces Microsoft allows to be redistributed (so xwin can bake them into a public image) are the CRT and SDK, which leaves clang as the C compiler — and clang can't stand in for MSVC on ARM64, because it emits MSVC NEON intrinsics as undefined externals no redistributable library provides. So that slice builds natively with the real MSVC toolchain on a GitHub-hosted arm64 runner.
 

@@ -20,10 +20,7 @@ mod native;
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-/// Which corpus the palette searches. `Commands` is the local everything-list
-/// (tools, actions, panels, layouts, settings, menu commands); the rest are
-/// scoped tabs — `Entities`/`Settings` search locally, the others query
-/// renzora.com through [`PaletteRemote`].
+/// Which local corpus the palette searches: commands, entities, or settings.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum PaletteTab {
     #[default]
@@ -312,7 +309,7 @@ fn collect_items(
             "https://youtube.com/@renzoragame",
         ),
         ("Documentation: Discord", "https://discord.gg/9UHUGUyDJv"),
-        ("Documentation: GitHub", "https://github.com/renzora/engine"),
+        ("Documentation: GitHub", renzora::version::REPOSITORY_URL),
     ];
     for (label, url) in docs {
         let url = url.to_string();
@@ -483,37 +480,28 @@ mod tests {
         assert_eq!(labels(&out), expected);
     }
 
-    // ── remote-search debounce threshold ─────────────────────────────────────
-
-    /// The server-backed tabs must not fire a request on a one-character query —
-    /// that is a request per keystroke against a search endpoint, from every
-    /// editor open.
     #[test]
-    fn server_backed_tabs_wait_for_a_real_query() {
-        for tab in [PaletteTab::Docs, PaletteTab::Forum, PaletteTab::Users] {
-            assert!(min_query_len(tab) >= 2, "{} would search too eagerly", tab.label());
-        }
+    fn palette_exposes_only_local_search_tabs() {
+        assert_eq!(
+            PaletteTab::ALL,
+            &[PaletteTab::Commands, PaletteTab::Entities, PaletteTab::Settings]
+        );
+        assert_eq!(CommandPaletteState::default().tab, PaletteTab::Commands);
     }
 
-    /// The catalog tabs list their first page with no query at all, so requiring
-    /// input would leave them looking empty until the user typed.
     #[test]
-    fn catalog_and_local_tabs_need_no_query() {
-        for tab in [
-            PaletteTab::Commands,
-            PaletteTab::Entities,
-            PaletteTab::Settings,
-            PaletteTab::Feed,
-            PaletteTab::Courses,
-            PaletteTab::Marketplace,
-        ] {
-            assert_eq!(min_query_len(tab), 0, "{} should list unfiltered", tab.label());
-        }
+    fn entity_search_accepts_empty_and_single_character_queries() {
+        let mut world = World::new();
+        world.spawn((Name::new("Rock"), Transform::default()));
+        world.spawn((Name::new("Tree"), Transform::default()));
+        world.spawn((Name::new("Chrome"), Transform::default(), Node::default()));
+        assert_eq!(labels(&collect_entity_items(&mut world, "")), vec!["Rock", "Tree"]);
+        assert_eq!(labels(&collect_entity_items(&mut world, "o")), vec!["Rock"]);
     }
 
     #[test]
     fn every_tab_is_listed_in_all_and_has_a_label() {
-        assert_eq!(PaletteTab::ALL.len(), 9);
+        assert_eq!(PaletteTab::ALL.len(), 3);
         let mut seen = std::collections::HashSet::new();
         for tab in PaletteTab::ALL {
             assert!(!tab.label().is_empty());

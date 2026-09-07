@@ -10,6 +10,16 @@ FORK = "saki2fifty/RenzoraEngine"
 
 
 class ForkWorkflowPolicy(unittest.TestCase):
+    def test_first_party_runtime_has_no_official_repository_endpoints(self):
+        forbidden = re.compile(
+            r"https://(?:api\.github\.com/repos|github\.com)/renzora/(?:engine|website)\b"
+            r"|ghcr\.io/renzora/"
+        )
+        for crate in (ROOT / "crates").glob("renzora*"):
+            for path in (crate / "src").rglob("*.rs"):
+                with self.subTest(path=path.relative_to(ROOT)):
+                    self.assertIsNone(forbidden.search(path.read_text()))
+
     def test_automation_has_no_official_destinations(self):
         paths = list((ROOT / ".github").rglob("*.yml"))
         paths += list((ROOT / "docker").rglob("Dockerfile"))

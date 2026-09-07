@@ -8381,7 +8381,7 @@ fn build_menu_items(
                 open_url("https://discord.gg/9UHUGUyDJv")
             }),
             menu_item(commands, fonts, "github-logo", &renzora::lang::t_or("menu.help.github", "GitHub"), |_| {
-                open_url("https://github.com/renzora/engine")
+                open_url(renzora::version::REPOSITORY_URL)
             }),
             menu_sep(commands),
             // Names the pending version when there is one, so "am I out of

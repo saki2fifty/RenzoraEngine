@@ -101,11 +101,11 @@ fn card_gradient(top: Color, bot: Color) -> BackgroundGradient {
 /// at a glance which ABI a prebuilt must target to load in this editor.
 const ABI_HASH: &str = "10799222d6c2089a";
 const RELEASE_COMMIT_URL: &str =
-    "https://github.com/renzora/engine/tree/dc6e1dccb9d91cb9da4af174051de91ce6a4b8e7";
+    "https://github.com/saki2fifty/RenzoraEngine/tree/dc6e1dccb9d91cb9da4af174051de91ce6a4b8e7";
 const WEBSITE_URL: &str = "https://renzora.com";
 const YOUTUBE_URL: &str = "https://youtube.com/@renzoragame";
 const DISCORD_URL: &str = "https://discord.gg/9UHUGUyDJv";
-const GITHUB_URL: &str = "https://github.com/renzora/engine";
+const GITHUB_URL: &str = renzora::version::REPOSITORY_URL;
 
 const CONTENT_W: f32 = 460.0;
 

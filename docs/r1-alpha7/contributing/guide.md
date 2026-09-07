@@ -83,7 +83,7 @@ validation.
 
 | Area | How |
 |---|---|
-| **Bug fixes** | Browse the [issue tracker](https://github.com/renzora/engine/issues). |
+| **Bug fixes** | Browse the [issue tracker](https://github.com/saki2fifty/RenzoraEngine/issues). |
 | **Documentation** | Edit the markdown under `docs/r1-alpha7/` in the **engine** repo; pushing to `main` auto-publishes it to this site. Older `docs/r1-alpha*` directories are frozen releases — leave them alone. |
 | **Editor panels** | Register a native bevy_ui panel with the `App` extension APIs `register_shell_panel(id, title, icon, category)` + `register_panel_content(id, scroll, build_fn)`. See [Editor Panels](/docs/r1-alpha7/editor-dev/panels). |
 | **Scripting functions** | Declare them from the owning domain crate via the `ScriptExtension` trait, so every language backend builds them. Engine-wide primitives live in the language plugin's `register_api()` (`plugins/lua`). |
@@ -145,9 +145,11 @@ What's worth a test: new data structures (serialize/deserialize round-trips), ne
 
 ## Continuous integration
 
-CI runs on pushes and pull requests to this fork's `main`, and on the CI repair branch (`.github/workflows/test.yml`). Native jobs use `rust:1.95.0-bookworm` and the shared local `native-ci` action to install Linux dependencies. They do not pull images from the original project's registry or depend on the fork's image publishing being ready.
+CI runs on pushes and pull requests to this fork's `main` (`.github/workflows/test.yml`); work branches can be checked through manual workflow dispatch. Native jobs use `rust:1.95.0-bookworm` and the shared local `native-ci` action to install Linux dependencies. They do not pull images from the original project's registry or depend on the fork's image publishing being ready.
 
 Container builds publish only under `ghcr.io/saki2fifty/renzoraengine`; release commands explicitly select `saki2fifty/RenzoraEngine`. Documentation remains in this repository and is also available as a `fork-documentation` workflow artifact for 30 days. No website repository is checked out or synchronized, and no website publishing token is required. The artifact is an archive, not a deployed documentation website.
+
+Newly built editors also use this fork for GitHub statistics, repository links, update checks, and runtime-template downloads. Shared destinations live in `renzora::version`; missing fork releases are not replaced with releases from another project. Existing downloaded executables keep their old behavior until replaced by a new build.
 
 Root workspace tests and lint use **`--profile dist`**. The standalone `xtask` workspace uses **`--profile release`**, since it has no custom dist profile. Separate cache namespaces prevent restoring the older debug artifacts alongside these optimized builds. Disk reports expose actual runner usage; a cache policy is not a guarantee that the full workspace fits every runner.
 

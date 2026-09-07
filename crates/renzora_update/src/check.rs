@@ -5,7 +5,6 @@ use std::sync::mpsc;
 
 use crate::version::ParsedVersion;
 
-const RELEASES_API: &str = "https://api.github.com/repos/renzora/engine/releases?per_page=100";
 const USER_AGENT: &str = "renzora-editor";
 
 /// Which releases the updater offers.
@@ -186,7 +185,7 @@ fn perform_check(channel: UpdateChannel) -> Result<UpdateCheckResult, String> {
     })?;
     let asset_name = format!("{platform}.zip");
 
-    let response = renzora_net::Request::get(RELEASES_API)
+    let response = renzora_net::Request::get(&format!("{}?per_page=100", renzora::version::RELEASES_API))
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/vnd.github+json")
         .send()

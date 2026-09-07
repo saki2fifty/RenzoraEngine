@@ -29,13 +29,13 @@ The two ways to get Renzora:
 
 Want the quickest start? Grab a prebuilt engine for your platform from the download page — no Docker, no Cargo, no terminal required:
 
-**[renzora.com/download](/download)**
+**[Fork releases](https://github.com/saki2fifty/RenzoraEngine/releases)**
 
-Each platform ships as a `.zip` archive built from the [GitHub releases](https://github.com/renzora/engine/releases) — download it, extract, and run the engine directly. The archive contains two executables: `renzora-editor` (the editor, what you run) and `renzora` (the game runtime, which the editor launches when you hit Play), plus the plugins both load.
+Each platform ships as a `.zip` archive built from the [GitHub releases](https://github.com/saki2fifty/RenzoraEngine/releases) — download it, extract, and run the engine directly. The archive contains two executables: `renzora-editor` (the editor, what you run) and `renzora` (the game runtime, which the editor launches when you hit Play), plus the plugins both load.
 
 ### Nightly builds
 
-Alongside the numbered releases there are **nightlies** — an automated build of `main`, tagged like `r1-alpha7-nightly-16aug26` and marked as a prerelease. They are the right thing to run if you're developing *against* the engine and want the latest fixes; they are not the right thing to ship a game on. Nightlies are built every night there are new commits, and the last two weeks are kept.
+Alongside the numbered releases there are **nightlies** — an automated build of `main`, tagged like `r1-alpha7-nightly-16aug26` and marked as a prerelease. They are the right thing to run if you're developing *against* the engine and want the latest fixes; they are not the right thing to ship a game on. The workflow supports nightly builds, but automatic release publishing on this fork is currently paused while its delivery infrastructure is verified. A source push does not by itself produce a downloadable editor.
 
 ### Windows
 
@@ -58,7 +58,7 @@ unzip linux-x64.zip
 
 ## Keeping it up to date
 
-The editor updates itself. **Help ▸ Check for Updates** downloads the new version and installs it in place; when a background check at startup has already found one, that menu item reads **Update to `r1-alpha8`** instead and a **New update available** chip appears in the top bar, so you don't have to go looking.
+Newly built fork editors check only this fork's release catalog, with no fallback to the original project. Previously downloaded executables retain their old endpoints until replaced. If no matching fork release is available, there is no update to install. **Help ▸ Check for Updates** downloads the new version and installs it in place; when a background check at startup has already found one, that menu item reads **Update to `r1-alpha8`** instead and a **New update available** chip appears in the top bar, so you don't have to go looking.
 
 The dialog shows what you're running and what's available, and gives you one button that walks through Download → Install & Restart. **Release notes** opens the full notes for the selected version in your browser. The download is checksummed, and if anything goes wrong while the files are being replaced your existing install is put back — the worst case is that the update didn't happen.
 
@@ -83,8 +83,8 @@ The dialog shows what you're running and what's available, and gives you one but
 Clone the repo and build it. That's the whole thing:
 
 ```bash
-git clone https://github.com/renzora/engine.git
-cd engine
+git clone https://github.com/saki2fifty/RenzoraEngine.git
+cd RenzoraEngine
 cargo renzora           # build, stage, and launch the editor
 ```
 
@@ -94,16 +94,7 @@ You need [Rust](https://rustup.rs/) — `rust-toolchain.toml` pins the version, 
 
 ### Scaffolding a new project
 
-To start a game rather than hack on the engine, the `renzora` CLI clones the engine for you:
-
-```bash
-cargo install renzora
-renzora new my-game
-cd my-game
-cargo renzora
-```
-
-> The CLI is the published [`renzora` crate](https://crates.io/crates/renzora). The crate *named* `renzora` inside the engine repo is a different thing (the SDK library), so `cargo install renzora` installs the CLI — not that library.
+Create projects inside the fork editor. Do not use the separately published `renzora` CLI to clone or initialize this fork: its repository and registry defaults are not controlled by this checkout. `cargo renzora` inside this checkout uses the local workspace tooling, which is different from installing that external CLI.
 
 ### Why not Docker?
 
@@ -130,15 +121,7 @@ You don't need the deeper details to get started — the cross-compile toolchain
 
 **This is what Docker is for.** Shipping a game means producing builds for machines you don't have — a macOS bundle from Windows, an Android APK from Linux. Each platform needs its own compiler, linker and system libraries, and the toolchain images carry them so you don't have to install six SDKs by hand.
 
-Install [Docker](https://docs.docker.com/get-docker/) and the CLI, then:
-
-```bash
-cargo install renzora
-renzora init                    # pull the toolchain images (first run is slow)
-renzora build windows linux     # export templates land in dist/<platform>/
-```
-
-`renzora build [platforms...]` (no args = every platform) accepts `windows`, `linux`, `macos`, `wasm` (Web), `android`, and `ios`. The CLI pulls only the images for the platforms you name.
+The fork's cross-platform Dockerfiles use `ghcr.io/saki2fifty/renzoraengine` images. That catalog must be published before image-based export can pull it. Do not substitute an original-project image or use the external CLI's initialization defaults. Existing locally built toolchains remain available for the owner's controlled cross-build workflow.
 
 You do **not** need any of this to build and run Renzora on your own machine — `cargo renzora` already does that.
 

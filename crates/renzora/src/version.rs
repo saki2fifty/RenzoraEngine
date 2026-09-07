@@ -32,6 +32,15 @@
 /// (see CLAUDE.md §4) — it is what the export downloader asks GitHub for.
 pub const ENGINE_VERSION: &str = "r1-alpha7";
 
+/// Source and issue destination for this permanently independent fork.
+pub const REPOSITORY_URL: &str = "https://github.com/saki2fifty/RenzoraEngine";
+/// Repository metadata endpoint shared by editor services.
+pub const REPOSITORY_API: &str = "https://api.github.com/repos/saki2fifty/RenzoraEngine";
+/// Release catalog; there is deliberately no fallback to another repository.
+pub const RELEASES_API: &str = "https://api.github.com/repos/saki2fifty/RenzoraEngine/releases";
+/// Cross-compilation images published by this fork's toolchain workflow.
+pub const TOOLCHAIN_REGISTRY: &str = "ghcr.io/saki2fifty/renzoraengine";
+
 /// Which kind of build this is. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildChannel {
@@ -129,6 +138,23 @@ pub fn display() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fork_service_destinations_agree() {
+        assert_eq!(
+            super::REPOSITORY_URL,
+            "https://github.com/saki2fifty/RenzoraEngine"
+        );
+        assert_eq!(
+            super::REPOSITORY_API,
+            "https://api.github.com/repos/saki2fifty/RenzoraEngine"
+        );
+        assert_eq!(
+            super::RELEASES_API,
+            format!("{}/releases", super::REPOSITORY_API)
+        );
+        assert_eq!(super::TOOLCHAIN_REGISTRY, "ghcr.io/saki2fifty/renzoraengine");
+    }
+
     use super::*;
 
     #[test]

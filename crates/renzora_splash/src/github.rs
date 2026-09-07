@@ -9,7 +9,7 @@ use std::sync::{mpsc, Mutex};
 use bevy::prelude::*;
 use serde::Deserialize;
 
-const REPO_API: &str = "https://api.github.com/repos/renzora/engine";
+use renzora::version::REPOSITORY_API as REPO_API;
 
 #[derive(Deserialize)]
 struct RepoResponse {
@@ -79,6 +79,28 @@ impl GithubStats {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn fetch_stars() -> Option<u64> {
+    let response = renzora_net::Request::get(REPO_API)
+        .header("User-Agent", "renzora-splash")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .ok()?;
+    let parsed: RepoResponse = response.json().ok()?;
+    Some(parsed.stargazers_count)
+}
+
+/// Formats a star count compactly: 1234 -> "1.2k".
+pub fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,27 +132,5 @@ mod tests {
         assert!(stats.receiver.is_none());
         stats.poll_with(true, || panic!("failed request retried every frame"));
         assert!(stats.stars.is_none());
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn fetch_stars() -> Option<u64> {
-    let response = renzora_net::Request::get(REPO_API)
-        .header("User-Agent", "renzora-splash")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .ok()?;
-    let parsed: RepoResponse = response.json().ok()?;
-    Some(parsed.stargazers_count)
-}
-
-/// Formats a star count compactly: 1234 -> "1.2k".
-pub fn format_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }

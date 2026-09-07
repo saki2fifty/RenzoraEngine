@@ -34,10 +34,10 @@ That single `allow` exists because `renzora::add!` gates its FFI exports behind 
 
 ### Clippy
 
-CI denies all warnings. Lint locally with `renzora check`, which runs the following inside the `ghcr.io/renzora/linux` container:
+CI denies all warnings. Native fork checks use the pinned Rust toolchain and local Linux dependencies, without a project registry image. Lint with the workflow's current first-party exclusions and `--profile dist`; the historical command below is a partial example.
 
 ```bash
-cargo clippy --workspace --no-deps \
+cargo clippy --profile dist --workspace --no-deps \
     --exclude bevy_gauge \
     --exclude bevy_hanabi \
     --exclude bevy_mod_outline \

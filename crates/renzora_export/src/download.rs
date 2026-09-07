@@ -40,7 +40,7 @@ use sha2::{Digest, Sha256};
 
 use crate::templates::{self, Platform, TemplateStamp, TEMPLATE_STAMP};
 
-const RELEASES_API: &str = "https://api.github.com/repos/renzora/engine/releases";
+use renzora::version::RELEASES_API;
 const USER_AGENT: &str = "renzora-editor";
 
 #[derive(Debug, Clone)]

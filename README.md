@@ -1,5 +1,7 @@
 # Renzora Engine
 
+This is the independently maintained **saki2fifty/RenzoraEngine** fork. Development, issues, releases, and automation stay in this repository; it does not synchronize with or submit changes to the original project. See the [changelog](CHANGELOG.md) for this fork's changes.
+
 A 3D game engine and visual editor built on <a href="https://bevyengine.org/" target="_blank" rel="noopener noreferrer">Bevy 0.19</a>. It's fully compatible with the Bevy plugin ecosystem and is itself modular — every system is a plugin you can add, remove, or replace. Use it as a standalone engine to build games out of the box, or treat it as a customizable foundation you can modify into your own bespoke engine.
 
 ![Renzora Editor](assets/previews/interface.png)
@@ -11,8 +13,8 @@ A 3D game engine and visual editor built on <a href="https://bevyengine.org/" ta
 **Prerequisites:** <a href="https://rustup.rs/" target="_blank" rel="noopener noreferrer">Rust</a>.
 
 ```bash
-git clone https://github.com/renzora/engine.git
-cd engine
+git clone https://github.com/saki2fifty/RenzoraEngine.git
+cd RenzoraEngine
 cargo renzora             # build, stage dist/, and launch the editor
 ```
 
@@ -40,13 +42,11 @@ Building the editor always builds the runtime too. The runtime doubles as a dedi
 
 Iterate with `cargo check --profile dist` and `cargo clippy --profile dist`; run tests with `cargo test --profile dist -p <crate>`. Always pass `--profile dist` — a bare cargo command builds a second full set of artefacts under `target/debug/`, and this workspace is far too large for two of them.
 
-Shipping a game for a platform you're not sitting at — a macOS, Android, or web build from a Windows box — is part of the editor's export system, covered in <a href="https://renzora.com/docs" target="_blank" rel="noopener noreferrer">the docs</a>.
+Shipping a game for another platform is part of the editor's export system, covered in [the fork's export documentation](docs/r1-alpha7/exporting/overview.md).
 
 ## Documentation
 
-Full documentation — getting started, scripting, UI, plugins, exporting, and more — lives on the website:
-
-<strong><a href="https://renzora.com/docs" target="_blank" rel="noopener noreferrer">renzora.com/docs</a></strong>
+Current fork documentation lives in [docs/r1-alpha7](docs/r1-alpha7). Documentation workflow runs also provide a downloadable archive; they do not update an external website.
 
 ## Supported Platforms
 
@@ -80,4 +80,4 @@ Dual-licensed under MIT or Apache 2.0.
 
 - <a href="LICENSE-MIT" target="_blank" rel="noopener noreferrer">MIT License</a>
 - <a href="LICENSE-APACHE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>
-- <a href="https://github.com/renzora/engine/blob/main/docs/r1-alpha7/contributing/ai-policy.md" target="_blank" rel="noopener noreferrer">AI Policy</a>
+- [AI Policy](docs/r1-alpha7/contributing/ai-policy.md)
