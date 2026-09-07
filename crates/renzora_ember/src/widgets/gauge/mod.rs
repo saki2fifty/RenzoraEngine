@@ -84,6 +84,7 @@ fn make_arc(value: f32, pivot: f32) -> ArcMaterial {
 /// - `value` is the 0..1 fill fraction.
 /// - `start`/`sweep` are in **radians**.
 /// - `thick_frac` is the band thickness as a fraction of the radius.
+#[cfg(feature = "game_ui")]
 pub(crate) fn make_arc_params(
     value: f32,
     start: f32,

@@ -143,3 +143,7 @@ The native system monitor shares Bevy's `sysinfo` 0.38 dependency for memory
 information. This removes the older duplicate and its unused Windows support
 package versions from the resolved engine graph. Polling cadence, displayed
 units and browser behavior are unchanged; no FPS improvement is claimed.
+
+Ember's markup-only gauge/chart/waveform constructors are compiled only with
+`game_ui`, matching their callers. Builds without that feature retain ordinary
+widgets without unused markup-helper warnings; full markup builds keep them.

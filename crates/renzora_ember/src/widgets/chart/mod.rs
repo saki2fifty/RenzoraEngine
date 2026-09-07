@@ -80,6 +80,7 @@ impl ChartData {
 
     /// A fixed-range series with a caller-chosen color — used by the markup
     /// `vector="line"` bridge.
+    #[cfg(feature = "game_ui")]
     pub(crate) fn ranged(values: Vec<f32>, min: f32, max: f32, color: Color) -> Self {
         Self {
             values,
@@ -91,6 +92,7 @@ impl ChartData {
     }
 
     /// Replace the samples in place (for the live markup `vector="line"` sync).
+    #[cfg(feature = "game_ui")]
     pub(crate) fn set_values(&mut self, values: Vec<f32>) {
         self.values = values;
     }

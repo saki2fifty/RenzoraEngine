@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 00:01 UTC
+
+- Removed unused UI-helper warnings from lean builds while preserving full markup UI support.
+
 ## September 6, 2026 — 23:48 UTC
 
 - Fixed one-shot script timers firing repeatedly and avoided unnecessary updates for settled timers.

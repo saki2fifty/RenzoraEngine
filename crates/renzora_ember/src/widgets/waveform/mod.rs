@@ -56,6 +56,7 @@ pub(crate) struct WaveData {
 
 impl WaveData {
     /// Build from amplitudes (0..1) — used by the markup `vector="wave"` bridge.
+    #[cfg(feature = "game_ui")]
     pub(crate) fn new(amps: Vec<f32>) -> Self {
         Self { amps, progress: 0.0 }
     }
