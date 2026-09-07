@@ -43,7 +43,11 @@ jobs:
       - uses: ./.github/actions/native-ci
 
       - name: Check fork automation boundaries
-        run: python3 scripts/test_fork_workflow_policy.py
+        run: |
+          python3 scripts/test_fork_workflow_policy.py
+          python3 scripts/test_release_tool_verification.py
+          python3 scripts/test_release_packaging.py
+          python3 -B scripts/test_compress_runtime.py
 
       - name: Check plugin wiring is regenerated
         run: cargo run --profile release --manifest-path xtask/Cargo.toml -- sync --check

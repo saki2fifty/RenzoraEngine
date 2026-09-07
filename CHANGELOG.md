@@ -2,6 +2,11 @@
 
 This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 16:50 UTC
+
+- Added checksum verification before installing the release compression tool.
+- Added automated checks for release package contents and download checksums. No new release or Windows build was produced.
+
 ## September 7, 2026 — 16:21 UTC
 
 - Retired the final three old work branches after verifying their intended improvement is already covered by the current implementation. Only main remains.

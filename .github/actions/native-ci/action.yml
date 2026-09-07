@@ -11,6 +11,6 @@ runs:
         apt-get install -y --no-install-recommends \
           pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
           libxinerama-dev libwayland-dev libxkbcommon-dev libasound2-dev \
-          libudev-dev libvulkan-dev libssl-dev mold clang lld curl unzip file zstd python3
+          libudev-dev libvulkan-dev libssl-dev mold clang lld curl zip unzip xz-utils file zstd python3
         rustc --version
         df -h .

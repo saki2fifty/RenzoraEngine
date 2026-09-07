@@ -485,7 +485,10 @@ jobs:
         run: |
           set -euo pipefail
           UPX_VERSION=5.1.1
-          curl -sSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" -o /tmp/upx.tar.xz
+          # Publisher asset digest; verify before extraction or execution.
+          UPX_SHA256=1ff660454227861e00772f743f66b900072116b9dc24f6ee28b97cce88a7828a
+          curl -fsSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz" -o /tmp/upx.tar.xz
+          echo "$UPX_SHA256  /tmp/upx.tar.xz" | sha256sum -c -
           tar -xJf /tmp/upx.tar.xz -C /tmp
           UPX=/tmp/upx-${UPX_VERSION}-amd64_linux/upx
           while IFS= read -r -d '' f; do

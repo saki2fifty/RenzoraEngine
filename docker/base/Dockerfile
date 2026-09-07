@@ -174,9 +174,16 @@ TOML
 # the linux container to pack an already-built tree, keeps working by
 # inheritance.
 ENV UPX_VERSION=5.1.1
-RUN UPX_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo arm64_linux || echo amd64_linux) \
-    && curl -sSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-${UPX_ARCH}.tar.xz" \
+# Keep digests in this Dockerfile: its content hash determines the image tag.
+# The release workflow's amd64 pin is checked against this one in tests.
+RUN case "$(uname -m)" in \
+      x86_64) UPX_ARCH=amd64_linux; UPX_SHA256=1ff660454227861e00772f743f66b900072116b9dc24f6ee28b97cce88a7828a ;; \
+      aarch64) UPX_ARCH=arm64_linux; UPX_SHA256=a307c2c821eeab47607ba5c232408b22ab884cca13884682508b98f7308b8443 ;; \
+      *) echo "Unsupported UPX host architecture" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-${UPX_ARCH}.tar.xz" \
     -o /tmp/upx.tar.xz \
+    && echo "$UPX_SHA256  /tmp/upx.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/upx.tar.xz -C /tmp \
     && mv /tmp/upx-${UPX_VERSION}-${UPX_ARCH}/upx /usr/local/bin/upx \
     && chmod +x /usr/local/bin/upx \

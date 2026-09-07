@@ -124,6 +124,18 @@ packages as well as older nested layouts. It targets host executables and plugin
 libraries, not retired engine SDK libraries. Docker staging likewise leaves old
 shared-engine cache files out of the staged package without deleting the cache.
 
+Release automation and the base toolchain image verify the pinned UPX 5.1.1
+archive's SHA-256 before extracting or running it. The base image supports
+x86-64 and ARM64 Linux hosts and rejects other architectures. The digest stays
+inside the Dockerfile so changing the tool also changes the image's content tag;
+automated tests keep the release workflow's x86-64 pin aligned with it.
+
+The lightweight validation lane tests verified and corrupted tool archives,
+desktop/web package contents, manifest sizes and checksums, and compressed runtime
+metadata handling. These fixture tests do not replace native platform builds or
+manual Windows launch acceptance. This fork's publishing workflows remain disabled
+while release readiness is being established.
+
 Runtime templates exclude retired shared Bevy/Renzora/Rust libraries while
 preserving native support files. Copy-based game export stages the known OpenXR
 loader files and reports copy failures instead of silently omitting them.
