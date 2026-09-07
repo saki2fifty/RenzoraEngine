@@ -56,6 +56,13 @@ COMMIT="${4:-}"
 mkdir -p "$OUT_DIR"
 OUT_DIR=$(cd "$OUT_DIR" && pwd)
 
+# The publisher uploads every output file. Refuse reuse rather than mixing a
+# previous release into this one or deleting files owned by the caller.
+if [ -n "$(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    echo "ERROR: output directory must be empty: $OUT_DIR" >&2
+    exit 1
+fi
+
 # The version is the tag with any `-nightly-<date>` suffix removed, so a nightly
 # and its eventual release both report `r1-alpha7`.
 VERSION="${TAG%%-nightly-*}"
@@ -196,8 +203,9 @@ package_desktop() {
     else
         # Exclude only host-level legacy images, not libraries inside plugins/.
         local prefix name
-        local excluded=('sdk/*' 'sdk.tar.*' '*.app/Contents/MacOS/sdk/*' '*.app/Contents/MacOS/sdk.tar.*')
-        for prefix in '' '*.app/Contents/MacOS/'; do
+        local excluded=()
+        for prefix in '' '*.AppDir/' '*.app/Contents/MacOS/'; do
+            excluded+=("${prefix}sdk/*" "${prefix}sdk.tar.*")
             for name in 'bevy_dylib*' 'libbevy_dylib*' 'renzora_dylib*' 'librenzora_dylib*' \
                 'renzora_ember_dylib*' 'librenzora_ember_dylib*' 'std-*' 'libstd-*' \
                 'renzora.dll' 'librenzora.so' 'librenzora.dylib' \
@@ -251,6 +259,24 @@ echo "artifacts: $ARTIFACTS_DIR"
 echo
 
 FOUND=()
+# Validate the complete input set before writing any package. Multiple jobs
+# supplying the same platform are ambiguous, even if their directory names sort
+# consistently; never choose a release binary by artifact-name ordering.
+for d in "$ARTIFACTS_DIR"/*/*/; do
+    [ -d "$d" ] || continue
+    platform=$(basename "$d")
+    contains "$platform" "${KNOWN_PLATFORMS[@]}" || continue
+    if contains "$platform" "${FOUND[@]+"${FOUND[@]}"}"; then
+        echo "ERROR: duplicate platform '$platform' ($d)" >&2
+        exit 1
+    fi
+    FOUND+=("$platform")
+done
+if [ ${#FOUND[@]} -eq 0 ]; then
+    echo "ERROR: no recognised platform directories under $ARTIFACTS_DIR" >&2
+    exit 1
+fi
+
 # Two levels: <artifacts-dir>/<artifact-name>/<platform-dir>. A build job that
 # uploaded `dist/` gives exactly this shape.
 for d in "$ARTIFACTS_DIR"/*/*/; do
@@ -260,21 +286,11 @@ for d in "$ARTIFACTS_DIR"/*/*/; do
         echo "SKIP: unrecognised platform dir '$platform' ($d)"
         continue
     fi
-    if contains "$platform" "${FOUND[@]+"${FOUND[@]}"}"; then
-        echo "SKIP: duplicate '$platform' ($d) — already packaged"
-        continue
-    fi
-    FOUND+=("$platform")
     case "$platform" in
         web-wasm32) package_web "${d%/}" ;;
         *)          package_desktop "$platform" "${d%/}" ;;
     esac
 done
-
-if [ ${#FOUND[@]} -eq 0 ]; then
-    echo "ERROR: no recognised platform directories under $ARTIFACTS_DIR" >&2
-    exit 1
-fi
 
 # ── engine-source.zip ────────────────────────────────────────────────────────
 # The engine source, published as one more release asset.

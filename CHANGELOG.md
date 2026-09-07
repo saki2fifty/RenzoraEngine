@@ -2,6 +2,11 @@
 
 This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 18:18 UTC
+
+- Release packaging now rejects reused output folders and duplicate platform inputs instead of risking mixed or ambiguous downloads.
+- Linux folder-based packages now leave out retired SDK files and engine libraries while keeping current plugins and the source SDK.
+
 ## September 7, 2026 — 16:50 UTC
 
 - Added checksum verification before installing the release compression tool.

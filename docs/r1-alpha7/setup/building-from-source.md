@@ -54,6 +54,13 @@ Release packaging keeps the small source SDK and excludes an old `sdk/` or
 by packaging. AppImage releases carry the source SDK inside the image, rather
 than adding a compiled SDK archive beside it.
 
+Release packaging requires an empty output directory and at most one input
+artifact for each platform. It rejects stale output and duplicate platform
+directories before writing packages; it does not delete the caller's files.
+Use a fresh output directory for each attempt. Legacy host-library and SDK
+exclusions apply to flat, Linux AppDir, and macOS bundle layouts, while libraries
+inside `plugins/` and the current `rust-sdk/` source package remain included.
+
 ## Validation
 
 ```sh

@@ -13,21 +13,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleasePackages(unittest.TestCase):
-    def package(self, root):
+    def run_packager(self, root):
         script = root / "runner/scripts/package-release.sh"
         script.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "scripts/package-release.sh", script)
-        result = subprocess.run(
+        return subprocess.run(
             ["bash", str(script), str(root / "artifacts"), str(root / "out"),
              "r1-alpha7-nightly-fixture", "fixture-commit"],
             capture_output=True, text=True, timeout=30,
         )
+
+    def package(self, root, platforms=1):
+        result = self.run_packager(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         out = root / "out"
         manifest = json.loads((out / "manifest.json").read_text())
         self.assertEqual(manifest["version"], "r1-alpha7")
         self.assertEqual(manifest["commit"], "fixture-commit")
-        self.assertEqual(len(manifest["assets"]), 2)
+        self.assertEqual(len(manifest["assets"]), 2 * platforms)
         self.assertEqual({row["kind"] for row in manifest["assets"]}, {"engine", "runtime"})
         sums = dict((name.removeprefix("./"), digest) for digest, name in
                     (line.split() for line in (out / "SHA256SUMS").read_text().splitlines()))
@@ -39,6 +42,54 @@ class ReleasePackages(unittest.TestCase):
             self.assertEqual(sums[row["name"]], digest)
         return out
 
+    def test_existing_output_is_rejected_without_modifying_it(self):
+        for name in ("old.zip", ".hidden", "manifest.json"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "out"
+                out.mkdir()
+                sentinel = out / name
+                sentinel.write_bytes(b"previous release")
+                result = self.run_packager(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("output directory must be empty", result.stderr)
+                self.assertEqual(list(out.iterdir()), [sentinel])
+                self.assertEqual(sentinel.read_bytes(), b"previous release")
+
+    def test_duplicate_platforms_fail_before_any_archive_is_written(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for job in ("a", "b"):
+                staged = root / "artifacts" / job / "windows-x64"
+                staged.mkdir(parents=True)
+                (staged / "renzora.exe").write_text(job)
+            result = self.run_packager(root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("duplicate platform", result.stderr)
+            self.assertEqual(list((root / "out").iterdir()), [])
+            for job in ("a", "b"):
+                self.assertEqual((root / "artifacts" / job / "windows-x64/renzora.exe").read_text(), job)
+
+    def test_distinct_platforms_package_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for platform in ("windows-x64", "windows-arm64"):
+                staged = root / "artifacts" / platform / platform
+                staged.mkdir(parents=True)
+                (staged / "renzora.exe").write_text(platform)
+                (staged / "renzora-editor.exe").write_text(platform)
+            out = self.package(root, platforms=2)
+            self.assertEqual(len(list(out.glob("*.zip"))), 4)
+
+    def test_unrecognized_input_fails_without_packages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "artifacts/job/unknown").mkdir(parents=True)
+            result = self.run_packager(root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no recognised platform", result.stderr)
+            self.assertEqual(list((root / "out").iterdir()), [])
+
     def test_desktop_layouts_keep_source_sdk_only_in_engine_package(self):
         for platform, prefix, suffix in (
             ("windows-x64", "", ".exe"),
@@ -49,7 +100,9 @@ class ReleasePackages(unittest.TestCase):
                 root = Path(directory)
                 staged = root / "artifacts/build" / platform
                 for name in (f"renzora{suffix}", f"renzora-editor{suffix}",
-                             "rust-sdk/Cargo.toml", "plugins/example.data"):
+                             "rust-sdk/Cargo.toml", "plugins/example.data",
+                             "sdk/old.rmeta", "sdk.tar.zst", "librenzora_dylib.so",
+                             "plugins/librenzora_dylib.so"):
                     path = staged / prefix / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text("fixture, not an executable")
@@ -57,6 +110,10 @@ class ReleasePackages(unittest.TestCase):
                 with zipfile.ZipFile(out / f"{platform}.zip") as archive:
                     self.assertIn(prefix + "rust-sdk/Cargo.toml", archive.namelist())
                     self.assertIn(prefix + f"renzora-editor{suffix}", archive.namelist())
+                    self.assertIn(prefix + "plugins/librenzora_dylib.so", archive.namelist())
+                    for obsolete in ("sdk/old.rmeta", "sdk.tar.zst", "librenzora_dylib.so"):
+                        self.assertNotIn(prefix + obsolete, archive.namelist())
+                        self.assertTrue((staged / prefix / obsolete).is_file())
                 with zipfile.ZipFile(out / f"renzora-runtime-{platform}.zip") as archive:
                     self.assertIn(f"renzora{suffix}", archive.namelist())
                     self.assertIn("plugins/example.data", archive.namelist())
