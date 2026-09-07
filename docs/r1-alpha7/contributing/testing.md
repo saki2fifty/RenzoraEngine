@@ -222,6 +222,8 @@ Undo-history capacity is also tested through the consumer API in `renzora_undo`:
 
 HTTP round-trip tests register a fake backend with an explicit owner and generation, matching the current host registration contract. They exercise request delivery, concurrency, streaming, delayed registration, and backend loss without making live HTTP requests.
 
+Compiler shutdown tests wait for the supervised child to signal readiness, then verify that its process group disappears while an unrelated process stays alive. A graceful shutdown is valid; force-kill counters alone are not proof of cleanup.
+
 `.github/workflows/test.yml` runs on pushes and pull requests to this fork's `main`, with manual dispatch available for work branches. Native jobs use `rust:1.95.0-bookworm`; the local `native-ci` action installs Linux build dependencies. No official-project container is pulled. Coverage uses the same setup. The workflow also checks that automation contains no official publishing destinations.
 
 Two jobs:

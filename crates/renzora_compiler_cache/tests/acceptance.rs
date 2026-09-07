@@ -1392,11 +1392,15 @@ fn prod_active_child_shutdown_kills_descendants_and_preserves_unrelated() {
     // Unrelated external process — a sleep NOT in the supervisor's tree.
     let mut unrelated = std::process::Command::new("sleep");
     unrelated.arg("60");
-    let mut unrelated_child = match unrelated.spawn() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let unrelated_pid = unrelated_child.id() as i32;
+    struct ChildCleanup(std::process::Child);
+    impl Drop for ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let unrelated_child = ChildCleanup(unrelated.spawn().expect("spawn unrelated process"));
+    let unrelated_pid = unrelated_child.0.id() as i32;
     // Supervisor-owned child: a bash that forks a sleep descendant.
     let id = make_id("active_shutdown.rs");
     let pk = renzora_compiler_cache::cargo_target::PartitionKey {
@@ -1407,15 +1411,23 @@ fn prod_active_child_shutdown_kills_descendants_and_preserves_unrelated() {
         abi_version: 1,
         compiler_service_schema: 1,
     };
-    // Use `bash -c 'sleep 30 & sleep 30 & wait'` so the parent and two
-    // children all run. The supervisor owns the parent; descendants
-    // are reachable via `kill(-pgid, ...)` (POSIX).
+    // The trap reaps the terminated children before the shell exits, so the
+    // group-disappearance assertion does not depend on the host's PID 1 reaper.
+    // A parent-only stop would leave the sleeps alive and exceed the deadline.
     let mut cmd = std::process::Command::new("bash");
-    cmd.arg("-c").arg("sleep 30 & sleep 30 & wait");
+    cmd.arg("-c").arg("trap 'wait; exit 0' TERM; sleep 30 & sleep 30 & echo ready; wait");
     let aid = svc.supervisor().spawn(id, pk, cmd).unwrap();
 
-    // Wait for the bash process to actually fork the sleeps.
-    std::thread::sleep(Duration::from_millis(100));
+    let (pid, output) = {
+        let children = svc.supervisor().children_for_testing().lock();
+        let child = children[&aid].child.as_ref().unwrap();
+        (child.pid().unwrap() as i32, child.stdout_buffer.clone())
+    };
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !output.lock().iter().any(|line| line.trim() == "ready") {
+        assert!(std::time::Instant::now() < ready_deadline, "child did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     // Trigger bounded shutdown — must reap the bash and its
     // descendants within the deadline.
@@ -1423,15 +1435,15 @@ fn prod_active_child_shutdown_kills_descendants_and_preserves_unrelated() {
     let report = svc.shutdown(Duration::from_secs(2)).unwrap();
     let elapsed = start.elapsed();
     assert!(elapsed <= Duration::from_millis(2500), "shutdown took {elapsed:?}");
-    assert!(report.forced >= 1 || report.reaped >= 1,
-        "shutdown should have force-killed or reaped at least one descendant: {report:?}");
+    assert_eq!(report.active, 1, "one supervised process: {report:?}");
+    assert_eq!(report.unreaped, 0, "graceful group cleanup completed: {report:?}");
+    // SAFETY: signal zero only probes our captured process group; it sends no signal.
+    assert_eq!(unsafe { libc::kill(-pid, 0) }, -1, "supervised group still exists");
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     // Unrelated process is still alive.
+    // SAFETY: signal zero only probes the child still owned by unrelated_child.
     let alive = unsafe { libc::kill(unrelated_pid, 0) };
     assert_eq!(alive, 0, "unrelated process must still be alive (kill returned {alive})");
-    // Clean up the unrelated process.
-    unsafe { libc::kill(unrelated_pid, libc::SIGKILL) };
-    let _ = unrelated_child.wait();
-    let _ = aid;
 }
 
 /// R5-7: resistant-child shutdown honors the absolute deadline.

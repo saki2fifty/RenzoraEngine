@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 14:33 UTC
+
+- Improved automated shutdown checks to verify that compiler processes are cleaned up correctly, including graceful exits.
+
 ## September 7, 2026 — 14:03 UTC
 
 - Repaired outdated undo-history and network test setup so automated checks can validate the current engine again.
