@@ -188,14 +188,7 @@ pub fn drive_clip_playback(
     }
 
     // Trim clip lengths to the underlying file length once it is known.
-    let durations = &active.durations;
-    for clip in timeline.clips.iter_mut() {
-        if let Some(&natural) = durations.get(&clip.source) {
-            if natural.is_finite() && clip.length > natural + 0.001 {
-                clip.length = natural;
-            }
-        }
-    }
+    trim_known_clip_lengths(&mut timeline, &active.durations);
 
     active.last_position = now;
 }
@@ -214,32 +207,51 @@ pub fn cache_clip_durations(
     mut active: ResMut<ActiveClips>,
     project: Option<Res<renzora::core::CurrentProject>>,
 ) {
-    let unseen: Vec<PathBuf> = timeline
-        .clips
-        .iter()
-        .map(|c| c.source.clone())
-        .filter(|src| !active.durations.contains_key(src))
-        .collect();
-
-    for source in unseen {
+    for clip in &timeline.clips {
+        // A missing backend is temporary, not a failed file. Keep sources
+        // eligible for discovery after adoption without allocating a work list.
+        if !link.is_active() {
+            break;
+        }
+        let source = &clip.source;
+        if active.durations.contains_key(source) {
+            continue;
+        }
         let path = source.to_string_lossy().into_owned();
         if cache
             .get_or_load(&mut link, project.as_deref(), &path)
             .is_none()
         {
-            // A non-trimming sentinel, so a broken file is not re-probed every
-            // frame. `SoundCache` also blacklists it, but only once a backend
-            // exists — this covers the interval before one loads.
-            active.durations.insert(source, f64::MAX);
+            // Retain the existing failed-file policy, but not when the call
+            // itself made the backend unavailable.
+            if link.is_active() {
+                active.durations.insert(source.clone(), f64::MAX);
+            }
             continue;
         }
         if let Some(duration) = cache.duration(&path) {
-            active.durations.insert(source, duration);
+            active.durations.insert(source.clone(), duration);
         }
     }
 
-    for clip in timeline.clips.iter_mut() {
-        if let Some(&natural) = active.durations.get(&clip.source) {
+    trim_known_clip_lengths(&mut timeline, &active.durations);
+}
+
+fn trim_known_clip_lengths(
+    timeline: &mut ResMut<TimelineState>,
+    durations: &HashMap<PathBuf, f64>,
+) {
+    // A mutable iteration alone marks the entire editor timeline changed.
+    // Leave settled clips quiet, while still repairing newly lengthened clips.
+    if !timeline.clips.iter().any(|clip| {
+        durations
+            .get(&clip.source)
+            .is_some_and(|natural| natural.is_finite() && clip.length > natural + 0.001)
+    }) {
+        return;
+    }
+    for clip in &mut timeline.clips {
+        if let Some(&natural) = durations.get(&clip.source) {
             if natural.is_finite() && clip.length > natural + 0.001 {
                 clip.length = natural;
             }
@@ -256,6 +268,102 @@ pub fn stop_all_clips(mut link: ResMut<AudioLink>, mut active: ResMut<ActiveClip
 mod tests {
     use super::*;
     use crate::timeline::TransportState;
+
+    #[test]
+    fn duration_discovery_waits_for_backend_and_reuses_known_sources() {
+        use renzora_plugin::audio::ClipInfo;
+        use renzora_plugin::sys::{AudioCall, AudioOp, AudioStatus};
+        use renzora_plugin::wire::Writer;
+        #[derive(Resource, Default)]
+        struct Changes(usize);
+        fn observe(timeline: Res<TimelineState>, mut changes: ResMut<Changes>) {
+            if timeline.is_changed() {
+                changes.0 += 1;
+            }
+        }
+        unsafe extern "C" fn entry(call: *const AudioCall) -> AudioStatus {
+            // SAFETY: AudioLink retains the call and sink through this callback.
+            let call = unsafe { &*call };
+            if call.op != AudioOp::LoadClip {
+                return AudioStatus::UnknownOp;
+            }
+            // SAFETY: the boxed counter outlives the app; calls are sequential.
+            unsafe {
+                *(call.state as *mut usize) += 1;
+            }
+            let mut writer = Writer::new();
+            ClipInfo {
+                duration: 2.0,
+                sample_rate: 48_000,
+            }
+            .encode(&mut writer);
+            // SAFETY: the sink copies these reply bytes before returning.
+            unsafe {
+                if let Some(sink) = call.out.as_ref() {
+                    (sink.write)(sink.ctx, writer.bytes().as_ptr(), writer.bytes().len());
+                }
+            }
+            AudioStatus::Ok
+        }
+        let mut calls = Box::new(0usize);
+        let mut app = App::new();
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track("test", "Sfx");
+        // The mock decoder accepts any bytes; no audio device is involved.
+        let source = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let first = timeline.add_clip(track, source.clone(), 0.0, 600.0);
+        timeline.add_clip(track, source.clone(), 10.0, 600.0);
+        app.insert_resource(timeline)
+            .init_resource::<AudioLink>()
+            .init_resource::<SoundCache>()
+            .init_resource::<ActiveClips>()
+            .init_resource::<Changes>()
+            .add_systems(Update, (cache_clip_durations, observe).chain());
+        for _ in 0..1000 {
+            app.update();
+            assert!(app.world().resource::<ActiveClips>().durations.is_empty());
+        }
+        app.world_mut().resource_mut::<AudioLink>().adopt(
+            "probe".into(),
+            calls.as_mut() as *mut usize as usize,
+            entry,
+        );
+        app.update();
+        assert_eq!(*calls, 1);
+        assert_eq!(
+            app.world().resource::<ActiveClips>().durations[&source],
+            2.0
+        );
+        assert_eq!(
+            app.world()
+                .resource::<TimelineState>()
+                .clip(first)
+                .unwrap()
+                .length,
+            2.0
+        );
+        let changes = app.world().resource::<Changes>().0;
+        for _ in 0..1000 {
+            app.update();
+        }
+        assert_eq!(*calls, 1);
+        assert_eq!(app.world().resource::<Changes>().0, changes);
+        app.world_mut().resource_mut::<AudioLink>().release();
+        app.world_mut()
+            .resource_mut::<TimelineState>()
+            .clip_mut(first)
+            .unwrap()
+            .length = 9.0;
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<TimelineState>()
+                .clip(first)
+                .unwrap()
+                .length,
+            2.0
+        );
+    }
 
     #[test]
     fn playback_retains_live_voices_and_trims_from_borrowed_durations() {

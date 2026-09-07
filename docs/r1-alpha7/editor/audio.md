@@ -6,6 +6,11 @@ This page walks you through the basics. When you need the deep technical details
 
 ## How sound works
 
+Timeline clips can discover their natural duration when the audio backend
+becomes available, even if the timeline opened first. Waiting for a backend is
+not treated as a broken audio file. Known durations are reused, and unchanged
+clip lengths do not trigger an unnecessary timeline refresh.
+
 Audio plays both in the editor and in your exported game. Renzora can play these file types out of the box:
 
 | Format | Use it for |

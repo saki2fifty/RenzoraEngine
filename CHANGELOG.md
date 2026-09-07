@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 03:51 UTC
+
+- Fixed audio timeline duration discovery when the audio backend starts late.
+- Removed repeated clip-path copies and unnecessary timeline refresh signals from settled audio clips.
+
 ## September 7, 2026 — 03:47 UTC
 
 - Reused unchanged scene-loading totals instead of repeatedly counting files and looking up archive sizes.
