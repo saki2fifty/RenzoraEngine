@@ -8,15 +8,15 @@ Be respectful, constructive, and collaborative. Harassment, trolling, and uncons
 
 ## Getting started
 
-1. **Fork** the [engine repo](https://github.com/renzora/engine) on GitHub.
+1. Work only in [this independent fork](https://github.com/saki2fifty/RenzoraEngine). It does not synchronize with or submit changes to the original project.
 2. **Clone** your fork and check out a branch from `main`.
 3. **Make your changes**, following the guidelines below.
 4. **Run the checks** locally — `cargo clippy --profile dist` and the tests for the crates you touched.
-5. **Push** to your fork and open a **pull request** against `main`.
+5. **Push** to a work branch on this fork. Integration into this fork's `main` follows owner approval; do not create cross-repository pull requests.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/engine.git
-cd engine
+git clone https://github.com/saki2fifty/RenzoraEngine.git
+cd RenzoraEngine
 git checkout -b fix-spotlight-shadow
 cargo renzora                        # build, stage dist/, and launch the editor
 # make changes...
@@ -145,7 +145,9 @@ What's worth a test: new data structures (serialize/deserialize round-trips), ne
 
 ## Continuous integration
 
-CI runs on pushes and pull requests to `main` (`.github/workflows/test.yml`). Jobs use the shared `ghcr.io/renzora/base:latest` image; the pinned Rust toolchain and Linux libraries must be available there.
+CI runs on pushes and pull requests to this fork's `main`, and on the CI repair branch (`.github/workflows/test.yml`). Native jobs use `rust:1.95.0-bookworm` and the shared local `native-ci` action to install Linux dependencies. They do not pull images from the original project's registry or depend on the fork's image publishing being ready.
+
+Container builds publish only under `ghcr.io/saki2fifty/renzoraengine`; release commands explicitly select `saki2fifty/RenzoraEngine`. Documentation remains in this repository and is also available as a `fork-documentation` workflow artifact for 30 days. No website repository is checked out or synchronized, and no website publishing token is required. The artifact is an archive, not a deployed documentation website.
 
 Root workspace tests and lint use **`--profile dist`**. The standalone `xtask` workspace uses **`--profile release`**, since it has no custom dist profile. Separate cache namespaces prevent restoring the older debug artifacts alongside these optimized builds. Disk reports expose actual runner usage; a cache policy is not a guarantee that the full workspace fits every runner.
 

@@ -12,7 +12,7 @@
 # BASE_TAG is injected by CI / the renzora CLI (SHA-256 of docker/base/Dockerfile)
 # so the FROM is pinned without being hand-edited.
 ARG BASE_TAG=latest
-FROM ghcr.io/renzora/base:${BASE_TAG}
+FROM ghcr.io/saki2fifty/renzoraengine/base:${BASE_TAG}
 
 ENV OSXCROSS_SDK=MacOSX26.1.sdk
 ENV OSXCROSS_IOS_SDK=iPhoneOS15.5.sdk

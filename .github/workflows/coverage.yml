@@ -32,10 +32,13 @@ env:
   CARGO_PROFILE_DIST_STRIP: none
   CARGO_PROFILE_DIST_DEBUG: "0"
 
+permissions:
+  contents: read
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
     # A cold instrumented build of the whole workspace is the long pole; the
     # default 360-minute cap is generous but the job should never approach it.
     timeout-minutes: 180
@@ -43,7 +46,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -58,7 +62,7 @@ jobs:
           cargo install cargo-llvm-cov --locked
 
       - name: Measure coverage
-        run: cargo run --manifest-path xtask/Cargo.toml -- coverage
+        run: cargo run --profile release --manifest-path xtask/Cargo.toml -- coverage
 
       # Uploaded before the ratchet check, so a run that fails the gate still
       # leaves behind the report that explains why.
@@ -75,4 +79,4 @@ jobs:
       # Re-reads the lcov the previous step already wrote — no rebuild, no
       # re-run of the suite.
       - name: Enforce the per-crate floors
-        run: cargo run --manifest-path xtask/Cargo.toml -- coverage --report-only --check
+        run: cargo run --profile release --manifest-path xtask/Cargo.toml -- coverage --report-only --check

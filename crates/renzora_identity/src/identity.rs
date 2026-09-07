@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn bare_alias_not_found_returns_err() {
-        let mut idx = BareAliasIndex::new();
+        let idx = BareAliasIndex::new();
         match idx.lookup("nope.rs").unwrap_err() {
             AliasLookup::NotFound => {}
             other => panic!("expected NotFound, got {other:?}"),

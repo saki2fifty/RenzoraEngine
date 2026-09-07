@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 13:04 UTC
+
+- Separated this fork's automated checks, container publishing, and documentation archives from the original project's infrastructure.
+- Fixed script-identity code checks reported by GitHub validation.
+
 ## September 7, 2026 — 04:05 UTC
 
 - Fixed Lumen lighting updates being lost when several meshes change at once.

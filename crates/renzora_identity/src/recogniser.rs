@@ -236,10 +236,10 @@ impl From<&rustc_lexer::TokenKind> for TokenKind {
 /// `renzora::script!(` form. Returns [`None`] when the five-token
 /// shape is not exactly one of those two.
 fn matches_five(past: &[Option<TokenSlot>; 5], source: &str) -> Option<Declaration> {
-    let p0 = match past[0].as_ref() { Some(t) => t, None => return None };
-    let p1 = match past[1].as_ref() { Some(t) => t, None => return None };
-    let p2 = match past[2].as_ref() { Some(t) => t, None => return None };
-    let p3 = match past[3].as_ref() { Some(t) => t, None => return None };
+    let p0 = past[0].as_ref()?;
+    let p1 = past[1].as_ref()?;
+    let p2 = past[2].as_ref()?;
+    let p3 = past[3].as_ref()?;
 
     if p0.kind != TokenKind::Ident
         || p1.kind != TokenKind::Colon
@@ -257,14 +257,8 @@ fn matches_five(past: &[Option<TokenSlot>; 5], source: &str) -> Option<Declarati
     if p2.offset.checked_add(p2.len) != Some(p3.offset) {
         return None;
     }
-    let head_text = match source.get(p0.offset..p0.end) {
-        Some(s) => s,
-        None => return None,
-    };
-    let tail_text = match source.get(p3.offset..p3.end) {
-        Some(s) => s,
-        None => return None,
-    };
+    let head_text = source.get(p0.offset..p0.end)?;
+    let tail_text = source.get(p3.offset..p3.end)?;
     if head_text == "renzora_plugin" && tail_text == "rust_script" {
         Some(Declaration::Recognised)
     } else if head_text == "renzora" && tail_text == "script" {

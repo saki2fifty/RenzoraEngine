@@ -1,0 +1,16 @@
+name: Native CI dependencies
+description: Prepare native checks without any project-owned container registry
+runs:
+  using: composite
+  steps:
+    - name: Install native build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev \
+          libxinerama-dev libwayland-dev libxkbcommon-dev libasound2-dev \
+          libudev-dev libvulkan-dev libssl-dev mold clang lld curl unzip file zstd python3
+        rustc --version
+        df -h .

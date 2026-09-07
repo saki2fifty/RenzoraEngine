@@ -88,7 +88,8 @@ on:
           - release
 
 env:
-  REGISTRY: ghcr.io/renzora
+  REGISTRY: ghcr.io/saki2fifty/renzoraengine
+  GH_REPO: saki2fifty/RenzoraEngine
   # How many dated nightly releases to keep. Older ones (and their tags) are
   # deleted after a successful publish so the releases page stays readable.
   KEEP_NIGHTLIES: 14
@@ -96,6 +97,7 @@ env:
 jobs:
   # ── Decide what to build, what to call it, and whether to publish ───────────
   setup:
+    if: github.repository == 'saki2fifty/RenzoraEngine'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}

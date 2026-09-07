@@ -33,11 +33,12 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY_IMAGE: ghcr.io/renzora
+  REGISTRY_IMAGE: ghcr.io/saki2fifty/renzoraengine
 
 jobs:
   # ── 1. Build the shared base (per-arch, pushed by digest) ───────────────────
   base-build:
+    if: github.repository == 'saki2fifty/RenzoraEngine'
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+      contents: read
     outputs:
       base_tag: ${{ steps.tag.outputs.base_tag }}
     steps:
@@ -182,6 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

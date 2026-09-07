@@ -218,7 +218,7 @@ fn pump_until_loaded(app: &mut App, handle: &Handle<HtmlTemplate>) {
 
 ## What CI runs
 
-`.github/workflows/test.yml` runs on every push and pull request to `main`. Both jobs run **inside the shared base toolchain image** `ghcr.io/renzora/base:latest` — native Linux `cargo test`/`clippy` need only rustc 1.95 and the Linux dev libs, which the base carries (the per-platform cross toolchains aren't needed to test first-party crates). There is nothing to install on the runner.
+`.github/workflows/test.yml` runs on pushes and pull requests to this fork's `main`, and on its CI repair branch. Native jobs use `rust:1.95.0-bookworm`; the local `native-ci` action installs Linux build dependencies. No official-project container is pulled. Coverage uses the same setup. The workflow also checks that automation contains no official publishing destinations.
 
 Two jobs:
 

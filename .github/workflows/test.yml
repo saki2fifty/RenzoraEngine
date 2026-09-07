@@ -2,7 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/fork-ci-validation']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -19,14 +19,10 @@ env:
   CARGO_PROFILE_DIST_DEBUG: "0"
   CARGO_TERM_COLOR: always
 
-# Jobs run INSIDE the shared base toolchain image
-# (ghcr.io/renzora/base) — native Linux `cargo test`/`clippy` need only
-# the pinned Rust toolchain + Linux dev libs (alsa/udev/wayland/xkbcommon/vulkan/mold),
-# which the base carries; the per-platform cross toolchains (osxcross/xwin/NDK)
-# aren't needed to test first-party crates. We pin `:latest` rather than the
-# content-hash tag because this workflow and docker-image.yml are independent —
-# on a push that changes a Dockerfile the hash-tagged image may not be published
-# yet; `:latest` with eventual consistency is fine for tests.
+# Native checks bootstrap their pinned toolchain independently of publishing.
+# They never pull an official-project image or wait for a fork image release.
+permissions:
+  contents: read
 
 jobs:
   # The plugin wiring (`renzora_runtime`/`renzora_editor`'s `plugins.rs` and
@@ -38,24 +34,29 @@ jobs:
   # committed. Runs on the plain image (a source scan, no compile of the engine).
   sync:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
+
+      - name: Check fork automation boundaries
+        run: python3 scripts/test_fork_workflow_policy.py
 
       - name: Check plugin wiring is regenerated
         run: cargo run --profile release --manifest-path xtask/Cargo.toml -- sync --check
 
   test:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
 
       # Do not restore the prior dev/test profile cache into dist builds.
       - uses: Swatinem/rust-cache@v2
@@ -106,12 +107,13 @@ jobs:
   # every other plugin's result too, not mask them behind the first failure.
   plugins:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -177,7 +179,7 @@ jobs:
   # different hardware is worse than one that is consistently slow.
   gpu:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
 
     env:
       RENZORA_GPU_TESTS: "1"
@@ -190,7 +192,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
 
       # The base image carries the Vulkan *loader* (it is a build dependency of
       # the engine) but no ICD — nothing on a build machine ever needed a driver.
@@ -219,12 +222,13 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
 
       # The image deliberately doesn't ship the clippy component (it would make
       # the parallel docker build lanes race on the rustup component download),
@@ -277,7 +281,7 @@ jobs:
   # coverage independent of workspace feature unification and disk footprint.
   runtime-features:
     runs-on: ubuntu-latest
-    container: ghcr.io/renzora/base:latest
+    container: rust:1.95.0-bookworm
     strategy:
       fail-fast: false
       matrix:
@@ -289,7 +293,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
+      - uses: ./.github/actions/native-ci
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2-dist-runtime-${{ matrix.name }}
