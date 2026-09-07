@@ -793,6 +793,12 @@ semantics are checked against the previous owned-board equality.
 An actual link-boundary test checks one send across 1,000 settled updates,
 same-address re-adoption, failed-send retries and release/re-adoption.
 
+## Lumen timing bookkeeping
+
+Lumen's bake-timing diagnostic retains the latest 60 samples in a bounded queue
+with a running sum. Its displayed average and lifetime counters are unchanged;
+this avoids shifting and summing the history every update, not geometry work.
+
 ## Cloth wind publication
 
 Cloth's world-wind bridge compares the effective velocity before writing its

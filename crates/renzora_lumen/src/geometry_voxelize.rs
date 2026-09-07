@@ -87,7 +87,8 @@ pub struct LumenBakeStats {
     /// "saturated" when the throttle is the bottleneck.
     pub bake_budget_per_frame: usize,
     /// Internal rolling-average ring buffer. Skipped by the panel.
-    recent_durs: Vec<std::time::Duration>,
+    recent_durs: std::collections::VecDeque<std::time::Duration>,
+    recent_total: std::time::Duration,
 }
 
 impl LumenBakeStats {
@@ -99,12 +100,13 @@ impl LumenBakeStats {
         if dur > self.max_bake_dur {
             self.max_bake_dur = dur;
         }
-        self.recent_durs.push(dur);
-        if self.recent_durs.len() > 60 {
-            self.recent_durs.remove(0);
+        // Keep diagnostic overhead bounded without shifting or summing history.
+        if self.recent_durs.len() == 60 {
+            self.recent_total -= self.recent_durs.pop_front().expect("history is full");
         }
-        let total: std::time::Duration = self.recent_durs.iter().sum();
-        self.avg_bake_dur = total / self.recent_durs.len().max(1) as u32;
+        self.recent_durs.push_back(dur);
+        self.recent_total += dur;
+        self.avg_bake_dur = self.recent_total / self.recent_durs.len() as u32;
         self.bake_budget_per_frame = MAX_BAKES_PER_FRAME;
     }
 }
@@ -603,6 +605,37 @@ impl Plugin for GeometryVoxelizePlugin {
 #[cfg(test)]
 mod retained_sample_tests {
     use super::*;
+
+    #[test]
+    fn rolling_bake_statistics_match_reference_after_wrap_and_clone() {
+        let mut stats = LumenBakeStats::default();
+        let mut reference = Vec::new();
+        for index in 0..1000u64 {
+            let duration = std::time::Duration::from_nanos((index * 37) % 997);
+            stats.record(duration, 1, 3);
+            reference.push(duration);
+            if reference.len() > 60 {
+                reference.remove(0);
+            }
+            let sum: std::time::Duration = reference.iter().sum();
+            assert_eq!(stats.avg_bake_dur, sum / reference.len() as u32);
+            assert_eq!(stats.recent_total, sum);
+            assert_eq!(stats.total_bakes, index + 1);
+            assert_eq!(stats.total_samples_baked, (index + 1) * 3);
+            assert_eq!(stats.last_bake_dur, duration);
+            assert!(stats.recent_durs.len() <= 60);
+            if index == 500 {
+                stats = stats.clone();
+            }
+        }
+        let capacity = stats.recent_durs.capacity();
+        for _ in 0..1000 {
+            stats.record(std::time::Duration::ZERO, 0, 0);
+            assert_eq!(stats.recent_durs.capacity(), capacity);
+        }
+        assert_eq!(stats.avg_bake_dur, std::time::Duration::ZERO);
+        assert!(stats.max_bake_dur > std::time::Duration::ZERO);
+    }
 
     #[derive(Resource, Default)]
     struct UploadNotifications(usize);

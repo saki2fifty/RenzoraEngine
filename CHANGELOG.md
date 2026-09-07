@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 03:58 UTC
+
+- Reduced Lumen timing-statistics bookkeeping while preserving the same rolling average.
+
 ## September 7, 2026 — 03:54 UTC
 
 - Corrected remaining ragdoll and splat-rendering descriptions that referred to retired plugin loading.
