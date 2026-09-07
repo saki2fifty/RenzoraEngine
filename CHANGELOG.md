@@ -2,6 +2,10 @@
 
 This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 20:45 UTC
+
+- Fixed plugin test-file discovery for coverage and custom build folders, without disabling coverage checks.
+
 ## September 7, 2026 — 18:18 UTC
 
 - Release packaging now rejects reused output folders and duplicate platform inputs instead of risking mixed or ambiguous downloads.

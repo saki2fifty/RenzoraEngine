@@ -48,6 +48,72 @@ use std::time::{Duration, Instant};
 /// do not touch BuildService and run freely in parallel.
 static HEAVY_BUILD_SERVICE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+fn artifact_directories(test_exe: &Path) -> (PathBuf, PathBuf) {
+    let deps = test_exe
+        .parent()
+        .expect("acceptance executable has a dependency directory");
+    let fingerprints = deps
+        .parent()
+        .expect("dependency directory has a profile parent")
+        .join(".fingerprint");
+    (deps.to_path_buf(), fingerprints)
+}
+
+#[test]
+fn artifact_directories_follow_the_test_executable() {
+    for profile in [
+        "target/dist",
+        "target/llvm-cov-target/dist",
+        "custom-output/x86_64-unknown-linux-gnu/release",
+    ] {
+        let profile = Path::new(profile);
+        let (deps, fingerprints) = artifact_directories(&profile.join("deps/acceptance-hash"));
+        assert_eq!(deps, profile.join("deps"));
+        assert_eq!(fingerprints, profile.join(".fingerprint"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn relocated_acceptance_executable_compiles_and_runs_a_plugin() {
+    let executable = std::env::current_exe().expect("test executable");
+    let (deps, fingerprints) = artifact_directories(&executable);
+    let relocated = tempfile::tempdir().expect("relocated test directory");
+    let profile = relocated.path().join("custom-target/dist");
+    let relocated_deps = profile.join("deps");
+    std::fs::create_dir_all(&relocated_deps).expect("relocated dependency directory");
+    // Link dependencies rather than duplicating the large Bevy artifact tree.
+    // The executable itself must not be a symlink: current_exe resolves it.
+    for entry in std::fs::read_dir(&deps).expect("dependency artifacts") {
+        let path = entry.expect("dependency entry").path();
+        if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("rlib" | "rmeta" | "so" | "dylib")
+        ) {
+            std::os::unix::fs::symlink(&path, relocated_deps.join(path.file_name().unwrap()))
+                .expect("link dependency artifact");
+        }
+    }
+    std::os::unix::fs::symlink(fingerprints, profile.join(".fingerprint"))
+        .expect("link fingerprints");
+    let child = relocated_deps.join("acceptance-relocated");
+    std::fs::copy(executable, &child).expect("copy acceptance executable");
+    let result = std::process::Command::new(child)
+        .args([
+            "--exact",
+            "runtime_execution_plugin_system_runs_and_writes_observed_value",
+            "--nocapture",
+        ])
+        .output()
+        .expect("run relocated acceptance test");
+    assert!(
+        result.status.success(),
+        "relocated test failed:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 pub fn heavy_build_service_lock() -> MutexGuard<'static, ()> {
     HEAVY_BUILD_SERVICE_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -249,14 +315,11 @@ impl Harness {
         // BuildService path because both paths consult
         // `renzora_plugin::host::durable_type_path`.
         std::fs::write(&src_path, source).expect("write source");
-        let profile = std::env::var("PROFILE").unwrap_or_else(|_| "dist".into());
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-        let deps_dir = workspace_root.join("target").join(&profile).join("deps");
+        // Cargo places this test executable beside its dependency artifacts.
+        // Resolve from the running binary, not a guessed target/profile path:
+        // coverage, --target-dir, and cross-target builds all relocate it.
+        let test_exe = std::env::current_exe().expect("locate acceptance executable");
+        let (deps_dir, fingerprint_dir) = artifact_directories(&test_exe);
         let mut renzora_rlibs: Vec<PathBuf> = std::fs::read_dir(&deps_dir)
             .ok()
             .map(|entries| {
@@ -280,15 +343,6 @@ impl Harness {
         // audio/net and bakes different symbol resolutions in),
         // which would cause rustc to reject the produced cdylib as
         // a duplicate symbol or fail to link at all.
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| manifest_dir.clone());
-        let fingerprint_dir = workspace_root
-            .join("target")
-            .join(std::env::var("PROFILE").unwrap_or_else(|_| "dist".into()))
-            .join(".fingerprint");
         let mut chosen: Option<(PathBuf, std::time::SystemTime)> = None;
         eprintln!("DEBUG: harness filter pass, candidates:");
         for rlib in &renzora_rlibs {

@@ -81,6 +81,12 @@ fresh output directory after addressing the failure.
 
 ## Validation
 
+The loose-plugin acceptance harness locates dependency artifacts relative to
+its running test executable. Coverage output and custom Cargo target directories
+therefore do not need a second ordinary `target/dist` build. Its relocation
+regression compiles and executes a plugin from an alternate test-binary layout.
+Coverage remains enabled; this fixes test artifact discovery, not editor behavior.
+
 ```sh
 cargo check --profile dist -p <crate>
 cargo test --profile dist -p <crate>
