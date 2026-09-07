@@ -1,7 +1,7 @@
 //! 3D Gaussian-splatting distribution plugin.
 //!
-//! Wraps the vendored [`bevy_gaussian_splatting`] renderer as a single
-//! dlopen'd cdylib. Scenes author splats through the serializable
+//! Wraps the vendored [`bevy_gaussian_splatting`] renderer in a statically
+//! linked engine plugin. Scenes author splats through the serializable
 //! [`renzora::GaussianSplat`] contract component (a project-relative `.ply` /
 //! `.gcloud` path plus per-cloud tuning); this plugin resolves it into the
 //! live cloud handle + [`CloudSettings`] the renderer consumes — the same
@@ -9,8 +9,8 @@
 //! use, so the raw asset `Handle` never has to survive the scene serializer.
 //!
 //! Runtime scope on purpose: the same plugin renders splats in the editor
-//! viewport, in-editor play, and the shipped game. Without this plugin in
-//! `plugins/`, `GaussianSplat` components ride along as inert data (the host
+//! viewport, in-editor play, and the shipped game. In builds without this
+//! engine feature, `GaussianSplat` components remain inert data (the host
 //! registers the type, see `renzora_engine`).
 //!
 //! Editor-only wiring (inspector entry, Add-Entity preset) is compile-gated

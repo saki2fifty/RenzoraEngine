@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 03:54 UTC
+
+- Corrected remaining ragdoll and splat-rendering descriptions that referred to retired plugin loading.
+- Brought native-plugin guidance up to date with supported export selection and scripting-free builds.
+
 ## September 7, 2026 — 03:51 UTC
 
 - Fixed audio timeline duration discovery when the audio backend starts late.

@@ -6,7 +6,11 @@ Use an engine plugin when a feature needs real Bevy systems, rendering or editor
 
 Normal builds include the migrated built-in game features. The runtime crate also exposes individual Cargo features: `spline`, `vignette`, `auto_exposure`, `night_stars`, `procedural_tree`, `text3d`, `pool_water` and `clouds`. Disabling a feature omits its runtime plugin installation and optional dependency; the generated plugin list preserves these choices. Rendering features select their rendering requirements automatically.
 
-The lean exporter removes the migrated renderers when 3D rendering is disabled, and removes 3D text when UI is disabled, so those plugins do not silently re-enable excluded subsystems. Individual plugin selection integration remains in progress. Disabling scripting entirely is a separate, currently broken runtime feature combination.
+The lean exporter removes the migrated renderers when 3D rendering is disabled, and removes 3D text when UI is disabled, so those plugins do not silently re-enable excluded subsystems. Scripting-free runtime builds gate the script host helpers along with scripting support; see [Building from Source](../setup/building-from-source.md) for feature-reduced build checks.
+
+Cloth, ragdoll physics and Gaussian-splat rendering are also statically linked
+engine features installed by generated runtime wiring when included in the build.
+They are not Bevy DLLs discovered in the `plugins/` folder.
 
 The export Plugins tab lists these eight features as **Built-in runtime** choices, separately from plugin files. Export presets save both lists and migrate older native-plugin selections. The exporter writes `builtin_runtime_plugins` into the packed project configuration for both client and server. Game startup uses that list instead of local editor enable preferences; an empty list disables all eight. Missing fields retain the old behavior, and editor sessions ignore this game-only selection.
 
