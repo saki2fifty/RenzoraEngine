@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,14 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleasePackages(unittest.TestCase):
-    def run_packager(self, root, tag="r1-alpha7-nightly-fixture", commit="fixture-commit"):
+    def run_packager(self, root, tag="r1-alpha7-nightly-fixture", commit="fixture-commit", env=None):
         script = root / "runner/scripts/package-release.sh"
         script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "scripts/package-release.sh", script)
         return subprocess.run(
             ["bash", str(script), str(root / "artifacts"), str(root / "out"),
              tag, commit],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, env=env,
         )
 
     def package(self, root, platforms=1):
@@ -56,6 +57,32 @@ class ReleasePackages(unittest.TestCase):
             self.assertEqual(metadata["tag"], tag)
             self.assertEqual(metadata["version"], tag)
             self.assertEqual(metadata["commit"], commit)
+
+    def test_source_archive_failure_does_not_emit_success_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "artifacts/job/windows-x64"
+            staged.mkdir(parents=True)
+            (staged / "renzora.exe").write_text("fixture")
+            shim = root / "bin/git"
+            shim.parent.mkdir()
+            # Simulate a checkout with a resolvable commit, then an I/O failure
+            # during archiving. No real repository or network is involved.
+            shim.write_text(
+                "#!/bin/sh\n"
+                'case "$3" in\n'
+                'rev-parse) echo 0123456789012345678901234567890123456789; exit 0;;\n'
+                'archive) exit 1;;\n'
+                '*) exit 2;;\n'
+                'esac\n'
+            )
+            shim.chmod(0o755)
+            env = dict(os.environ, PATH=str(shim.parent) + os.pathsep + os.environ["PATH"])
+            result = self.run_packager(root, env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("git archive failed", result.stderr)
+            self.assertFalse((root / "out/manifest.json").exists())
+            self.assertFalse((root / "out/SHA256SUMS").exists())
 
     def test_source_archive_uses_requested_commit_not_head_or_dirty_files(self):
         with tempfile.TemporaryDirectory() as directory:

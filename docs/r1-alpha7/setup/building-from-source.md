@@ -74,6 +74,11 @@ uses HEAD. Packaging does not fetch missing history. Outside a checkout, source
 archiving remains unavailable. Manifest text is JSON-encoded, including quotes
 and backslashes in metadata.
 
+If source archiving fails inside a checkout, packaging fails rather than
+silently omitting the source download. It does not emit the final manifest or
+checksum list. Earlier platform ZIPs may remain for diagnosis; retry with a
+fresh output directory after addressing the failure.
+
 ## Validation
 
 ```sh

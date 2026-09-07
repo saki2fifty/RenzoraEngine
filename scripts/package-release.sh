@@ -381,8 +381,9 @@ if [ -n "$SOURCE_COMMIT" ]; then
         ':(exclude)assets/previews'; then
         record "$src_asset" all source
     else
-        echo "WARN: git archive failed — publishing without the engine source"
+        echo "ERROR: git archive failed — release packaging aborted" >&2
         rm -f "$src_asset"
+        exit 1
     fi
 else
     echo "WARN: not a git checkout — publishing without the engine source"

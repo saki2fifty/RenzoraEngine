@@ -8,6 +8,7 @@ This page gives an overview of changes made on this fork. The newest changes are
 - Linux folder-based packages now leave out retired SDK files and engine libraries while keeping current plugins and the source SDK.
 - Incomplete runtime outputs now stop packaging before any platform archive is created, including missing web runtime files.
 - Source downloads now use the commit recorded in release metadata, and metadata safely handles special characters.
+- A failed source archive now stops release packaging instead of silently dropping the source download.
 
 ## September 7, 2026 — 16:50 UTC
 
