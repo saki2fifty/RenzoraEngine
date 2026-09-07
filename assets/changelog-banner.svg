@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="250" viewBox="0 0 960 250" role="img" aria-labelledby="title description">
+  <title id="title">What's new in this fork?</title>
+  <desc id="description">Explore the latest improvements, fixes, and updates. View the changelog, newest changes first.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#111c32"/>
+      <stop offset="1" stop-color="#182b45"/>
+    </linearGradient>
+    <linearGradient id="accent">
+      <stop stop-color="#64e4d0"/>
+      <stop offset="1" stop-color="#72b9ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="958" height="248" rx="20" fill="url(#background)" stroke="#36516c" stroke-width="2"/>
+  <rect x="30" y="36" width="5" height="176" rx="2.5" fill="url(#accent)"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="58" y="53" fill="#80e8d9" font-size="13" font-weight="700" letter-spacing="2.5">FORK CHANGELOG</text>
+    <text x="56" y="108" fill="#f7fbff" font-size="43" font-weight="700">What's new in this fork?</text>
+    <text x="58" y="143" fill="#c7d6e8" font-size="19">Improvements, fixes, and updates — all in one place.</text>
+    <rect x="58" y="171" width="207" height="44" rx="9" fill="url(#accent)"/>
+    <text x="77" y="199" fill="#102338" font-size="17" font-weight="700">VIEW CHANGELOG</text>
+    <path d="M237 193h12m-5-5 5 5-5 5" fill="none" stroke="#102338" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="283" y="199" fill="#a9bed4" font-size="15">Newest changes first</text>
+  </g>
+  <g fill="none" stroke="#72b9ff" stroke-width="2" opacity="0.45">
+    <path d="M781 67v116"/>
+    <path d="M796 78h93m-93 52h69m-69 52h93"/>
+    <circle cx="781" cy="78" r="7" fill="#172840"/>
+    <circle cx="781" cy="130" r="7" fill="#172840"/>
+    <circle cx="781" cy="182" r="7" fill="#172840"/>
+  </g>
+  <circle cx="781" cy="78" r="4" fill="#64e4d0"/>
+</svg>

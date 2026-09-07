@@ -2,6 +2,10 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 15:48 UTC
+
+- Added a prominent, clickable changelog banner at the top of the README.
+
 ## September 7, 2026 — 15:43 UTC
 
 - Made the changelog easier to find with a short introduction and link at the very top of the README.

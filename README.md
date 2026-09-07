@@ -1,4 +1,4 @@
-See what's changed in this fork, including improvements, fixes, and updates. [View the changelog](CHANGELOG.md), with the newest changes listed first.
+[![What's new in this fork? Improvements, fixes, and updates. View the changelog, newest changes first.](assets/changelog-banner.svg)](CHANGELOG.md)
 
 ---
 
