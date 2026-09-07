@@ -2,6 +2,11 @@
 
 This page gives a plain-English overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 7, 2026 — 03:38 UTC
+
+- Avoided unnecessary cloth wind updates while preserving live wind changes and additional forces.
+- Corrected cloth documentation to describe its current built-in engine integration.
+
 ## September 7, 2026 — 00:01 UTC
 
 - Removed unused UI-helper warnings from lean builds while preserving full markup UI support.

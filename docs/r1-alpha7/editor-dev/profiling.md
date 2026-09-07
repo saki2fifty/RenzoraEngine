@@ -795,6 +795,12 @@ same-address re-adoption, failed-send retries and release/re-adoption.
 
 ## Loading snapshot publication
 
+Cloth's world-wind bridge compares the effective velocity before writing its
+owned force slot. Identical wind does not mark the force resource changed;
+gust changes, missing slots and external slot replacements still synchronize.
+Additional authored force slots remain untouched. This does not pause cloth
+simulation or establish a measured FPS gain.
+
 Asset and scene-loading bridges compare their complete public snapshots before
 writing. Unchanged snapshots do not publish resource changes. Asset elapsed time
 still advances after completion as before, so those clock changes still publish;
