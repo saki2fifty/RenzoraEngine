@@ -67,6 +67,13 @@ runtime executable with the expected filename (`renzora.exe` on Windows,
 `renzora-runtime_bg.wasm`. These checks catch incomplete staging; they do not
 verify executable architecture, launch compatibility, or full editor readiness.
 
+When packaging from a Git checkout, the supplied commit must resolve locally.
+The source archive uses that resolved revision, not the current working tree or
+an unrelated HEAD; the manifest records its full commit ID. Omitting the commit
+uses HEAD. Packaging does not fetch missing history. Outside a checkout, source
+archiving remains unavailable. Manifest text is JSON-encoded, including quotes
+and backslashes in metadata.
+
 ## Validation
 
 ```sh

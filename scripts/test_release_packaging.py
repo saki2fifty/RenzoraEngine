@@ -13,13 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleasePackages(unittest.TestCase):
-    def run_packager(self, root):
+    def run_packager(self, root, tag="r1-alpha7-nightly-fixture", commit="fixture-commit"):
         script = root / "runner/scripts/package-release.sh"
-        script.parent.mkdir(parents=True)
+        script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "scripts/package-release.sh", script)
         return subprocess.run(
             ["bash", str(script), str(root / "artifacts"), str(root / "out"),
-             "r1-alpha7-nightly-fixture", "fixture-commit"],
+             tag, commit],
             capture_output=True, text=True, timeout=30,
         )
 
@@ -41,6 +41,61 @@ class ReleasePackages(unittest.TestCase):
             self.assertEqual(row["sha256"], digest)
             self.assertEqual(sums[row["name"]], digest)
         return out
+
+    def test_metadata_is_json_encoded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "artifacts/job/windows-x64"
+            staged.mkdir(parents=True)
+            (staged / "renzora.exe").write_text("fixture")
+            tag = 'r1-quote"backslash\\newline\n'
+            commit = 'fixture"\\\n'
+            result = self.run_packager(root, tag=tag, commit=commit)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            metadata = json.loads((root / "out/manifest.json").read_text())
+            self.assertEqual(metadata["tag"], tag)
+            self.assertEqual(metadata["version"], tag)
+            self.assertEqual(metadata["commit"], commit)
+
+    def test_source_archive_uses_requested_commit_not_head_or_dirty_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "runner"
+            repo.mkdir()
+
+            def git(*args):
+                return subprocess.check_output(
+                    ["git", "-C", str(repo), "-c", "user.name=Fixture",
+                     "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", *args],
+                    text=True, stderr=subprocess.DEVNULL,
+                ).strip()
+
+            git("init")
+            source = repo / "source.txt"
+            source.write_text("requested revision")
+            git("add", "source.txt")
+            git("commit", "-m", "fixture one")
+            first = git("rev-parse", "HEAD")
+            source.write_text("later revision")
+            git("commit", "-am", "fixture two")
+            source.write_text("dirty file")
+            staged = root / "artifacts/job/windows-x64"
+            staged.mkdir(parents=True)
+            (staged / "renzora.exe").write_text("fixture")
+            invalid = self.run_packager(root, commit="missing-revision")
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("source commit is not available locally", invalid.stderr)
+            self.assertEqual(list((root / "out").iterdir()), [])
+            result = self.run_packager(root, commit=first)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with zipfile.ZipFile(root / "out/engine-source.zip") as archive:
+                self.assertEqual(archive.read("source.txt"), b"requested revision")
+            metadata = json.loads((root / "out/manifest.json").read_text())
+            self.assertEqual(metadata["commit"], first)
+            row = next(row for row in metadata["assets"] if row["kind"] == "source")
+            data = (root / "out" / row["name"]).read_bytes()
+            self.assertEqual(row["sha256"], hashlib.sha256(data).hexdigest())
+            self.assertEqual(row["size"], len(data))
 
     def test_existing_output_is_rejected_without_modifying_it(self):
         for name in ("old.zip", ".hidden", "manifest.json"):

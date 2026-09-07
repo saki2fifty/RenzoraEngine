@@ -68,6 +68,18 @@ fi
 VERSION="${TAG%%-nightly-*}"
 BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# Resolve once before creating packages so the source archive and manifest
+# cannot silently refer to different revisions. Never fetch missing history.
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SOURCE_COMMIT=""
+if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if ! SOURCE_COMMIT=$(git -C "$REPO_ROOT" rev-parse --verify --end-of-options "${COMMIT:-HEAD}^{commit}" 2>/dev/null); then
+        echo "ERROR: source commit is not available locally: $COMMIT" >&2
+        exit 1
+    fi
+    COMMIT="$SOURCE_COMMIT"
+fi
+
 # Platform dirs we know how to package, in the order they appear in the
 # manifest. Anything else found under <artifacts-dir> is reported and skipped
 # rather than silently dropped.
@@ -336,8 +348,7 @@ done
 # assets are still valid, and lean builds simply keep needing a checkout.
 # Resolved from this script's own location rather than the working directory,
 # which the caller sets to wherever the artifacts are.
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+if [ -n "$SOURCE_COMMIT" ]; then
     echo "── engine source"
     src_asset="$OUT_DIR/engine-source.zip"
     # Trimmed to what a lean build actually compiles. Measured on r1-alpha7 the
@@ -362,7 +373,7 @@ if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     # Verify with `unzip -l` after changing this list: a missing compile input
     # fails loudly, but a missing RUNTIME asset only shows up in the exported
     # game, long after anyone would connect it to this line.
-    if git -C "$REPO_ROOT" archive --format=zip -o "$src_asset" HEAD -- . \
+    if git -C "$REPO_ROOT" archive --format=zip -o "$src_asset" "$SOURCE_COMMIT" -- . \
         ':(exclude)templates' \
         ':(exclude)docs' \
         ':(exclude)tools' \
@@ -381,21 +392,15 @@ fi
 # The editor fetches this by its deterministic download URL, so it can resolve
 # and checksum a template with ONE unauthenticated request — no GitHub API call,
 # no 60-requests-per-hour rate limit to trip over on a shared network.
-{
-    printf '{\n'
-    printf '  "tag": "%s",\n' "$TAG"
-    printf '  "version": "%s",\n' "$VERSION"
-    printf '  "commit": "%s",\n' "$COMMIT"
-    printf '  "built_at": "%s",\n' "$BUILT_AT"
-    printf '  "assets": [\n'
-    for i in "${!MANIFEST_ROWS[@]}"; do
-        printf '    %s' "${MANIFEST_ROWS[$i]}"
-        [ "$i" -lt $(( ${#MANIFEST_ROWS[@]} - 1 )) ] && printf ','
-        printf '\n'
-    done
-    printf '  ]\n'
-    printf '}\n'
-} > "$OUT_DIR/manifest.json"
+# Metadata may contain quotes or backslashes. Encode it rather than building
+# JSON with printf; asset rows contain only fixed platform names and digests.
+python3 -c '
+import json, sys
+tag, version, commit, built_at = sys.argv[1:5]
+json.dump(dict(tag=tag, version=version, commit=commit, built_at=built_at,
+               assets=[json.loads(row) for row in sys.argv[5:]]), sys.stdout, indent=2)
+print()
+' "$TAG" "$VERSION" "$COMMIT" "$BUILT_AT" "${MANIFEST_ROWS[@]}" > "$OUT_DIR/manifest.json"
 
 ( cd "$OUT_DIR" && sha256sum ./*.zip > SHA256SUMS )
 
