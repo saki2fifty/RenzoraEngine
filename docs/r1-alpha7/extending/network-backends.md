@@ -121,6 +121,14 @@ blocking there waits for something that cannot happen until you return. You get
 `Error::NoPump` after two seconds rather than a hang — but the fix is to spawn a
 thread, or use the `HttpInbox` pattern in `renzora_scripting`.
 
+When the watchdog ends a blocking or streaming request, the caller's pending
+storage is released. Requests still waiting for the pump are removed rather than
+sent later. For requests already handed over, the pump asks the backend to cancel
+when frames resume, if it supports `Caps::CANCEL`. Cancellation cannot undo a
+request already processed by the server; a backend without cancellation may
+finish the transfer, but late responses are discarded. Dropping an unfinished
+stream uses the same cleanup. Completed requests are not cancelled.
+
 ## Writing one
 
 ```rust

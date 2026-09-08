@@ -2,6 +2,12 @@
 
 This page gives an overview of changes made on this fork. The newest changes are always listed first. Times are recorded in UTC.
 
+## September 8, 2026 — 00:37 UTC
+
+- HTTP requests abandoned after a stalled frame loop now release pending storage instead of remaining queued to run later.
+- Unfinished downloads request cancellation where supported; successful replies and existing request APIs are unchanged.
+- Fixed a race that could leave failed requests queued when the HTTP backend disappears.
+
 ## September 7, 2026 — 23:38 UTC
 
 - Invalid multiplayer addresses no longer connect to localhost; clients now detect lost connections and reject premature game messages.

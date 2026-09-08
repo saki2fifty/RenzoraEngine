@@ -316,7 +316,7 @@ impl Chunk {
 /// it got and then stops, which is indistinguishable from success until you ask.
 /// Dropping it cancels the request.
 pub struct Stream {
-    tag: u64,
+    request: PendingRequest,
     events: Receiver<Event>,
     status: u16,
     error: Option<Error>,
@@ -358,6 +358,7 @@ impl Iterator for Stream {
         let event = match wait_for(&self.events) {
             Ok(event) => event,
             Err(e) => {
+                self.request.cancel();
                 self.done = true;
                 self.error = Some(e);
                 return None;
@@ -395,12 +396,21 @@ impl Iterator for Stream {
     }
 }
 
-impl Drop for Stream {
+// The caller owns cleanup, including early returns from the watchdog. A
+// terminal delivery already removed its waiter, so cleanup then does nothing.
+struct PendingRequest {
+    tag: u64,
+}
+
+impl PendingRequest {
+    fn cancel(&self) {
+        shared().abandon(self.tag);
+    }
+}
+
+impl Drop for PendingRequest {
     fn drop(&mut self) {
-        shared().forget(self.tag);
-        if !self.done {
-            shared().cancel(self.tag);
-        }
+        self.cancel();
     }
 }
 
@@ -454,10 +464,10 @@ impl Shared {
     fn submit(&self, request: Request, stream: bool) -> (u64, Receiver<Event>) {
         let tag = self.next_tag.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
-        if let Ok(mut waiters) = self.waiters.lock() {
+        if let (Ok(mut waiters), Ok(mut queue)) = (self.waiters.lock(), self.queue.lock()) {
+            // Keep registration and queueing atomic with fail_all. Otherwise a
+            // backend loss can fail the waiter but leave its request to start.
             waiters.insert(tag, tx);
-        }
-        if let Ok(mut queue) = self.queue.lock() {
             queue.push(Submission {
                 request: renzora_plugin::net::Request {
                     tag,
@@ -519,12 +529,14 @@ impl Shared {
     /// mid-transfer. Without this, every parked thread would wait out its full
     /// timeout for an answer that can no longer come from anywhere.
     pub fn fail_all(&self, reason: &str) {
-        if let Ok(mut queue) = self.queue.lock() {
-            queue.clear();
-        }
+        // Same lock order as submit: a concurrent submission belongs wholly
+        // before or after this failure, never half on either side.
         let Ok(mut waiters) = self.waiters.lock() else {
             return;
         };
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.clear();
+        }
         for (tag, tx) in waiters.drain() {
             let _ = tx.send(Event {
                 tag,
@@ -536,15 +548,24 @@ impl Shared {
         }
     }
 
-    /// Stop expecting events for `tag`.
-    fn forget(&self, tag: u64) {
-        if let Ok(mut waiters) = self.waiters.lock() {
-            waiters.remove(&tag);
+    /// Release an abandoned caller's storage and cancel any started transfer.
+    fn abandon(&self, tag: u64) {
+        let active = self
+            .waiters
+            .lock()
+            .map(|mut waiters| waiters.remove(&tag).is_some())
+            .unwrap_or(false);
+        if !active {
+            return;
         }
-    }
-
-    /// Ask the backend to abandon `tag`.
-    fn cancel(&self, tag: u64) {
+        // Remove an unstarted request locally so it cannot fire later when
+        // frames resume. If the pump already took it, its Start precedes Cancel.
+        if let Ok(mut queue) = self.queue.lock() {
+            if let Some(index) = queue.iter().position(|s| s.request.tag == tag) {
+                queue.remove(index);
+                return;
+            }
+        }
         if let Ok(mut cancels) = self.cancels.lock() {
             cancels.push(tag);
         }
@@ -629,7 +650,8 @@ pub fn fetch(request: Request) -> Result<Response, Error> {
     if let Some(e) = request.bad_body {
         return Err(Error::Decode(format!("failed to encode request body: {e}")));
     }
-    let (_, events) = shared().submit(request, false);
+    let (tag, events) = shared().submit(request, false);
+    let _request = PendingRequest { tag };
     let mut body = Vec::new();
     let mut status = 0u16;
     let mut headers = Vec::new();
@@ -672,7 +694,7 @@ pub fn fetch_stream(request: Request) -> Result<Stream, Error> {
     }
     let (tag, events) = shared().submit(request, true);
     Ok(Stream {
-        tag,
+        request: PendingRequest { tag },
         events,
         status: 0,
         error: None,
@@ -810,6 +832,7 @@ mod tests {
     #[test]
     fn a_request_with_no_frame_loop_reports_it_rather_than_hanging() {
         let _guard = exclusive();
+        assert_idle();
         let started = std::time::Instant::now();
         let err = fetch(Request::get("https://example.com/never")).unwrap_err();
 
@@ -817,5 +840,218 @@ mod tests {
         // Comfortably under the 60 s default request timeout, which is the
         // failure mode this replaces.
         assert!(started.elapsed() < Duration::from_secs(10));
+        assert_idle();
+    }
+
+    fn assert_idle() {
+        assert!(shared().waiters.lock().unwrap().is_empty());
+        assert!(shared().queue.lock().unwrap().is_empty());
+        assert!(shared().cancels.lock().unwrap().is_empty());
+    }
+
+    fn take_worker_submission() -> Submission {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut queued = shared().take_queued();
+            if !queued.is_empty() {
+                assert_eq!(queued.len(), 1);
+                return queued.pop().unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not submit"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn blocking_watchdog_cancels_a_request_already_taken_by_the_pump() {
+        let _guard = exclusive();
+        assert_idle();
+        let worker = std::thread::spawn(|| Request::get("https://example.com/stalled").send());
+        let submission = take_worker_submission();
+        assert_eq!(worker.join().unwrap().unwrap_err(), Error::NoPump);
+        assert_eq!(shared().take_cancels(), [submission.request.tag]);
+        assert_idle();
+    }
+
+    #[test]
+    fn blocking_terminal_events_release_storage_without_cancellation() {
+        let _guard = exclusive();
+        assert_idle();
+        for kind in [EventKind::Response, EventKind::End, EventKind::Error] {
+            let worker = std::thread::spawn(|| Request::get("https://example.com/reply").send());
+            let tag = take_worker_submission().request.tag;
+            shared().deliver(Event {
+                tag,
+                kind: EventKind::Chunk,
+                status: 200,
+                headers: Vec::new(),
+                body: b"chunk".to_vec(),
+            });
+            shared().deliver(Event {
+                tag,
+                kind,
+                status: 200,
+                headers: Vec::new(),
+                body: b"result".to_vec(),
+            });
+            let result = worker.join().unwrap();
+            match kind {
+                EventKind::Response => assert_eq!(result.unwrap().body, b"result"),
+                EventKind::End => assert_eq!(result.unwrap().body, b"chunk"),
+                EventKind::Error => {
+                    assert_eq!(result.unwrap_err(), Error::Transport("result".into()));
+                }
+                _ => unreachable!(),
+            }
+            assert_idle();
+        }
+    }
+
+    #[test]
+    fn dropping_an_unstarted_stream_removes_only_its_queued_body() {
+        let _guard = exclusive();
+        assert_idle();
+        let first = Request::post("https://example.com/first")
+            .body("application/octet-stream", vec![42; 1024])
+            .send_stream()
+            .unwrap();
+        let second = Request::get("https://example.com/second")
+            .send_stream()
+            .unwrap();
+        drop(first);
+        {
+            let queue = shared().queue.lock().unwrap();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].request.tag, second.request.tag);
+        }
+        assert_eq!(shared().waiters.lock().unwrap().len(), 1);
+        assert!(shared().take_cancels().is_empty());
+        drop(second);
+        assert_idle();
+    }
+
+    #[test]
+    fn a_started_stream_cancels_once_and_ignores_late_events() {
+        let _guard = exclusive();
+        assert_idle();
+        let stream = Request::get("https://example.com/started")
+            .send_stream()
+            .unwrap();
+        let tag = stream.request.tag;
+        assert_eq!(shared().take_queued().len(), 1);
+        stream.request.cancel();
+        drop(stream);
+        assert_eq!(shared().take_cancels(), [tag]);
+        shared().deliver(Event {
+            tag,
+            kind: EventKind::Chunk,
+            status: 200,
+            headers: Vec::new(),
+            body: vec![1, 2, 3],
+        });
+        assert_idle();
+    }
+
+    #[test]
+    fn streaming_watchdog_cleans_up_before_the_stream_is_dropped() {
+        let _guard = exclusive();
+        assert_idle();
+        let mut stream = Request::get("https://example.com/stalled")
+            .send_stream()
+            .unwrap();
+        let tag = stream.request.tag;
+        assert_eq!(shared().take_queued().len(), 1);
+        assert!(stream.next().is_none());
+        assert_eq!(stream.error(), Some(&Error::NoPump));
+        assert_eq!(shared().take_cancels(), [tag]);
+        assert_idle();
+        assert!(stream.next().is_none());
+        drop(stream);
+        assert_idle();
+    }
+
+    #[test]
+    fn terminal_stream_events_do_not_generate_cancellations() {
+        let _guard = exclusive();
+        assert_idle();
+        for kind in [EventKind::Response, EventKind::End, EventKind::Error] {
+            let mut stream = Request::get("https://example.com/finished")
+                .send_stream()
+                .unwrap();
+            let tag = stream.request.tag;
+            assert_eq!(shared().take_queued().len(), 1);
+            shared().deliver(Event {
+                tag,
+                kind,
+                status: 200,
+                headers: Vec::new(),
+                body: b"result".to_vec(),
+            });
+            let chunk = stream.next();
+            assert_eq!(chunk.is_some(), kind == EventKind::Response);
+            assert_eq!(stream.error().is_some(), kind == EventKind::Error);
+            drop(stream);
+            assert_idle();
+        }
+    }
+
+    #[test]
+    fn dropping_after_backend_failure_does_not_queue_a_cancel() {
+        let _guard = exclusive();
+        assert_idle();
+        let mut stream = Request::get("https://example.com/unloaded")
+            .send_stream()
+            .unwrap();
+        shared().fail_all("backend unloaded");
+        assert!(stream.next().is_none());
+        assert_eq!(
+            stream.error(),
+            Some(&Error::Transport("backend unloaded".into()))
+        );
+        drop(stream);
+        assert_idle();
+    }
+
+    #[test]
+    fn concurrent_backend_failure_and_submission_keep_queue_and_waiter_together() {
+        let _guard = exclusive();
+        assert_idle();
+        for _ in 0..128 {
+            let start = std::sync::Barrier::new(2);
+            let (tag, events) = std::thread::scope(|scope| {
+                let submit = scope.spawn(|| {
+                    start.wait();
+                    shared().submit(Request::get("https://example.com/racing"), false)
+                });
+                let fail = scope.spawn(|| {
+                    start.wait();
+                    shared().fail_all("backend unloaded");
+                });
+                fail.join().unwrap();
+                submit.join().unwrap()
+            });
+            match events.try_recv() {
+                Ok(event) => {
+                    assert_eq!(event.tag, tag);
+                    assert_eq!(event.kind, EventKind::Error);
+                    assert_idle();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // This submission followed the failure and must remain
+                    // fully registered, rather than queued with a dead waiter.
+                    assert!(shared().waiters.lock().unwrap().contains_key(&tag));
+                    let queue = shared().queue.lock().unwrap();
+                    assert_eq!(queue.len(), 1);
+                    assert_eq!(queue[0].request.tag, tag);
+                    drop(queue);
+                    shared().abandon(tag);
+                }
+                Err(e) => panic!("request disconnected without its failure event: {e}"),
+            }
+            assert_idle();
+        }
     }
 }
